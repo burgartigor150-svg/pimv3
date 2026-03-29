@@ -9,6 +9,7 @@ export default function SelfImproveConsolePage() {
   const [sku, setSku] = useState('');
   const [taskId, setTaskId] = useState('');
   const [errorExcerpt, setErrorExcerpt] = useState('');
+  const [githubStatus, setGithubStatus] = useState<any>(null);
 
   const loadIncidents = async () => {
     setLoading(true);
@@ -22,6 +23,7 @@ export default function SelfImproveConsolePage() {
 
   useEffect(() => {
     loadIncidents();
+    api.get('/github/automation/status').then((r) => setGithubStatus(r.data?.github || null)).catch(() => null);
   }, []);
 
   const openIncident = async (id: string) => {
@@ -47,6 +49,9 @@ export default function SelfImproveConsolePage() {
   return (
     <div className="space-y-5">
       <h1 className="text-2xl font-bold">Self-Improve консоль</h1>
+      <div className="text-xs text-slate-600 dark:text-slate-300">
+        GitHub automation: {githubStatus?.ready ? 'ready' : 'not ready'} | repo: {githubStatus?.repo || '-'}
+      </div>
 
       <div className="bg-white dark:bg-slate-800 border rounded-lg p-4 space-y-3">
         <h2 className="font-semibold">Ручной trigger инцидента</h2>
@@ -92,6 +97,7 @@ export default function SelfImproveConsolePage() {
               <p className="text-sm"><b>Status:</b> {selected.status}</p>
               <p className="text-sm"><b>Stage:</b> {selected.stage}</p>
               <p className="text-sm"><b>Branch:</b> {selected.branch || '-'}</p>
+              <p className="text-sm"><b>PR:</b> {selected.github_pr || '-'}</p>
               <div className="flex gap-2">
                 <button onClick={() => rerun(selected.incident_id)} className="px-3 py-1 rounded bg-emerald-600 text-white text-sm">Run pipeline</button>
               </div>
