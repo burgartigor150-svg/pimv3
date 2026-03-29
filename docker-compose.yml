@@ -1,0 +1,17 @@
+version: '3.8'
+
+services:
+  db:
+    image: postgres:15-alpine
+    container_name: pim_db
+    environment:
+      POSTGRES_USER: pim_user
+      POSTGRES_PASSWORD: pim_pass
+      POSTGRES_DB: pim_db
+    ports:
+      - "5440:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+volumes:
+  postgres_data:
