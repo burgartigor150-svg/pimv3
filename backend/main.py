@@ -68,6 +68,7 @@ from backend.services.autonomous_improve import (
     list_incidents as list_self_improve_incidents,
     record_failure_and_maybe_trigger,
 )
+from backend.services.github_automation import github_config_status
 
 log = logging.getLogger("pim")
 
@@ -847,6 +848,14 @@ async def github_connect_execute(
         raise HTTPException(403, "approval is not approved")
     # Hard gate done. Real external GitHub linking is intentionally explicit and controlled.
     return {"ok": True, "status": "approved_to_connect", "approval": approval}
+
+
+@app.get("/api/v1/github/automation/status")
+async def github_automation_status(
+    current_user: models.User = Depends(get_current_user),
+):
+    _require_admin(current_user)
+    return {"ok": True, "github": github_config_status()}
 
 
 @app.post("/api/v1/agents/self-rewrite/run")

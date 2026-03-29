@@ -10,7 +10,9 @@ import redis
 
 from backend.services.agent_memory import get_agent_memory
 from backend.services.code_patch_agent import generate_code_patch_proposal
-from backend.services.git_branch_manager import commit_all_changes, create_incident_branch
+from backend.services.git_branch_manager import commit_all_changes, create_incident_branch, push_branch
+from backend.services.github_automation import create_pull_request, merge_pull_request, github_config_status
+from backend.services.deploy_trigger import trigger_deploy
 from backend.services.kpi_guard import compute_task_kpis, should_auto_stop_self_rewrite
 from backend.services.quality_gate import run_quality_gate
 from backend.services.rollback_guard import backup_files
@@ -254,15 +256,93 @@ async def run_incident_pipeline(
     commit = commit_all_changes(workspace_root, f"auto: self-improve incident {incident_id}")
     _set_incident(incident_id, {"git_commit": commit, "updated_at_ts": int(time.time())})
     _append_incident_log(incident_id, f"Local commit result: ok={commit.get('ok')}")
+    if not commit.get("ok"):
+        _set_incident(
+            incident_id,
+            {"status": "failed", "stage": "git_commit_failed", "updated_at_ts": int(time.time())},
+        )
+        return {"ok": False, "incident_id": incident_id, "error": "git_commit_failed", "commit": commit}
 
-    _set_incident(incident_id, {"status": "completed", "stage": "completed", "updated_at_ts": int(time.time())})
+    branch = str(br.get("branch") or "")
+    if branch:
+        _set_incident(incident_id, {"stage": "git_push", "updated_at_ts": int(time.time())})
+        push = push_branch(workspace_root, branch, remote="origin")
+        _set_incident(incident_id, {"git_push": push})
+        _append_incident_log(incident_id, f"Git push result: ok={push.get('ok')}")
+    else:
+        push = {"ok": False, "error": "branch_missing"}
+
+    gh_status = github_config_status()
+    _set_incident(incident_id, {"github_status": gh_status})
+    pr_obj: Dict[str, Any] = {"ok": False, "error": "not_attempted"}
+    merge_obj: Dict[str, Any] = {"ok": False, "error": "not_attempted"}
+    deploy_obj: Dict[str, Any] = {"ok": False, "error": "not_attempted"}
+    if push.get("ok") and gh_status.get("ready"):
+        _set_incident(incident_id, {"stage": "github_pr", "updated_at_ts": int(time.time())})
+        pr_obj = await create_pull_request(
+            head_branch=branch,
+            base_branch="main",
+            title=f"auto: self-improve incident {incident_id}",
+            body=f"Auto-generated fix for incident `{incident_id}`",
+        )
+        _set_incident(incident_id, {"github_pr": pr_obj})
+        _append_incident_log(incident_id, f"GitHub PR result: ok={pr_obj.get('ok')}")
+        if pr_obj.get("ok") and pr_obj.get("pr_number"):
+            _set_incident(incident_id, {"stage": "github_merge", "updated_at_ts": int(time.time())})
+            merge_obj = await merge_pull_request(
+                int(pr_obj["pr_number"]),
+                commit_title=f"auto: merge self-improve incident {incident_id}",
+            )
+            _set_incident(incident_id, {"github_merge": merge_obj})
+            _append_incident_log(incident_id, f"GitHub merge result: ok={merge_obj.get('ok')}")
+            if merge_obj.get("ok"):
+                _set_incident(incident_id, {"stage": "deploy_trigger", "updated_at_ts": int(time.time())})
+                deploy_obj = await trigger_deploy(
+                    {
+                        "kind": "self_improve_deploy",
+                        "incident_id": incident_id,
+                        "branch": branch,
+                        "pr_number": int(pr_obj["pr_number"]),
+                    }
+                )
+                _set_incident(incident_id, {"deploy_trigger": deploy_obj})
+                _append_incident_log(incident_id, f"Deploy trigger result: ok={deploy_obj.get('ok')}")
+
+    _set_incident(
+        incident_id,
+        {
+            "status": "completed" if (merge_obj.get("ok") or not gh_status.get("ready")) else "completed_with_manual_promote",
+            "stage": "completed",
+            "updated_at_ts": int(time.time()),
+        },
+    )
     mem = get_agent_memory()
     mem.upsert_knowledge_doc(
         namespace="incidents:self-improve",
         source_uri=f"incident://{incident_id}",
         title=f"Incident {incident_id} completed",
-        content=json.dumps({"incident": incident, "tests": tests, "gate": gate, "commit": commit}, ensure_ascii=False),
+        content=json.dumps(
+            {
+                "incident": incident,
+                "tests": tests,
+                "gate": gate,
+                "commit": commit,
+                "push": push,
+                "pr": pr_obj,
+                "merge": merge_obj,
+                "deploy_trigger": deploy_obj,
+            },
+            ensure_ascii=False,
+        ),
         metadata={"status": "completed"},
     )
-    return {"ok": True, "incident_id": incident_id}
+    return {
+        "ok": True,
+        "incident_id": incident_id,
+        "push": push,
+        "pr": pr_obj,
+        "merge": merge_obj,
+        "deploy_trigger": deploy_obj,
+        "github": gh_status,
+    }
 

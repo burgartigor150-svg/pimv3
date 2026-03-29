@@ -41,3 +41,24 @@ def commit_all_changes(workspace_root: str, message: str) -> Dict[str, Any]:
         return {"ok": False, "error": "git_commit_failed", "detail": commit}
     return {"ok": True, "detail": commit}
 
+
+def get_current_branch(workspace_root: str) -> Dict[str, Any]:
+    if not git_repo_ready(workspace_root):
+        return {"ok": False, "error": "git_repo_not_found", "branch": ""}
+    out = _run(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=workspace_root)
+    if not out["ok"]:
+        return {"ok": False, "error": "git_rev_parse_failed", "detail": out, "branch": ""}
+    return {"ok": True, "branch": (out.get("stdout", "").strip() or "")}
+
+
+def push_branch(workspace_root: str, branch: str, remote: str = "origin") -> Dict[str, Any]:
+    if not git_repo_ready(workspace_root):
+        return {"ok": False, "error": "git_repo_not_found"}
+    b = str(branch or "").strip()
+    if not b:
+        return {"ok": False, "error": "branch_required"}
+    push = _run(["git", "push", "-u", remote, b], cwd=workspace_root)
+    if not push["ok"]:
+        return {"ok": False, "error": "git_push_failed", "detail": push}
+    return {"ok": True, "detail": push}
+
