@@ -111,7 +111,7 @@ async def create_pull_request(
         if not create["ok"] and "already exists" not in (create.get("stderr", "").lower()):
             return {"ok": False, "error": "gh_pr_create_failed", "detail": create}
         view = _run(
-            ["gh", "pr", "view", "--repo", repo, "--head", str(head_branch or ""), "--json", "number,url"],
+            ["gh", "pr", "view", str(head_branch or ""), "--repo", repo, "--json", "number,url"],
             cwd=workspace_root,
         )
         if not view["ok"]:
