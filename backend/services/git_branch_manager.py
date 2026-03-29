@@ -43,6 +43,21 @@ def commit_all_changes(workspace_root: str, message: str) -> Dict[str, Any]:
         ["git", "-c", f"user.name={author_name}", "-c", f"user.email={author_email}", "commit", "-m", message],
         cwd=workspace_root,
     )
+    if (not commit["ok"]) and ("nothing to commit" in (commit.get("stdout", "") + " " + commit.get("stderr", "")).lower()):
+        commit = _run(
+            [
+                "git",
+                "-c",
+                f"user.name={author_name}",
+                "-c",
+                f"user.email={author_email}",
+                "commit",
+                "--allow-empty",
+                "-m",
+                message,
+            ],
+            cwd=workspace_root,
+        )
     if not commit["ok"]:
         return {"ok": False, "error": "git_commit_failed", "detail": commit}
     return {"ok": True, "detail": commit}
