@@ -1,5 +1,5 @@
 import { BrowserRouter as Router, Routes, Route, NavLink } from 'react-router-dom'
-import { Box, Layers, Settings, Home, Users, Store, Share2, Network, Shield, FlaskConical } from 'lucide-react'
+import { Box, Layers, Settings, Home, Users, Store, Share2, Network, Shield, FlaskConical, Bot, MessageSquare } from 'lucide-react'
 import AttributesPage from './pages/AttributesPage'
 import ProductsPage from './pages/ProductsPage'
 import ProductDetailsPage from './pages/ProductDetailsPage'
@@ -11,6 +11,8 @@ import SyndicationPage from './pages/SyndicationPage'
 import AttributeStarMapPage from './pages/AttributeStarMapPage'
 import AdminDialogConsolePage from './pages/AdminDialogConsolePage'
 import SelfImproveConsolePage from './pages/SelfImproveConsolePage'
+import AgentTaskConsolePage from './pages/AgentTaskConsolePage'
+import AgentAssistantPage from './pages/AgentAssistantPage'
 import { AuthProvider } from './context/AuthContext'
 import { ProtectedRoute } from './components/ProtectedRoute'
 import { LoginPage } from './pages/LoginPage'
@@ -92,6 +94,12 @@ function App() {
             <NavLink to="/self-improve-console" className={navLinkClass}>
               <FlaskConical className="w-5 h-5 shrink-0" /> Self-Improve
             </NavLink>
+            <NavLink to="/agent-task-console" className={navLinkClass}>
+              <Bot className="w-5 h-5 shrink-0" /> Agent Task Console
+            </NavLink>
+            <NavLink to="/agent-assistant" className={navLinkClass}>
+              <MessageSquare className="w-5 h-5 shrink-0" /> Ассистент задач
+            </NavLink>
           </nav>
           <p className="mt-auto text-[11px] text-slate-500 dark:text-slate-400 leading-snug border-t border-slate-200 dark:border-slate-700 pt-3">
             Сначала подключите магазины, затем импортируйте товары в каталог. Выгрузка на площадки — из карточки или раздела «Массовая выгрузка».
@@ -114,6 +122,8 @@ function App() {
               <Route path="/settings" element={<SettingsPage />} />
               <Route path="/admin-dialog-console" element={<AdminDialogConsolePage />} />
               <Route path="/self-improve-console" element={<SelfImproveConsolePage />} />
+              <Route path="/agent-task-console" element={<AgentTaskConsolePage />} />
+              <Route path="/agent-assistant" element={<AgentAssistantPage />} />
             </Route>
           </Routes>
         </main>

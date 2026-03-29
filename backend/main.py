@@ -48,6 +48,7 @@ from backend.services.knowledge_hub import (
     list_knowledge,
     search_knowledge,
     bootstrap_qwen_commands_knowledge,
+    bootstrap_project_knowledge,
     ingest_local_markdown_file,
 )
 from backend.services.team_orchestrator import (
@@ -69,10 +70,35 @@ from backend.services.autonomous_improve import (
     record_failure_and_maybe_trigger,
 )
 from backend.services.github_automation import github_config_status
+from backend.services.agent_task_console import (
+    create_agent_task,
+    get_agent_task,
+    list_agent_tasks,
+    run_agent_task,
+    context7_is_connected,
+    set_task_control_state,
+)
+from backend.services.agent_chat import (
+    route_message_with_llm,
+    compose_assistant_reply_with_llm,
+    build_user_reply,
+    build_smalltalk_reply,
+    infer_contextual_task_command_with_llm,
+    load_chat_state,
+    save_chat_state,
+)
+from backend.services.helper_agents import (
+    auto_spawn_helpers_for_task,
+    create_helper_agent,
+    get_helper_agent,
+    list_helper_agents,
+)
 
 log = logging.getLogger("pim")
 
 IMPORT_TASKS: Dict[str, Dict[str, Any]] = {}
+_task_dispatcher_started = False
+_task_launch_redis = redis.Redis.from_url(os.getenv("REDIS_URL", "redis://localhost:6379/0"), decode_responses=True)
 
 
 def _require_admin(user: models.User) -> None:
@@ -100,6 +126,87 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+async def _get_deepseek_key_value() -> str:
+    try:
+        async with AsyncSessionLocal() as db:
+            setting_res = await db.execute(select(models.SystemSettings).where(models.SystemSettings.id == "deepseek_api_key"))
+            setting = setting_res.scalars().first()
+            return setting.value if setting and setting.value else ""
+    except Exception:
+        return ""
+
+
+async def _run_task_job(task_id: str) -> None:
+    lock_key = f"agent_task:launcher:{task_id}"
+    try:
+        ai_key = await _get_deepseek_key_value()
+        await run_agent_task(task_id, ai_key=ai_key)
+    except Exception as e:
+        now = int(time.time())
+        _task_launch_redis.hset(
+            f"agent_task:{task_id}",
+            mapping={
+                "status": "failed",
+                "stage": "failed_runtime",
+                "updated_at_ts": str(now),
+                "result": json.dumps({"error": str(e)}, ensure_ascii=False),
+            },
+        )
+        _task_launch_redis.rpush(f"agent_task:{task_id}:logs", f"[{time.strftime('%H:%M:%S')}] Runtime failure: {e}")
+        _task_launch_redis.ltrim(f"agent_task:{task_id}:logs", -500, -1)
+    finally:
+        try:
+            _task_launch_redis.delete(lock_key)
+        except Exception:
+            pass
+
+
+def _queue_task_for_dispatch(task_id: str) -> None:
+    now = int(time.time())
+    _task_launch_redis.hset(
+        f"agent_task:{task_id}",
+        mapping={
+            "status": "queued",
+            "stage": "queued",
+            "updated_at_ts": str(now),
+        },
+    )
+    _task_launch_redis.rpush(f"agent_task:{task_id}:logs", f"[{time.strftime('%H:%M:%S')}] Queued for autonomous execution")
+    _task_launch_redis.ltrim(f"agent_task:{task_id}:logs", -500, -1)
+    _task_launch_redis.delete(f"agent_task:launcher:{task_id}")
+
+
+async def _agent_task_dispatcher_loop() -> None:
+    while True:
+        try:
+            got = list_agent_tasks(limit=300)
+            tasks = got.get("tasks", []) if isinstance(got, dict) else []
+            for t in tasks:
+                if not isinstance(t, dict):
+                    continue
+                task_id = str(t.get("task_id") or "")
+                status = str(t.get("status") or "").strip().lower()
+                if not task_id or status != "queued":
+                    continue
+                lock_key = f"agent_task:launcher:{task_id}"
+                claimed = _task_launch_redis.set(lock_key, "1", nx=True, ex=60 * 30)
+                if not claimed:
+                    continue
+                asyncio.create_task(_run_task_job(task_id))
+        except Exception:
+            pass
+        await asyncio.sleep(2.0)
+
+
+@app.on_event("startup")
+async def _startup_agent_task_dispatcher() -> None:
+    global _task_dispatcher_started
+    if _task_dispatcher_started:
+        return
+    _task_dispatcher_started = True
+    asyncio.create_task(_agent_task_dispatcher_loop())
 
 
 @app.on_event("startup")
@@ -735,6 +842,326 @@ async def knowledge_bootstrap_core_docs(
     for p in files:
         out.append(ingest_local_markdown_file(namespace="docs:megamarket-api", path=p, title="Megamarket API Docs"))
     return {"ok": True, "items": out}
+
+
+@app.post("/api/v1/knowledge/bootstrap/project-core")
+async def knowledge_bootstrap_project_core(
+    current_user: models.User = Depends(get_current_user),
+):
+    _require_admin(current_user)
+    return bootstrap_project_knowledge(namespace="docs:project-core")
+
+
+@app.post("/api/v1/agent-tasks/create")
+async def agent_task_create(
+    req: schemas.AgentTaskCreateRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    created = create_agent_task(
+        task_type=req.task_type,
+        title=req.title,
+        description=req.description,
+        requested_by=current_user.email,
+        namespace=req.namespace,
+        docs_urls=req.docs_urls,
+        local_paths=req.local_paths,
+        validation_query=req.validation_query,
+        web_query=req.web_query,
+        max_web_results=req.max_web_results,
+    )
+    if req.auto_run and created.get("ok"):
+        task_id = (((created or {}).get("task") or {}).get("task_id") or "")
+        if task_id:
+            _queue_task_for_dispatch(task_id)
+    return created
+
+
+@app.get("/api/v1/agent-tasks")
+async def agent_tasks_list(
+    limit: int = 100,
+    current_user: models.User = Depends(get_current_user),
+):
+    return list_agent_tasks(limit=limit)
+
+
+@app.get("/api/v1/agent-tasks/{task_id}")
+async def agent_task_get(
+    task_id: str,
+    current_user: models.User = Depends(get_current_user),
+):
+    return get_agent_task(task_id)
+
+
+@app.post("/api/v1/agent-tasks/{task_id}/run")
+async def agent_task_run(
+    task_id: str,
+    db: AsyncSession = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    _queue_task_for_dispatch(task_id)
+    return {"ok": True, "task_id": task_id, "status": "queued"}
+
+
+@app.post("/api/v1/agent-tasks/{task_id}/pause")
+async def agent_task_pause(
+    task_id: str,
+    current_user: models.User = Depends(get_current_user),
+):
+    return set_task_control_state(task_id, "paused")
+
+
+@app.post("/api/v1/agent-tasks/{task_id}/resume")
+async def agent_task_resume(
+    task_id: str,
+    current_user: models.User = Depends(get_current_user),
+):
+    return set_task_control_state(task_id, "running")
+
+
+@app.post("/api/v1/agent-chat/message")
+async def agent_chat_message(
+    req: schemas.AgentChatMessageRequest,
+    ai_key: str = Depends(get_deepseek_key),
+    current_user: models.User = Depends(get_current_user),
+):
+    user_id = str(getattr(current_user, "email", "") or "anonymous")
+    state = load_chat_state(user_id)
+    state_history = state.get("history", []) or []
+    client_history = [m.model_dump() for m in (req.history or [])]
+    merged_history = (state_history if state_history else client_history)[-20:]
+    low = str(req.message or "").lower()
+    if any(x in low for x in ["что за проект", "в каком проекте", "видишь файл", "видишь файлы", "видишь проект", "контекст проекта"]):
+        reply = "Да. Я работаю в `pimv3`, вижу проект и могу сразу запускать задачи по коду/интеграциям/UI."
+        history_out = merged_history + [{"role": "user", "content": req.message}, {"role": "assistant", "content": reply}]
+        save_chat_state(user_id, history=history_out, active_task_id=str(state.get("active_task_id") or ""))
+        return {"ok": True, "assistant_reply": reply, "task": {}, "active_task_id": str(state.get("active_task_id") or "")}
+
+    # 1) Contextual auto-start (LLM): if phrase is actionable in context, start immediately.
+    contextual = await infer_contextual_task_command_with_llm(
+        message=req.message,
+        history=merged_history,
+        ai_key=ai_key,
+    )
+    if isinstance(contextual, dict) and str(contextual.get("intent") or "") == "task_create":
+        created = create_agent_task(
+            task_type=str(contextual.get("task_type") or "api-integration"),
+            title=str(contextual.get("title") or (str(req.message or "").strip()[:120] or "Интеграция маркетплейса")),
+            description=str(contextual.get("description") or req.message),
+            requested_by=current_user.email,
+            namespace=str(contextual.get("namespace") or "") or None,
+            docs_urls=contextual.get("docs_urls") or req.docs_urls,
+            validation_query=str(contextual.get("validation_query") or "authorization token create update list"),
+            web_query=str(contextual.get("web_query") or ""),
+            max_web_results=int(contextual.get("max_web_results") or 5),
+        )
+        task_id = (((created or {}).get("task") or {}).get("task_id") or "")
+        if req.auto_run and task_id:
+            _queue_task_for_dispatch(task_id)
+        reply = (
+            "Понял с полуслова и уже запустил выполнение.\n"
+            f"task_id: `{task_id}`\n"
+            "Если понадобятся доступы, пришлю короткий конкретный список."
+        )
+        history_out = merged_history + [
+            {"role": "user", "content": req.message},
+            {"role": "assistant", "content": reply},
+        ]
+        save_chat_state(user_id, history=history_out, active_task_id=task_id)
+        return {
+            "ok": True,
+            "assistant_reply": reply,
+            "task": (created or {}).get("task", {}),
+            "active_task_id": task_id,
+        }
+    # 2) Intent routing (LLM): status/clarify/task.
+
+    inferred = await route_message_with_llm(
+        message=req.message,
+        history=merged_history,
+        ai_key=ai_key,
+    )
+    intent = str(inferred.get("intent") or "clarify")
+    if intent == "smalltalk":
+        llm = await compose_assistant_reply_with_llm(
+            ai_key=ai_key,
+            user_message=req.message,
+            context={"intent": "smalltalk", "action": "no_task_started"},
+        )
+        history_out = merged_history + [
+            {"role": "user", "content": req.message},
+            {"role": "assistant", "content": llm or build_smalltalk_reply(req.message)},
+        ]
+        save_chat_state(user_id, history=history_out, active_task_id=str(state.get("active_task_id") or ""))
+        return {
+            "ok": True,
+            "assistant_reply": llm or build_smalltalk_reply(req.message),
+            "task": {},
+            "active_task_id": str(state.get("active_task_id") or ""),
+        }
+    if bool(inferred.get("requires_clarification")) or intent == "clarify":
+        llm = await compose_assistant_reply_with_llm(
+            ai_key=ai_key,
+            user_message=req.message,
+            context={
+                "intent": "clarify",
+                "clarification_question": inferred.get("clarification_question") or "Уточни, пожалуйста, что именно нужно сделать первым?",
+            },
+        )
+        history_out = merged_history + [
+            {"role": "user", "content": req.message},
+            {"role": "assistant", "content": llm or str(inferred.get("clarification_question") or "Уточни, пожалуйста, цель задачи.")},
+        ]
+        save_chat_state(user_id, history=history_out, active_task_id=str(state.get("active_task_id") or ""))
+        return {
+            "ok": True,
+            "assistant_reply": llm or str(inferred.get("clarification_question") or "Уточни, пожалуйста, цель задачи."),
+            "task": {},
+            "active_task_id": str(state.get("active_task_id") or ""),
+        }
+    if intent == "task_status":
+        task_id = str(inferred.get("task_id") or "").strip()
+        if not task_id:
+            task_id = str(state.get("active_task_id") or "").strip()
+        if (not task_id) and any(x in str(req.message or "").lower() for x in ["изучил", "статус", "готово", "что с задачей", "как там"]):
+            task_id = str(state.get("active_task_id") or "").strip()
+        if not task_id:
+            llm = await compose_assistant_reply_with_llm(
+                ai_key=ai_key,
+                user_message=req.message,
+                context={"intent": "clarify", "clarification_question": "Пришли task_id, чтобы я показал точный статус."},
+            )
+            return {"ok": True, "assistant_reply": llm or "Пришли task_id, чтобы я показал точный статус.", "task": {}, "active_task_id": ""}
+        got = get_agent_task(task_id)
+        llm = await compose_assistant_reply_with_llm(
+            ai_key=ai_key,
+            user_message=req.message,
+            context={"intent": "task_status", "task": got.get("task", {}), "logs_tail": (got.get("logs", []) or [])[-5:]},
+        )
+        history_out = merged_history + [
+            {"role": "user", "content": req.message},
+            {"role": "assistant", "content": llm or f"Статус задачи `{task_id}`: {((got.get('task') or {}).get('status') or 'unknown')}."},
+        ]
+        save_chat_state(user_id, history=history_out, active_task_id=task_id)
+        return {"ok": True, "assistant_reply": llm or f"Статус задачи `{task_id}`: {((got.get('task') or {}).get('status') or 'unknown')}.", "task": got.get("task", {}), "active_task_id": task_id}
+
+    created = create_agent_task(
+        task_type=inferred.get("task_type", "backend"),
+        title=inferred.get("title", "Новая задача агенту"),
+        description=inferred.get("description", req.message),
+        requested_by=current_user.email,
+        namespace=inferred.get("namespace") or None,
+        docs_urls=inferred.get("docs_urls") or [],
+        validation_query=inferred.get("validation_query") or None,
+        web_query=inferred.get("web_query") or None,
+        max_web_results=int(inferred.get("max_web_results") or 5),
+    )
+    if req.auto_run and created.get("ok"):
+        task_id = (((created or {}).get("task") or {}).get("task_id") or "")
+        if task_id:
+            _queue_task_for_dispatch(task_id)
+    task_obj = (created or {}).get("task", {}) if isinstance(created, dict) else {}
+    llm = await compose_assistant_reply_with_llm(
+        ai_key=ai_key,
+        user_message=req.message,
+        context={
+            "intent": "task_create",
+            "task": task_obj,
+            "hint": "Прогресс и логи в Agent Task Console",
+        },
+    )
+    history_out = merged_history + [
+        {"role": "user", "content": req.message},
+        {"role": "assistant", "content": llm or build_user_reply(created)},
+    ]
+    save_chat_state(user_id, history=history_out, active_task_id=str(task_obj.get("task_id") or ""))
+    return {
+        "ok": True,
+        "assistant_reply": llm or build_user_reply(created),
+        "task": task_obj,
+        "active_task_id": str(task_obj.get("task_id") or ""),
+    }
+
+
+@app.get("/api/v1/agent-chat/state")
+async def agent_chat_state(
+    current_user: models.User = Depends(get_current_user),
+):
+    user_id = str(getattr(current_user, "email", "") or "anonymous")
+    state = load_chat_state(user_id)
+    active_task_id = str(state.get("active_task_id") or "")
+    task: Dict[str, Any] = {}
+    if active_task_id:
+        got = get_agent_task(active_task_id)
+        task = got.get("task", {}) if isinstance(got, dict) else {}
+    return {
+        "ok": True,
+        "history": state.get("history", []) or [],
+        "active_task_id": active_task_id,
+        "task": task,
+    }
+
+
+@app.get("/api/v1/agent-tasks-capabilities")
+async def agent_tasks_capabilities(
+    current_user: models.User = Depends(get_current_user),
+):
+    return {
+        "ok": True,
+        "capabilities": {
+            "web_ingest": True,
+            "web_discovery": True,
+            "context7_connected": context7_is_connected(),
+        },
+    }
+
+
+@app.post("/api/v1/helper-agents/create")
+async def helper_agent_create(
+    req: schemas.HelperAgentCreateRequest,
+    current_user: models.User = Depends(get_current_user),
+):
+    return create_helper_agent(
+        name=req.name,
+        role=req.role,
+        goal=req.goal,
+        tools=req.tools,
+        created_by=current_user.email,
+        parent_task_id=req.parent_task_id,
+    )
+
+
+@app.post("/api/v1/helper-agents/auto-spawn")
+async def helper_agents_auto_spawn(
+    task_id: str,
+    task_type: str,
+    title: str = "",
+    description: str = "",
+    current_user: models.User = Depends(get_current_user),
+):
+    return auto_spawn_helpers_for_task(
+        task_type=task_type,
+        task_id=task_id,
+        title=title or task_type,
+        description=description,
+        created_by=current_user.email,
+    )
+
+
+@app.get("/api/v1/helper-agents")
+async def helper_agents_list(
+    limit: int = 200,
+    current_user: models.User = Depends(get_current_user),
+):
+    return list_helper_agents(limit=limit)
+
+
+@app.get("/api/v1/helper-agents/{helper_id}")
+async def helper_agent_get(
+    helper_id: str,
+    current_user: models.User = Depends(get_current_user),
+):
+    return get_helper_agent(helper_id)
 
 
 @app.post("/api/v1/team/plan/create")

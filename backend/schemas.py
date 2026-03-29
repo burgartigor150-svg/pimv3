@@ -235,3 +235,32 @@ class SelfImproveManualTriggerRequest(BaseModel):
 class GithubConnectRequest(BaseModel):
     repo_url: str
     reason: str = ""
+
+
+class AgentTaskCreateRequest(BaseModel):
+    task_type: str = "backend"  # design | backend | api-integration | docs-ingest
+    title: str
+    description: str = ""
+    namespace: Optional[str] = None
+    docs_urls: list[str] = Field(default_factory=list)
+    local_paths: list[str] = Field(default_factory=list)
+    validation_query: Optional[str] = None
+    web_query: Optional[str] = None
+    max_web_results: int = 5
+    requested_by_role: str = "project_manager"
+    auto_run: bool = True
+
+
+class AgentChatMessageRequest(BaseModel):
+    message: str
+    docs_urls: list[str] = Field(default_factory=list)
+    history: list[ChatMessage] = Field(default_factory=list)
+    auto_run: bool = True
+
+
+class HelperAgentCreateRequest(BaseModel):
+    name: str
+    role: str
+    goal: str
+    tools: list[str] = Field(default_factory=list)
+    parent_task_id: str = ""
