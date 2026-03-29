@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import subprocess
 from pathlib import Path
 from typing import Any, Dict, List
@@ -33,10 +34,15 @@ def create_incident_branch(workspace_root: str, incident_id: str) -> Dict[str, A
 def commit_all_changes(workspace_root: str, message: str) -> Dict[str, Any]:
     if not git_repo_ready(workspace_root):
         return {"ok": False, "error": "git_repo_not_found"}
+    author_name = (os.getenv("AUTO_GIT_AUTHOR_NAME", "") or "").strip() or "PIM Auto Agent"
+    author_email = (os.getenv("AUTO_GIT_AUTHOR_EMAIL", "") or "").strip() or "pim-auto@local"
     add = _run(["git", "add", "."], cwd=workspace_root)
     if not add["ok"]:
         return {"ok": False, "error": "git_add_failed", "detail": add}
-    commit = _run(["git", "commit", "-m", message], cwd=workspace_root)
+    commit = _run(
+        ["git", "-c", f"user.name={author_name}", "-c", f"user.email={author_email}", "commit", "-m", message],
+        cwd=workspace_root,
+    )
     if not commit["ok"]:
         return {"ok": False, "error": "git_commit_failed", "detail": commit}
     return {"ok": True, "detail": commit}
