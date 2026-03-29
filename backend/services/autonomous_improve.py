@@ -275,7 +275,7 @@ async def run_incident_pipeline(
     else:
         push = {"ok": False, "error": "branch_missing"}
 
-    gh_status = github_config_status()
+    gh_status = github_config_status(workspace_root)
     _set_incident(incident_id, {"github_status": gh_status})
     pr_obj: Dict[str, Any] = {"ok": False, "error": "not_attempted"}
     merge_obj: Dict[str, Any] = {"ok": False, "error": "not_attempted"}
@@ -287,6 +287,7 @@ async def run_incident_pipeline(
             base_branch="main",
             title=f"auto: self-improve incident {incident_id}",
             body=f"Auto-generated fix for incident `{incident_id}`",
+            workspace_root=workspace_root,
         )
         _set_incident(incident_id, {"github_pr": pr_obj})
         _append_incident_log(incident_id, f"GitHub PR result: ok={pr_obj.get('ok')}")
@@ -295,6 +296,7 @@ async def run_incident_pipeline(
             merge_obj = await merge_pull_request(
                 int(pr_obj["pr_number"]),
                 commit_title=f"auto: merge self-improve incident {incident_id}",
+                workspace_root=workspace_root,
             )
             _set_incident(incident_id, {"github_merge": merge_obj})
             _append_incident_log(incident_id, f"GitHub merge result: ok={merge_obj.get('ok')}")
