@@ -855,7 +855,7 @@ async def github_automation_status(
     current_user: models.User = Depends(get_current_user),
 ):
     _require_admin(current_user)
-    return {"ok": True, "github": github_config_status()}
+    return {"ok": True, "github": github_config_status("/mnt/data/Pimv3")}
 
 
 @app.post("/api/v1/agents/self-rewrite/run")

@@ -1,12 +1,17 @@
 from __future__ import annotations
 
 import subprocess
+from pathlib import Path
 from typing import Any, Dict, List
 
 
 def run_tests(workspace_root: str, commands: List[List[str]] | None = None) -> Dict[str, Any]:
+    py = "python3"
+    venv_py = Path(workspace_root) / "backend" / "venv" / "bin" / "python3"
+    if venv_py.exists():
+        py = str(venv_py)
     cmds = commands or [
-        ["python3", "-m", "pytest", "backend/test_ozon_flat_import.py", "-q"],
+        [py, "-m", "pytest", "backend/test_ozon_flat_import.py", "-q"],
     ]
     results: List[Dict[str, Any]] = []
     all_ok = True
