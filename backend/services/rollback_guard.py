@@ -7,8 +7,14 @@ from typing import Dict, List
 
 def backup_files(workspace_root: str, files: List[str]) -> Dict[str, str]:
     root = Path(workspace_root)
-    backup_root = root / "backend" / "data" / "self_rewrite_backups" / str(int(time.time()))
-    backup_root.mkdir(parents=True, exist_ok=True)
+    ts = str(int(time.time()))
+    backup_root = root / "backend" / "data" / "self_rewrite_backups" / ts
+    try:
+        backup_root.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        # Fallback for readonly workspace mounts.
+        backup_root = Path("/tmp") / "pimv3_self_rewrite_backups" / ts
+        backup_root.mkdir(parents=True, exist_ok=True)
     mapping: Dict[str, str] = {}
     for rel in files or []:
         src = root / rel

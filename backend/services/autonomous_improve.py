@@ -221,14 +221,17 @@ async def run_incident_pipeline(
             },
         )
         _append_incident_log(incident_id, "Pipeline failed, rollback guard kept backups")
-        mem = get_agent_memory()
-        mem.upsert_knowledge_doc(
-            namespace="incidents:self-improve",
-            source_uri=f"incident://{incident_id}",
-            title=f"Incident {incident_id} failed",
-            content=json.dumps({"incident": incident, "tests": tests, "gate": gate}, ensure_ascii=False),
-            metadata={"status": "failed"},
-        )
+        try:
+            mem = get_agent_memory()
+            mem.upsert_knowledge_doc(
+                namespace="incidents:self-improve",
+                source_uri=f"incident://{incident_id}",
+                title=f"Incident {incident_id} failed",
+                content=json.dumps({"incident": incident, "tests": tests, "gate": gate}, ensure_ascii=False),
+                metadata={"status": "failed"},
+            )
+        except Exception as e:
+            _append_incident_log(incident_id, f"knowledge upsert skipped (failed incident): {e}")
         return {"ok": False, "incident_id": incident_id, "tests": tests, "gate": gate}
 
     _set_incident(incident_id, {"stage": "admin_gate", "updated_at_ts": int(time.time())})
@@ -316,26 +319,29 @@ async def run_incident_pipeline(
             "updated_at_ts": int(time.time()),
         },
     )
-    mem = get_agent_memory()
-    mem.upsert_knowledge_doc(
-        namespace="incidents:self-improve",
-        source_uri=f"incident://{incident_id}",
-        title=f"Incident {incident_id} completed",
-        content=json.dumps(
-            {
-                "incident": incident,
-                "tests": tests,
-                "gate": gate,
-                "commit": commit,
-                "push": push,
-                "pr": pr_obj,
-                "merge": merge_obj,
-                "deploy_trigger": deploy_obj,
-            },
-            ensure_ascii=False,
-        ),
-        metadata={"status": "completed"},
-    )
+    try:
+        mem = get_agent_memory()
+        mem.upsert_knowledge_doc(
+            namespace="incidents:self-improve",
+            source_uri=f"incident://{incident_id}",
+            title=f"Incident {incident_id} completed",
+            content=json.dumps(
+                {
+                    "incident": incident,
+                    "tests": tests,
+                    "gate": gate,
+                    "commit": commit,
+                    "push": push,
+                    "pr": pr_obj,
+                    "merge": merge_obj,
+                    "deploy_trigger": deploy_obj,
+                },
+                ensure_ascii=False,
+            ),
+            metadata={"status": "completed"},
+        )
+    except Exception as e:
+        _append_incident_log(incident_id, f"knowledge upsert skipped (completed incident): {e}")
     return {
         "ok": True,
         "incident_id": incident_id,
