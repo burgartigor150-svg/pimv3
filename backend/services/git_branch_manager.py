@@ -1,9 +1,13 @@
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 from pathlib import Path
 from typing import Any, Dict, List
+
+
+_GIT_BIN = shutil.which("git") or "/usr/bin/git"
 
 
 def _run(cmd: List[str], cwd: str) -> Dict[str, Any]:
@@ -25,7 +29,7 @@ def create_incident_branch(workspace_root: str, incident_id: str) -> Dict[str, A
     if not git_repo_ready(workspace_root):
         return {"ok": False, "error": "git_repo_not_found", "branch": ""}
     branch = f"auto/fix-{incident_id[:12]}"
-    checkout = _run(["git", "checkout", "-B", branch], cwd=workspace_root)
+    checkout = _run([_GIT_BIN, "checkout", "-B", branch], cwd=workspace_root)
     if not checkout["ok"]:
         return {"ok": False, "error": "branch_checkout_failed", "branch": branch, "detail": checkout}
     return {"ok": True, "branch": branch, "detail": checkout}
@@ -36,17 +40,17 @@ def commit_all_changes(workspace_root: str, message: str) -> Dict[str, Any]:
         return {"ok": False, "error": "git_repo_not_found"}
     author_name = (os.getenv("AUTO_GIT_AUTHOR_NAME", "") or "").strip() or "PIM Auto Agent"
     author_email = (os.getenv("AUTO_GIT_AUTHOR_EMAIL", "") or "").strip() or "pim-auto@local"
-    add = _run(["git", "add", "."], cwd=workspace_root)
+    add = _run([_GIT_BIN, "add", "."], cwd=workspace_root)
     if not add["ok"]:
         return {"ok": False, "error": "git_add_failed", "detail": add}
     commit = _run(
-        ["git", "-c", f"user.name={author_name}", "-c", f"user.email={author_email}", "commit", "-m", message],
+        [_GIT_BIN, "-c", f"user.name={author_name}", "-c", f"user.email={author_email}", "commit", "-m", message],
         cwd=workspace_root,
     )
     if (not commit["ok"]) and ("nothing to commit" in (commit.get("stdout", "") + " " + commit.get("stderr", "")).lower()):
         commit = _run(
             [
-                "git",
+                _GIT_BIN,
                 "-c",
                 f"user.name={author_name}",
                 "-c",
@@ -66,7 +70,7 @@ def commit_all_changes(workspace_root: str, message: str) -> Dict[str, Any]:
 def get_current_branch(workspace_root: str) -> Dict[str, Any]:
     if not git_repo_ready(workspace_root):
         return {"ok": False, "error": "git_repo_not_found", "branch": ""}
-    out = _run(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=workspace_root)
+    out = _run([_GIT_BIN, "rev-parse", "--abbrev-ref", "HEAD"], cwd=workspace_root)
     if not out["ok"]:
         return {"ok": False, "error": "git_rev_parse_failed", "detail": out, "branch": ""}
     return {"ok": True, "branch": (out.get("stdout", "").strip() or "")}
@@ -78,7 +82,7 @@ def push_branch(workspace_root: str, branch: str, remote: str = "origin") -> Dic
     b = str(branch or "").strip()
     if not b:
         return {"ok": False, "error": "branch_required"}
-    push = _run(["git", "push", "-u", remote, b], cwd=workspace_root)
+    push = _run([_GIT_BIN, "push", "-u", remote, b], cwd=workspace_root)
     if not push["ok"]:
         return {"ok": False, "error": "git_push_failed", "detail": push}
     return {"ok": True, "detail": push}
