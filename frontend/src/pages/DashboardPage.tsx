@@ -187,3 +187,10 @@ export default function DashboardPage() {
     </div>
   )
 }
+
+          <Link
+            to="/documentation"
+            className="bg-slate-100 dark:bg-slate-800 border border-slate-200 dark:border-slate-600 rounded-lg px-4 py-2 hover:bg-slate-200 dark:hover:bg-slate-700 flex items-center gap-2 font-medium text-slate-700 dark:text-slate-200"
+          >
+            <Sparkles className="w-4 h-4 text-purple-500" /> Документация
+          </Link>
