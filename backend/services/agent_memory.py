@@ -307,7 +307,20 @@ def get_agent_memory() -> AgentVectorMemory:
     if _MEMORY_SINGLETON is None:
         data_path = os.getenv("AGENT_VECTOR_DB_PATH", "/mnt/data/Pimv3/backend/data/vector_memory")
         try:
-            _MEMORY_SINGLETON = AgentVectorMemory(path=data_path)
+            candidate = AgentVectorMemory(path=data_path)
+            # Verify DB is writable at runtime; readonly mounts may pass init but fail on first write.
+            test_ns = "__healthcheck__"
+            candidate.add_case(
+                namespace=test_ns,
+                sku="",
+                category_id="",
+                problem_text="healthcheck",
+                action_summary="healthcheck",
+                result_status="ok",
+                metadata={"k": "v"},
+            )
+            candidate.clear_namespace(test_ns)
+            _MEMORY_SINGLETON = candidate
         except Exception:
             fallback_path = os.getenv("AGENT_VECTOR_DB_FALLBACK_PATH", "/tmp/pimv3_vector_memory")
             _MEMORY_SINGLETON = AgentVectorMemory(path=fallback_path)

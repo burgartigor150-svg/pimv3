@@ -46,11 +46,31 @@ export default function SelfImproveConsolePage() {
     await openIncident(id);
   };
 
+  const extractPrUrl = (raw: unknown): string => {
+    if (!raw) return '';
+    if (typeof raw === 'string') {
+      const s = raw.trim();
+      if (!s) return '';
+      if (s.startsWith('http://') || s.startsWith('https://')) return s;
+      try {
+        const obj = JSON.parse(s);
+        return String(obj?.pr_url || obj?.url || '');
+      } catch {
+        return '';
+      }
+    }
+    if (typeof raw === 'object') {
+      const obj = raw as any;
+      return String(obj?.pr_url || obj?.url || '');
+    }
+    return '';
+  };
+
   return (
     <div className="space-y-5">
       <h1 className="text-2xl font-bold">Self-Improve консоль</h1>
       <div className="text-xs text-slate-600 dark:text-slate-300">
-        GitHub automation: {githubStatus?.ready ? 'ready' : 'not ready'} | repo: {githubStatus?.repo || '-'}
+        GitHub automation: {githubStatus?.ready ? 'ready' : 'not ready'} | mode: {githubStatus?.mode || '-'} | repo: {githubStatus?.repo || '-'}
       </div>
 
       <div className="bg-white dark:bg-slate-800 border rounded-lg p-4 space-y-3">
@@ -93,17 +113,32 @@ export default function SelfImproveConsolePage() {
             <p className="text-sm text-slate-500">Выбери инцидент слева.</p>
           ) : (
             <div className="space-y-3">
+              {(() => {
+                const prUrl = extractPrUrl(selected.github_pr);
+                return (
+                  <>
               <p className="text-sm"><b>ID:</b> {selected.incident_id}</p>
               <p className="text-sm"><b>Status:</b> {selected.status}</p>
               <p className="text-sm"><b>Stage:</b> {selected.stage}</p>
               <p className="text-sm"><b>Branch:</b> {selected.branch || '-'}</p>
               <p className="text-sm"><b>PR:</b> {selected.github_pr || '-'}</p>
+              {prUrl ? (
+                <p className="text-sm">
+                  <b>PR URL:</b>{' '}
+                  <a className="text-indigo-600 underline" href={prUrl} target="_blank" rel="noreferrer">
+                    {prUrl}
+                  </a>
+                </p>
+              ) : null}
               <div className="flex gap-2">
                 <button onClick={() => rerun(selected.incident_id)} className="px-3 py-1 rounded bg-emerald-600 text-white text-sm">Run pipeline</button>
               </div>
               <div className="border rounded dark:border-slate-700 p-2 max-h-[260px] overflow-auto">
                 <pre className="text-xs whitespace-pre-wrap">{logs.join('\n')}</pre>
               </div>
+                  </>
+                );
+              })()}
             </div>
           )}
         </div>
