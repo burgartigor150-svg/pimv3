@@ -140,6 +140,141 @@ def _apply_mm_deterministic_prefill(
     if depth_mm is not None:
         _put_if_empty("Глубина, см", round(depth_mm / 10.0, 1))
         _put_if_empty("Длина (упаковки)", round(depth_mm / 10.0, 1))
+    return out
+
+
+@celery_app.task(name="sync_product_to_marketplace")
+def sync_product_to_marketplace(
+    product_id: str,
+    connection_id: str,
+    evidence_contract: Dict[str, Any] = None,
+) -> Dict[str, Any]:
+    """
+    Celery task to sync a single product to a marketplace connection.
+    Uses deterministic prefill and attribute star mapping.
+    """
+    try:
+        engine = create_async_engine(DATABASE_URL, poolclass=NullPool)
+        async_session = async_sessionmaker(engine, expire_on_commit=False)
+
+        async with async_session() as session:
+            # Fetch product
+            product_result = await session.execute(
+                select(models.Product).where(models.Product.id == product_id)
+            )
+            product = product_result.scalar_one_or_none()
+            if not product:
+                return {"status": "error", "message": f"Product {product_id} not found"}
+
+            # Fetch connection
+            connection_result = await session.execute(
+                select(models.MarketplaceConnection).where(
+                    models.MarketplaceConnection.id == connection_id
+                )
+            )
+            connection = connection_result.scalar_one_or_none()
+            if not connection:
+                return {"status": "error", "message": f"Connection {connection_id} not found"}
+
+            # Get adapter for marketplace type
+            adapter = get_adapter(connection.type)
+            if not adapter:
+                return {"status": "error", "message": f"No adapter for type {connection.type}"}
+
+            # Build payload using deterministic prefill
+            ozon_source = product.attributes_data or {}
+            images = []  # Would come from product.images in real implementation
+            payload = _apply_mm_deterministic_prefill(
+                {},
+                sku=product.sku,
+                product_name=product.name,
+                images=images,
+                ozon_source_full=ozon_source,
+            )
+
+            # Apply attribute star mapping if available
+            star_map_state = get_attribute_star_map_state()
+            if star_map_state and star_map_state.get("ozon_to_mm"):
+                mapped = build_ozon_mm_attribute_star_map(ozon_source, star_map_state["ozon_to_mm"])
+                payload.update(mapped)
+
+            # Sanitize manufacturer fields
+            payload = _sanitize_manufacturer_fields(payload, product.sku)
+
+            # Sync to marketplace
+            result = adapter.sync_product(
+                connection_data={
+                    "api_key": connection.api_key,
+                    "client_id": connection.client_id,
+                    "store_id": connection.store_id,
+                    "warehouse_id": connection.warehouse_id,
+                },
+                product_data=payload,
+            )
+
+            # Update completeness score
+            new_score = calculate_completeness(payload)
+            product.completeness_score = new_score
+            await session.commit()
+
+            # Record telemetry
+            append_task_event(
+                task_name="sync_product_to_marketplace",
+                product_id=product_id,
+                connection_id=connection_id,
+                status="success",
+                details={"score": new_score, "result": result},
+            )
+
+            return {
+                "status": "success",
+                "product_id": product_id,
+                "connection_id": connection_id,
+                "completeness_score": new_score,
+                "result": result,
+            }
+
+    except Exception as e:
+        # Record failure and potentially trigger autonomous improvement
+        record_failure_and_maybe_trigger(
+            task_name="sync_product_to_marketplace",
+            error=str(e),
+            context={"product_id": product_id, "connection_id": connection_id},
+        )
+        return {
+            "status": "error",
+            "message": f"Sync failed: {str(e)}",
+            "product_id": product_id,
+            "connection_id": connection_id,
+        }
+
+
+@celery_app.task(name="batch_sync_products")
+def batch_sync_products(product_ids: List[str], connection_id: str) -> Dict[str, Any]:
+    """
+    Celery task to sync multiple products to a marketplace connection.
+    """
+    results = []
+    for product_id in product_ids:
+        result = sync_product_to_marketplace(product_id, connection_id)
+        results.append(result)
+    return {
+        "status": "completed",
+        "total": len(product_ids),
+        "results": results,
+    }
+
+
+@celery_app.task(name="trigger_autonomous_improvement")
+def trigger_autonomous_improvement(incident_data: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Celery task to run the autonomous improvement pipeline for an incident.
+    """
+    return run_incident_pipeline(incident_data)
+
+
+if __name__ == "__main__":
+    celery_app.start()
 
     weight_g = _to_float(src.get("product_weight_g") or src.get("weight_g"))
     if weight_g is not None:
