@@ -13,6 +13,7 @@ import AdminDialogConsolePage from './pages/AdminDialogConsolePage'
 import SelfImproveConsolePage from './pages/SelfImproveConsolePage'
 import AgentTaskConsolePage from './pages/AgentTaskConsolePage'
 import AgentAssistantPage from './pages/AgentAssistantPage'
+import AgentDemoPage from './pages/AgentDemoPage'
 import { AuthProvider } from './context/AuthContext'
 import { ProtectedRoute } from './components/ProtectedRoute'
 import { LoginPage } from './pages/LoginPage'
@@ -135,3 +136,6 @@ function App() {
 }
 
 export default App
+            <NavLink to="/agent-demo" className={navLinkClass}>
+              <Bot className="w-5 h-5 shrink-0" /> Agent Demo
+            </NavLink>
