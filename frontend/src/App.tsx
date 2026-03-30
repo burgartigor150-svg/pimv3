@@ -55,12 +55,12 @@ function App() {
         {/* Sidebar */}
         <aside className="w-64 border-r border-border bg-slate-50 dark:bg-slate-900 p-4 flex flex-col gap-4">
           <div className="font-extrabold text-2xl mb-6 flex items-center gap-2 tracking-tight">
-            <div className="bg-gradient-to-br from-indigo-500 to-purple-600 text-white p-1.5 rounded-lg shadow-sm">
+            <div className="bg-gradient-to-br from-emerald-500 to-green-600 text-white p-1.5 rounded-lg shadow-sm">
               <Box className="w-5 h-5" strokeWidth={2.5} />
             </div>
             <div>
               <span className="text-slate-900 dark:text-white">PIM.</span>
-              <span className="text-transparent bg-clip-text bg-gradient-to-r from-indigo-500 to-purple-600">Giper.fm</span>
+              <span className="text-transparent bg-clip-text bg-gradient-to-r from-emerald-500 to-green-600">Giper.fm</span>
             </div>
           </div>
           <nav className="flex flex-col gap-1">
