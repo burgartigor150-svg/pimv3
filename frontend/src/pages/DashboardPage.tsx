@@ -40,7 +40,7 @@ export default function DashboardPage() {
     <div className="space-y-8 animate-in fade-in duration-500">
       <div className="flex flex-col md:flex-row md:justify-between md:items-center gap-4">
         <div>
-          <h1 className="text-3xl font-extrabold text-slate-900 dark:text-white tracking-tight">Добро пожаловать в <span className="text-transparent bg-clip-text bg-gradient-to-r from-indigo-500 to-purple-600">PIM.Giper.fm</span></h1>
+          <h1 className="text-3xl font-extrabold text-slate-900 dark:text-white tracking-tight">Добро пожаловать в <span className="text-transparent bg-clip-text bg-gradient-to-r from-rose-500 to-red-600">PIM.Giper.fm</span></h1>
           <p className="text-slate-500 dark:text-slate-400 mt-2 text-lg max-w-3xl">
             Одна база товаров → ИИ собирает «идеальную» карточку из нескольких магазинов → вы выгружаете на Ozon, Яндекс, WB и Мегамаркет без ручного переноса полей.
           </p>
