@@ -95,3 +95,5 @@ export default function AdminDialogConsolePage() {
   );
 }
 
+
+// Admin Dialog Console Page - placeholder for future implementation
