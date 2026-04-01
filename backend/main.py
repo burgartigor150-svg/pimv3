@@ -1039,7 +1039,8 @@ async def agent_task_create(
     )
     if req.auto_run and created.get("ok"):
         task_id = (created.get("task", {})).get("task_id")
-        if task_id:
+  
+      if task_id:
             _queue_task_for_dispatch(task_id)
     return created
 
@@ -1068,6 +1069,12 @@ async def agent_context7_connected(current_user: models.User = Depends(get_curre
 
 @app.get("/api/v1/agent-tasks/{task_id}/metrics")
 async def agent_task_metrics(
+    task_id: str,
+    current_user: models.User = Depends(get_current_user),
+):
+    from backend.services.agent_metrics import get_task_metrics
+    metrics = get_task_metrics(task_id)
+    return metricsef agent_task_metrics(
     task_id: str,
     current_user: models.User = Depends(get_current_user),
 ):
