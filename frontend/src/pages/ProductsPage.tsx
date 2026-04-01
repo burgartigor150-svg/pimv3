@@ -1,42 +1,327 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
+import {
+  Search,
+  Plus,
+  Trash2,
+  Edit3,
+  Sparkles,
+  ChevronLeft,
+  ChevronRight,
+  X,
+  Link,
+  Package,
+  CheckSquare,
+  Square,
+  Loader2,
+} from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
+import { api } from '../lib/api';
+import { useToast } from '../components/Toast';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 interface Product {
-  id: string | number;
+  id: string;
   sku: string;
   name: string;
-  category?: string;
-  completeness?: number; // 0-100
-  [key: string]: unknown;
+  brand: string;
+  category: string;
+  completeness: number;
+  status: string;
+  image_url?: string;
 }
 
-interface BulkTask {
-  task_id: string;
-  status: string;
-  progress?: number;
-  total?: number;
-  message?: string;
+interface ProductsResponse {
+  items: Product[];
+  total: number;
+  pages: number;
+}
+
+interface Connection {
+  id: string;
+  name: string;
+  type: string;
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
+const CARD_STYLE: React.CSSProperties = {
+  background: 'rgba(255,255,255,0.03)',
+  border: '1px solid rgba(255,255,255,0.08)',
+  borderRadius: 16,
+  backdropFilter: 'blur(20px)',
+};
+
 function CompletenessBar({ value }: { value: number }) {
-  const pct = Math.min(100, Math.max(0, value ?? 0));
-  const color =
-    pct >= 80 ? 'bg-emerald-500' : pct >= 50 ? 'bg-yellow-500' : 'bg-red-500';
-  const textColor =
-    pct >= 80 ? 'text-emerald-400' : pct >= 50 ? 'text-yellow-400' : 'text-red-400';
+  const color = value >= 80 ? '#10b981' : value >= 50 ? '#f59e0b' : '#f87171';
   return (
-    <div className="flex items-center gap-2 min-w-[100px]">
-      <div className="flex-1 h-1 bg-[#1e1e2c] rounded-full overflow-hidden">
+    <div style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 100 }}>
+      <div
+        style={{
+          flex: 1,
+          height: 5,
+          background: 'rgba(255,255,255,0.07)',
+          borderRadius: 3,
+          overflow: 'hidden',
+        }}
+      >
         <div
-          className={`h-full rounded-full transition-all ${color}`}
-          style={{ width: `${pct}%` }}
+          style={{
+            height: '100%',
+            width: `${value}%`,
+            background: color,
+            borderRadius: 3,
+            transition: 'width 0.5s ease',
+          }}
         />
       </div>
-      <span className={`text-xs font-medium tabular-nums ${textColor}`}>{pct}%</span>
+      <span style={{ color, fontSize: 11, fontWeight: 600, minWidth: 28 }}>{value}%</span>
+    </div>
+  );
+}
+
+function StatusBadge({ status }: { status: string }) {
+  const map: Record<string, { bg: string; color: string; label: string }> = {
+    active:   { bg: 'rgba(16,185,129,0.12)',  color: '#10b981', label: 'Активный' },
+    draft:    { bg: 'rgba(245,158,11,0.12)',  color: '#f59e0b', label: 'Черновик' },
+    archived: { bg: 'rgba(248,113,113,0.12)', color: '#f87171', label: 'Архив' },
+    default:  { bg: 'rgba(255,255,255,0.06)', color: 'rgba(255,255,255,0.45)', label: status },
+  };
+  const s = map[status] ?? map.default;
+  return (
+    <span
+      style={{
+        background: s.bg,
+        color: s.color,
+        borderRadius: 6,
+        padding: '3px 10px',
+        fontSize: 11,
+        fontWeight: 600,
+        whiteSpace: 'nowrap',
+      }}
+    >
+      {s.label}
+    </span>
+  );
+}
+
+// ─── Import Modal ─────────────────────────────────────────────────────────────
+
+interface ImportModalProps {
+  connections: Connection[];
+  onClose: () => void;
+  onDone: () => void;
+}
+
+function ImportModal({ connections, onClose, onDone }: ImportModalProps) {
+  const { toast } = useToast();
+  const [urls, setUrls] = useState(['']);
+  const [connectionId, setConnectionId] = useState(connections[0]?.id ?? '');
+  const [loading, setLoading] = useState(false);
+
+  const addUrl = () => setUrls((u) => [...u, '']);
+  const removeUrl = (i: number) => setUrls((u) => u.filter((_, idx) => idx !== i));
+  const setUrl = (i: number, val: string) => setUrls((u) => u.map((v, idx) => (idx === i ? val : v)));
+
+  const handleImport = async () => {
+    const validUrls = urls.filter(Boolean);
+    if (!validUrls.length) { toast('Введите хотя бы один URL', 'error'); return; }
+    if (!connectionId) { toast('Выберите подключение', 'error'); return; }
+    setLoading(true);
+    try {
+      if (validUrls.length === 1) {
+        await api.post('/api/v1/import/product', { url: validUrls[0], connection_id: connectionId });
+        toast('Товар поставлен в очередь', 'success');
+      } else {
+        const res = await api.post('/api/v1/import/bulk', { urls: validUrls, connection_id: connectionId });
+        const taskId = res.data?.task_id;
+        if (taskId) {
+          toast('Задача импорта создана, ждём…', 'info');
+          // poll
+          const poll = async () => {
+            const s = await api.get(`/api/v1/import/tasks/${taskId}`);
+            if (s.data?.status === 'completed') {
+              toast('Импорт завершён', 'success');
+            } else if (s.data?.status === 'failed') {
+              toast('Импорт завершился с ошибкой', 'error');
+            } else {
+              setTimeout(poll, 2000);
+            }
+          };
+          poll();
+        }
+      }
+      onDone();
+      onClose();
+    } catch (e: any) {
+      toast(e?.response?.data?.detail ?? e?.message ?? 'Ошибка импорта', 'error');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div
+      style={{
+        position: 'fixed',
+        inset: 0,
+        background: 'rgba(0,0,0,0.7)',
+        backdropFilter: 'blur(8px)',
+        zIndex: 100,
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        padding: 24,
+      }}
+      onClick={(e) => e.target === e.currentTarget && onClose()}
+    >
+      <div
+        style={{
+          ...CARD_STYLE,
+          padding: 32,
+          width: '100%',
+          maxWidth: 520,
+          position: 'relative',
+        }}
+        className="animate-fade-up"
+      >
+        <button
+          onClick={onClose}
+          style={{
+            position: 'absolute',
+            top: 16,
+            right: 16,
+            background: 'none',
+            border: 'none',
+            color: 'rgba(255,255,255,0.4)',
+            cursor: 'pointer',
+            padding: 4,
+          }}
+        >
+          <X size={18} />
+        </button>
+
+        <h2 style={{ margin: '0 0 24px', fontSize: 20, fontWeight: 700 }}>Импорт товаров</h2>
+
+        {/* Connection selector */}
+        <div style={{ marginBottom: 20 }}>
+          <label style={{ display: 'block', color: 'rgba(255,255,255,0.45)', fontSize: 12, marginBottom: 8 }}>
+            Подключение
+          </label>
+          <select
+            value={connectionId}
+            onChange={(e) => setConnectionId(e.target.value)}
+            className="input-premium"
+            style={{ width: '100%', padding: '10px 14px' }}
+          >
+            {connections.map((c) => (
+              <option key={c.id} value={c.id}>
+                {c.name} ({c.type})
+              </option>
+            ))}
+            {connections.length === 0 && <option value="">Нет подключений</option>}
+          </select>
+        </div>
+
+        {/* URL inputs */}
+        <div style={{ marginBottom: 16 }}>
+          <label style={{ display: 'block', color: 'rgba(255,255,255,0.45)', fontSize: 12, marginBottom: 8 }}>
+            URL товаров
+          </label>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+            {urls.map((url, i) => (
+              <div key={i} style={{ display: 'flex', gap: 8 }}>
+                <div style={{ flex: 1, position: 'relative' }}>
+                  <Link
+                    size={14}
+                    style={{
+                      position: 'absolute',
+                      left: 12,
+                      top: '50%',
+                      transform: 'translateY(-50%)',
+                      color: 'rgba(255,255,255,0.25)',
+                    }}
+                  />
+                  <input
+                    className="input-premium"
+                    style={{ width: '100%', paddingLeft: 36, paddingRight: 12, paddingTop: 10, paddingBottom: 10, boxSizing: 'border-box' }}
+                    placeholder="https://..."
+                    value={url}
+                    onChange={(e) => setUrl(i, e.target.value)}
+                  />
+                </div>
+                {urls.length > 1 && (
+                  <button
+                    onClick={() => removeUrl(i)}
+                    style={{
+                      background: 'rgba(248,113,113,0.1)',
+                      border: '1px solid rgba(248,113,113,0.2)',
+                      borderRadius: 8,
+                      color: '#f87171',
+                      cursor: 'pointer',
+                      padding: '0 12px',
+                    }}
+                  >
+                    <X size={14} />
+                  </button>
+                )}
+              </div>
+            ))}
+          </div>
+        </div>
+
+        <button
+          onClick={addUrl}
+          style={{
+            background: 'none',
+            border: '1px dashed rgba(99,102,241,0.4)',
+            borderRadius: 8,
+            color: '#6366f1',
+            cursor: 'pointer',
+            padding: '8px 16px',
+            fontSize: 13,
+            width: '100%',
+            marginBottom: 24,
+          }}
+        >
+          + Добавить ещё URL
+        </button>
+
+        <div style={{ display: 'flex', gap: 12 }}>
+          <button
+            onClick={onClose}
+            style={{
+              flex: 1,
+              background: 'rgba(255,255,255,0.05)',
+              border: '1px solid rgba(255,255,255,0.1)',
+              borderRadius: 10,
+              color: 'rgba(255,255,255,0.6)',
+              cursor: 'pointer',
+              padding: '12px 20px',
+              fontSize: 14,
+            }}
+          >
+            Отмена
+          </button>
+          <button
+            className="btn-glow"
+            onClick={handleImport}
+            disabled={loading}
+            style={{
+              flex: 1,
+              padding: '12px 20px',
+              fontSize: 14,
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              gap: 8,
+            }}
+          >
+            {loading ? <Loader2 size={16} style={{ animation: 'spin 1s linear infinite' }} /> : null}
+            {loading ? 'Импорт…' : 'Импортировать'}
+          </button>
+        </div>
+      </div>
     </div>
   );
 }
@@ -45,632 +330,569 @@ function CompletenessBar({ value }: { value: number }) {
 
 export default function ProductsPage() {
   const navigate = useNavigate();
+  const { toast } = useToast();
 
-  // ── State ──────────────────────────────────────────────────────────────────
   const [products, setProducts] = useState<Product[]>([]);
-  const [selectedCategory, setSelectedCategory] = useState<string>('');
+  const [total, setTotal] = useState(0);
+  const [pages, setPages] = useState(1);
+  const [page, setPage] = useState(1);
   const [search, setSearch] = useState('');
-  const [newProduct, setNewProduct] = useState({ sku: '', name: '', category: '' });
+  const [category, setCategory] = useState('');
+  const [loading, setLoading] = useState(true);
+  const [selected, setSelected] = useState<Set<string>>(new Set());
   const [showImport, setShowImport] = useState(false);
-  const [showBulkImport, setShowBulkImport] = useState(false);
-  const [showCreate, setShowCreate] = useState(false);
-  const [bulkQueries, setBulkQueries] = useState('');
-  const [bulkTaskId, setBulkTaskId] = useState<string | null>(null);
-  const [bulkTask, setBulkTask] = useState<BulkTask | null>(null);
-  const [importSku, setImportSku] = useState('');
-  const [selectedIds, setSelectedIds] = useState<Set<string | number>>(new Set());
-  const [categories, setCategories] = useState<string[]>([]);
-  const [isLoading, setIsLoading] = useState(false);
-  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const [connections, setConnections] = useState<Connection[]>([]);
+  const [aiLoading, setAiLoading] = useState(false);
+  const [bulkDeleteLoading, setBulkDeleteLoading] = useState(false);
+  const searchTimeout = useRef<ReturnType<typeof setTimeout>>();
 
-  // ── Fetch products ─────────────────────────────────────────────────────────
+  const fetchProducts = useCallback(async (p = page, s = search, cat = category) => {
+    setLoading(true);
+    try {
+      const res = await api.get<ProductsResponse>(
+        `/api/v1/products?page=${p}&limit=50&search=${encodeURIComponent(s)}&category=${encodeURIComponent(cat)}`
+      );
+      setProducts(res.data.items);
+      setTotal(res.data.total);
+      setPages(res.data.pages);
+    } catch (e: any) {
+      toast(e?.message ?? 'Ошибка загрузки товаров', 'error');
+    } finally {
+      setLoading(false);
+    }
+  }, [page, search, category,toast]);
+
+  useEffect(() => { fetchProducts(); }, [page, category]);
+
   useEffect(() => {
-    fetchProducts();
+    clearTimeout(searchTimeout.current);
+    searchTimeout.current = setTimeout(() => {
+      setPage(1);
+      fetchProducts(1, search, category);
+    }, 400);
+    return () => clearTimeout(searchTimeout.current);
+  }, [search]);
+
+  useEffect(() => {
+    api.get<Connection[]>('/api/v1/connections').then((r) => {
+      setConnections(Array.isArray(r.data) ? r.data : []);
+    });
   }, []);
 
-  async function fetchProducts() {
-    setIsLoading(true);
-    try {
-      const res = await fetch('/api/v1/products');
-      const data = await res.json();
-      const list: Product[] = Array.isArray(data) ? data : data.products ?? [];
-      setProducts(list);
-      const cats = Array.from(new Set(list.map((p) => p.category).filter(Boolean))) as string[];
-      setCategories(cats);
-    } catch (e) {
-      console.error('Failed to fetch products', e);
-    } finally {
-      setIsLoading(false);
-    }
-  }
-
-  // ── Bulk task polling ──────────────────────────────────────────────────────
-  useEffect(() => {
-    if (!bulkTaskId) return;
-    pollRef.current = setInterval(async () => {
-      try {
-        const res = await fetch(`/api/v1/import/tasks/${bulkTaskId}`);
-        const task: BulkTask = await res.json();
-        setBulkTask(task);
-        if (task.status === 'completed' || task.status === 'failed') {
-          if (pollRef.current) clearInterval(pollRef.current);
-          if (task.status === 'completed') {
-            fetchProducts();
-          }
-        }
-      } catch (e) {
-        console.error('Polling error', e);
-        if (pollRef.current) clearInterval(pollRef.current);
-      }
-    }, 2000);
-    return () => {
-      if (pollRef.current) clearInterval(pollRef.current);
-    };
-  }, [bulkTaskId]);
-
-  // ── Handlers ───────────────────────────────────────────────────────────────
-  async function handleImport() {
-    if (!importSku.trim()) return;
-    try {
-      const res = await fetch('/api/v1/import/product', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ sku: importSku }),
-      });
-      const data = await res.json();
-      console.log('Import result', data);
-      setShowImport(false);
-      setImportSku('');
-      fetchProducts();
-    } catch (e) {
-      console.error('Import failed', e);
-    }
-  }
-
-  async function handleBulkImport() {
-    if (!bulkQueries.trim()) return;
-    try {
-      const queries = bulkQueries.split('\n').map((q) => q.trim()).filter(Boolean);
-      const res = await fetch('/api/v1/import/bulk', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ queries }),
-      });
-      const data = await res.json();
-      console.log('Bulk import started', data);
-      setBulkTaskId(data.task_id);
-      setShowBulkImport(false);
-    } catch (e) {
-      console.error('Bulk import failed', e);
-    }
-  }
-
-  async function handleBulkGenerate() {
-    const ids = Array.from(selectedIds);
-    if (!ids.length) return;
-    try {
-      const res = await fetch('/api/v1/ai/generate-bulk', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ids }),
-      });
-      const data = await res.json();
-      console.log('Bulk generate started', data);
-      setBulkTaskId(data.task_id);
-    } catch (e) {
-      console.error('Bulk generate failed', e);
-    }
-  }
-
-  async function handleDelete(id: string | number) {
-    try {
-      await fetch(`/api/v1/products/${id}`, { method: 'DELETE' });
-      setProducts((prev) => prev.filter((p) => p.id !== id));
-      setSelectedIds((prev) => {
-        const next = new Set(prev);
-        next.delete(id);
-        return next;
-      });
-    } catch (e) {
-      console.error('Delete failed', e);
-    }
-  }
-
-  async function handleCreate() {
-    try {
-      const res = await fetch('/api/v1/products', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(newProduct),
-      });
-      const data = await res.json();
-      console.log('Created product', data);
-      setShowCreate(false);
-      setNewProduct({ sku: '', name: '', category: '' });
-      fetchProducts();
-    } catch (e) {
-      console.error('Create failed', e);
-    }
-  }
-
-  async function handleExportSelected() {
-    const ids = Array.from(selectedIds);
-    try {
-      const res = await fetch('/api/v1/products/export', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ids }),
-      });
-      const blob = await res.blob();
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = 'products.xlsx';
-      a.click();
-      URL.revokeObjectURL(url);
-    } catch (e) {
-      console.error('Export failed', e);
-    }
-  }
-
-  // ── Derived state ──────────────────────────────────────────────────────────
-  const filtered = products.filter((p) => {
-    const matchCat = !selectedCategory || p.category === selectedCategory;
-    const matchSearch =
-      !search ||
-      p.name?.toLowerCase().includes(search.toLowerCase()) ||
-      p.sku?.toLowerCase().includes(search.toLowerCase());
-    return matchCat && matchSearch;
-  });
-
-  const allSelected = filtered.length > 0 && filtered.every((p) => selectedIds.has(p.id));
-
-  function toggleAll() {
-    if (allSelected) {
-      setSelectedIds((prev) => {
-        const next = new Set(prev);
-        filtered.forEach((p) => next.delete(p.id));
-        return next;
-      });
-    } else {
-      setSelectedIds((prev) => {
-        const next = new Set(prev);
-        filtered.forEach((p) => next.add(p.id));
-        return next;
-      });
-    }
-  }
-
-  function toggleOne(id: string | number) {
-    setSelectedIds((prev) => {
+  const toggleSelect = (id: string) => {
+    setSelected((prev) => {
       const next = new Set(prev);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
+      next.has(id) ? next.delete(id) : next.add(id);
       return next;
     });
-  }
+  };
 
-  const bulkProgress =
-    bulkTask && bulkTask.total
-      ? Math.round(((bulkTask.progress ?? 0) / bulkTask.total) * 100)
-      : 0;
+  const toggleAll = () => {
+    if (selected.size === products.length) {
+      setSelected(new Set());
+    } else {
+      setSelected(new Set(products.map((p) => p.id)));
+    }
+  };
 
-  // ─────────────────────────────────────────────────────────────────────────
+  const handleAiGenerate = async () => {
+    if (!selected.size) return;
+    setAiLoading(true);
+    try {
+      await api.post('/api/v1/ai/generate-bulk', { product_ids: Array.from(selected) });
+      toast(`ИИ генерация запущена для ${selected.size} товаров`, 'success');
+      setSelected(new Set());
+    } catch (e: any) {
+      toast(e?.response?.data?.detail ?? 'Ошибка ИИ генерации', 'error');
+    } finally {
+      setAiLoading(false);
+    }
+  };
+
+  const handleBulkDelete = async () => {
+    if (!selected.size) return;
+    setBulkDeleteLoading(true);
+    try {
+      await Promise.all(Array.from(selected).map((id) => api.delete(`/api/v1/products/${id}`)));
+      toast(`Удалено ${selected.size} товаров`, 'success');
+      setSelected(new Set());
+      fetchProducts();
+    } catch (e: any) {
+      toast(e?.response?.data?.detail ?? 'Ошибка удаления', 'error');
+    } finally {
+      setBulkDeleteLoading(false);
+    }
+  };
+
+  const handleDeleteOne = async (id: string, e: React.MouseEvent) => {
+    e.stopPropagation();
+    try {
+      await api.delete(`/api/v1/products/${id}`);
+      toast('Товар удалён', 'success');
+      fetchProducts();
+    } catch (e: any) {
+      toast(e?.response?.data?.detail ?? 'Ошибка удаления', 'error');
+    }
+  };
+
+  const allSelected = products.length > 0 && selected.size === products.length;
+
   return (
-    <div className="min-h-screen bg-[#0d0d10] text-slate-100 pb-24">
-      {/* ── Page Header ───────────────────────────────────────────────────── */}
-      <div className="px-6 pt-8 pb-4">
-        <div className="flex items-center justify-between mb-6">
-          <div className="flex items-center gap-3">
-            <h1 className="text-xl font-semibold text-slate-100">Каталог товаров</h1>
-            <span className="text-xs font-medium bg-[#1c1c28] border border-[#1e1e2c] text-slate-400 px-2.5 py-0.5 rounded-full">
-              {products.length}
+    <div
+      style={{
+        minHeight: '100vh',
+        background: '#03030a',
+        color: 'rgba(255,255,255,0.9)',
+        fontFamily: 'Inter, system-ui, sans-serif',
+        padding: '32px 40px',
+        position: 'relative',
+        overflow: 'hidden',
+      }}
+    >
+      {/* Background orbs */}
+      <div style={{ position: 'fixed', inset: 0, zIndex: 0, pointerEvents: 'none', overflow: 'hidden' }}>
+        <div
+          style={{
+            position: 'absolute',
+            top: '-20%',
+            right: '-10%',
+            width: 600,
+            height: 600,
+            borderRadius: '50%',
+            background: 'radial-gradient(circle, rgba(99,102,241,0.08) 0%, transparent 70%)',
+            animation: 'orbFloat 14s ease-in-out infinite',
+          }}
+        />
+        <div
+          style={{
+            position: 'absolute',
+            bottom: '-15%',
+            left: '-5%',
+            width: 500,
+            height: 500,
+            borderRadius: '50%',
+            background: 'radial-gradient(circle, rgba(168,85,247,0.07) 0%, transparent 70%)',
+            animation: 'orbFloat 18s ease-in-out infinite reverse',
+          }}
+        />
+        <style>{`
+          @keyframes orbFloat {
+            0%, 100% { transform: translate(0,0) scale(1); }
+            33% { transform: translate(20px,-15px) scale(1.04); }
+            66% { transform: translate(-15px,10px) scale(0.97); }
+          }
+          @keyframes spin { to { transform: rotate(360deg); } }
+          @keyframes slideDown {
+            from { opacity: 0; transform: translateY(-10px); }
+            to { opacity: 1; transform: translateY(0); }
+          }
+        `}</style>
+      </div>
+
+      <div style={{ position: 'relative', zIndex: 1, maxWidth: 1400, margin: '0 auto' }}>
+
+        {/* Header */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 16, marginBottom: 28 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+            <Package size={24} color="#6366f1" />
+            <h1 style={{ margin: 0, fontSize: 28, fontWeight: 700, letterSpacing: '-0.5px' }}>Товары</h1>
+            <span
+              className="badge-purple"
+              style={{ fontSize: 13, padding: '3px 12px' }}
+            >
+              {total.toLocaleString()}
             </span>
           </div>
-          <div className="flex items-center gap-2">
+          <div style={{ marginLeft: 'auto' }}>
             <button
+              className="btn-glow"
               onClick={() => setShowImport(true)}
-              className="bg-[#1c1c28] hover:bg-[#28283a] border border-[#1e1e2c] text-slate-300 px-3 py-1.5 rounded-lg text-sm transition-all"
+              style={{ padding: '10px 22px', fontSize: 14, display: 'flex', alignItems: 'center', gap: 8 }}
             >
-              Импорт по SKU
-            </button>
-            <button
-              onClick={() => setShowBulkImport(true)}
-              className="bg-[#1c1c28] hover:bg-[#28283a] border border-[#1e1e2c] text-slate-300 px-3 py-1.5 rounded-lg text-sm transition-all"
-            >
-              Массовый импорт
-            </button>
-            <button
-              onClick={() => setShowCreate(true)}
-              className="bg-indigo-500 hover:bg-indigo-600 text-white px-4 py-2 rounded-lg text-sm font-medium transition-all"
-            >
-              + Создать
+              <Plus size={16} />
+              Импортировать
             </button>
           </div>
         </div>
 
-        {/* Search / filter bar */}
-        <div className="flex items-center gap-3">
-          <div className="relative flex-1 max-w-sm">
-            <svg
-              className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-500"
-              fill="none"
-              viewBox="0 0 24 24"
-              stroke="currentColor"
-            >
-              <path
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                strokeWidth={2}
-                d="M21 21l-4.35-4.35M17 11A6 6 0 1 1 5 11a6 6 0 0 1 12 0z"
-              />
-            </svg>
+        {/* Filter bar */}
+        <div style={{ display: 'flex', gap: 12, marginBottom: 20 }}>
+          <div style={{ flex: 1, maxWidth: 360, position: 'relative' }}>
+            <Search
+              size={15}
+              style={{
+                position: 'absolute',
+                left: 12,
+                top: '50%',
+                transform: 'translateY(-50%)',
+                color: 'rgba(255,255,255,0.25)',
+              }}
+            />
             <input
+              className="input-premium"
+              style={{ width: '100%', paddingLeft: 36, paddingRight: 12, paddingTop: 10, paddingBottom: 10, boxSizing: 'border-box' }}
+              placeholder="Поиск по названию, SKU…"
               value={search}
               onChange={(e) => setSearch(e.target.value)}
-              placeholder="Поиск по названию или SKU..."
-              className="w-full bg-[#0d0d10] border border-[#28283a] rounded-lg pl-9 pr-3 py-2 text-sm text-slate-100 placeholder:text-slate-600 focus:border-indigo-500 outline-none transition-colors"
             />
           </div>
-          {categories.length > 0 && (
-            <select
-              value={selectedCategory}
-              onChange={(e) => setSelectedCategory(e.target.value)}
-              className="bg-[#0d0d10] border border-[#28283a] rounded-lg px-3 py-2 text-sm text-slate-300 focus:border-indigo-500 outline-none"
-            >
-              <option value="">Все категории</option>
-              {categories.map((c) => (
-                <option key={c} value={c}>
-                  {c}
-                </option>
-              ))}
-            </select>
-          )}
+          <select
+            className="input-premium"
+            style={{ padding: '10px 14px', minWidth: 180 }}
+            value={category}
+            onChange={(e) => { setCategory(e.target.value); setPage(1); }}
+          >
+            <option value="">Все категории</option>
+            <option value="electronics">Электроника</option>
+            <option value="clothing">Одежда</option>
+            <option value="food">Продукты</option>
+            <option value="sport">Спорт</option>
+            <option value="home">Дом</option>
+          </select>
         </div>
-      </div>
 
-      {/* ── Table ─────────────────────────────────────────────────────────── */}
-      <div className="px-6">
-        <div className="bg-[#13131a] border border-[#1e1e2c] rounded-xl overflow-hidden">
-          {/* Table header */}
-          <div className="grid grid-cols-[2.5rem_1fr_2fr_1fr_140px_80px] bg-[#1c1c28] px-4 py-2.5 text-slate-500 text-xs uppercase tracking-wide font-medium">
-            <div className="flex items-center">
-              <input
-                type="checkbox"
-                checked={allSelected}
-                onChange={toggleAll}
-                className="w-3.5 h-3.5 rounded accent-indigo-500 cursor-pointer"
-              />
-            </div>
-            <div>SKU</div>
-            <div>Название</div>
-            <div>Категория</div>
-            <div>Заполненность</div>
-            <div></div>
-          </div>
-
-          {isLoading ? (
-            <div className="py-20 flex flex-col items-center justify-center gap-3 text-slate-600">
-              <div className="w-6 h-6 border-2 border-indigo-500 border-t-transparent rounded-full animate-spin" />
-              <span className="text-sm">Загрузка...</span>
-            </div>
-          ) : filtered.length === 0 ? (
-            <div className="py-20 flex flex-col items-center justify-center gap-4 text-slate-600">
-              <svg className="w-10 h-10" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  strokeWidth={1.5}
-                  d="M20 7H4a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2zM16 3H8L6 7h12l-2-4z"
-                />
-              </svg>
-              <div className="text-center">
-                <p className="text-sm font-medium text-slate-500">Нет товаров</p>
-                <p className="text-xs text-slate-700 mt-1">Импортируйте товары по SKU или создайте вручную</p>
-              </div>
-              <button
-                onClick={() => setShowImport(true)}
-                className="bg-indigo-500 hover:bg-indigo-600 text-white px-4 py-2 rounded-lg text-sm font-medium transition-all"
-              >
-                Импортировать
-              </button>
-            </div>
-          ) : (
-            filtered.map((product) => (
-              <div
-                key={product.id}
-                className="grid grid-cols-[2.5rem_1fr_2fr_1fr_140px_80px] px-4 py-3 items-center border-b border-[#1e1e2c] hover:bg-[#1c1c28] transition-colors group last:border-0"
-              >
-                <div className="flex items-center">
-                  <input
-                    type="checkbox"
-                    checked={selectedIds.has(product.id)}
-                    onChange={() => toggleOne(product.id)}
-                    className="w-3.5 h-3.5 rounded accent-indigo-500 cursor-pointer"
-                  />
-                </div>
-                <div className="font-mono text-xs text-slate-400 truncate pr-2">{product.sku}</div>
-                <div className="text-sm text-slate-200 truncate pr-2">{product.name}</div>
-                <div className="pr-2">
-                  {product.category ? (
-                    <span className="text-xs bg-[#1c1c28] border border-[#28283a] text-slate-400 px-2 py-0.5 rounded-full">
-                      {product.category}
-                    </span>
-                  ) : (
-                    <span className="text-xs text-slate-700">—</span>
-                  )}
-                </div>
-                <div>
-                  <CompletenessBar value={product.completeness as number ?? 0} />
-                </div>
-                <div className="flex items-center gap-1.5 justify-end opacity-0 group-hover:opacity-100 transition-opacity">
-                  <button
-                    onClick={() => navigate(`/products/${product.id}`)}
-                    className="p-1.5 rounded-lg text-slate-500 hover:text-indigo-400 hover:bg-indigo-500/10 transition-all"
-                    title="Открыть"
-                  >
-                    <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
-                    </svg>
-                  </button>
-                  <button
-                    onClick={() => handleDelete(product.id)}
-                    className="p-1.5 rounded-lg text-slate-500 hover:text-red-400 hover:bg-red-500/10 transition-all"
-                    title="Удалить"
-                  >
-                    <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                      <path
-                        strokeLinecap="round"
-                        strokeLinejoin="round"
-                        strokeWidth={2}
-                        d="M19 7l-.867 12.142A2 2 0 0 1 16.138 21H7.862a2 2 0 0 1-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 0 0-1-1h-4a1 1 0 0 0-1 1v3M4 7h16"
-                      />
-                    </svg>
-                  </button>
-                </div>
-              </div>
-            ))
-          )}
-        </div>
-      </div>
-
-      {/* ── Bulk actions bar ───────────────────────────────────────────────── */}
-      {selectedIds.size > 0 && (
-        <div className="fixed bottom-0 left-0 right-0 bg-[#13131a] border-t border-[#1e1e2c] p-4 z-40">
-          <div className="max-w-7xl mx-auto flex items-center justify-between">
-            <span className="text-sm text-slate-400">
+        {/* Bulk actions bar */}
+        {selected.size > 0 && (
+          <div
+            style={{
+              ...CARD_STYLE,
+              padding: '12px 20px',
+              marginBottom: 16,
+              display: 'flex',
+              alignItems: 'center',
+              gap: 12,
+              animation: 'slideDown 0.2s ease',
+              borderColor: 'rgba(99,102,241,0.25)',
+            }}
+          >
+            <span style={{ color: 'rgba(255,255,255,0.6)', fontSize: 14 }}>
               Выбрано{' '}
-              <span className="text-slate-100 font-semibold">{selectedIds.size}</span>{' '}
-              {selectedIds.size === 1 ? 'товар' : selectedIds.size < 5 ? 'товара' : 'товаров'}
+              <strong style={{ color: 'rgba(255,255,255,0.9)' }}>{selected.size}</strong>
             </span>
-            <div className="flex items-center gap-2">
-              <button
-                onClick={() => setSelectedIds(new Set())}
-                className="bg-[#1c1c28] hover:bg-[#28283a] border border-[#1e1e2c] text-slate-400 px-3 py-1.5 rounded-lg text-sm transition-all"
-              >
-                Снять выбор
-              </button>
-              <button
-                onClick={handleExportSelected}
-                className="bg-[#1c1c28] hover:bg-[#28283a] border border-[#1e1e2c] text-slate-300 px-3 py-1.5 rounded-lg text-sm transition-all"
-              >
-                Выгрузить
-              </button>
-              <button
-                onClick={handleBulkGenerate}
-                className="bg-indigo-500 hover:bg-indigo-600 text-white px-4 py-2 rounded-lg text-sm font-medium transition-all"
-              >
-                Генерация ИИ
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* ── Bulk progress toast ────────────────────────────────────────────── */}
-      {bulkTask && bulkTask.status !== 'completed' && bulkTask.status !== 'failed' && (
-        <div className="fixed bottom-4 right-4 bg-[#13131a] border border-[#1e1e2c] rounded-xl p-4 shadow-xl w-80 z-50">
-          <div className="flex items-center justify-between mb-3">
-            <div className="flex items-center gap-2">
-              <div className="w-4 h-4 border-2 border-indigo-500 border-t-transparent rounded-full animate-spin" />
-              <span className="text-sm font-medium text-slate-200">
-                {bulkTask.status === 'running' ? 'Обработка...' : bulkTask.status}
-              </span>
-            </div>
             <button
-              onClick={() => setBulkTask(null)}
-              className="text-slate-600 hover:text-slate-400 transition-colors"
+              className="btn-glow"
+              onClick={handleAiGenerate}
+              disabled={aiLoading}
+              style={{ padding: '7px 16px', fontSize: 13, display: 'flex', alignItems: 'center', gap: 6 }}
             >
-              <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-              </svg>
+              {aiLoading ? <Loader2 size={14} style={{ animation: 'spin 1s linear infinite' }} /> : <Sparkles size={14} />}
+              ИИ генерация
+            </button>
+            <button
+              onClick={handleBulkDelete}
+              disabled={bulkDeleteLoading}
+              style={{
+                background: 'rgba(248,113,113,0.1)',
+                border: '1px solid rgba(248,113,113,0.25)',
+                borderRadius: 8,
+                color: '#f87171',
+                cursor: 'pointer',
+                padding: '7px 16px',
+                fontSize: 13,
+                display: 'flex',
+                alignItems: 'center',
+                gap: 6,
+              }}
+            >
+              {bulkDeleteLoading ? <Loader2 size={14} style={{ animation: 'spin 1s linear infinite' }} /> : <Trash2 size={14} />}
+              Удалить {selected.size}
+            </button>
+            <button
+              onClick={() => setSelected(new Set())}
+              style={{
+                marginLeft: 'auto',
+                background: 'none',
+                border: 'none',
+                color: 'rgba(255,255,255,0.35)',
+                cursor: 'pointer',
+                padding: 4,
+              }}
+            >
+              <X size={16} />
             </button>
           </div>
-          {bulkTask.message && (
-            <p className="text-xs text-slate-500 mb-2">{bulkTask.message}</p>
-          )}
-          <div className="h-1.5 bg-[#1e1e2c] rounded-full overflow-hidden">
-            <div
-              className="h-full bg-indigo-500 rounded-full transition-all duration-500"
-              style={{ width: `${bulkProgress}%` }}
-            />
-          </div>
-          {bulkTask.total ? (
-            <p className="text-xs text-slate-600 mt-1.5 text-right">
-              {bulkTask.progress ?? 0} / {bulkTask.total}
-            </p>
-          ) : null}
-        </div>
-      )}
+        )}
 
-      {bulkTask?.status === 'completed' && (
-        <div className="fixed bottom-4 right-4 bg-[#13131a] border border-emerald-500/30 rounded-xl p-4 shadow-xl w-80 z-50">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-2">
-              <div className="w-4 h-4 rounded-full bg-emerald-500/20 flex items-center justify-center">
-                <svg className="w-2.5 h-2.5 text-emerald-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M5 13l4 4L19 7" />
-                </svg>
-              </div>
-              <span className="text-sm font-medium text-emerald-400">Готово</span>
-            </div>
+        {/* Table */}
+        <div style={{ ...CARD_STYLE, overflow: 'hidden' }}>
+          <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+            <thead>
+              <tr style={{ borderBottom: '1px solid rgba(255,255,255,0.06)' }}>
+                {[
+                  { content: (
+                    <button
+                      onClick={toggleAll}
+                      style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'rgba(255,255,255,0.45)', padding: 0 }}
+                    >
+                      {allSelected ? <CheckSquare size={16} color="#6366f1" /> : <Square size={16} />}
+                    </button>
+                  ), w: 44 },
+                  { content: '', w: 56 },
+                  { content: 'SKU', w: 120 },
+                  { content: 'Название', w: 'auto' },
+                  { content: 'Бренд', w: 120 },
+                  { content: 'Категория', w: 140 },
+                  { content: 'Заполненность', w: 140 },
+                  { content: 'Статус', w: 110 },
+                  { content: '', w: 88 },
+                ].map((col, i) => (
+                  <th
+                    key={i}
+                    style={{
+                      padding: '14px 16px',
+                      textAlign: 'left',
+                      color: 'rgba(255,255,255,0.35)',
+                      fontSize: 12,
+                      fontWeight: 500,
+                      width: col.w,
+                      whiteSpace: 'nowrap',
+                    }}
+                  >
+                    {col.content}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {loading ? (
+                <tr>
+                  <td
+                    colSpan={9}
+                    style={{
+                      padding: 60,
+                      textAlign: 'center',
+                      color: 'rgba(255,255,255,0.25)',
+                      fontSize: 15,
+                    }}
+                  >
+                    <Loader2 size={24} style={{ animation: 'spin 1s linear infinite', opacity: 0.5 }} />
+                  </td>
+                </tr>
+              ) : products.length === 0 ? (
+                <tr>
+                  <td
+                    colSpan={9}
+                    style={{
+                      padding: 60,
+                      textAlign: 'center',
+                      color: 'rgba(255,255,255,0.2)',
+                      fontSize: 15,
+                    }}
+                  >
+                    Товары не найдены
+                  </td>
+                </tr>
+              ) : (
+                products.map((product, idx) => {
+                  const isSelected = selected.has(product.id);
+                  return (
+                    <tr
+                      key={product.id}
+                      onClick={() => navigate(`/products/${product.id}`)}
+                      style={{
+                        borderBottom:
+                          idx < products.length - 1 ? '1px solid rgba(255,255,255,0.04)' : 'none',
+                        background: isSelected ? 'rgba(99,102,241,0.06)' : 'transparent',
+                        cursor: 'pointer',
+                        transition: 'background 0.15s',
+                      }}
+                      onMouseEnter={(e) => {
+                        if (!isSelected)
+                          (e.currentTarget as HTMLElement).style.background = 'rgba(255,255,255,0.025)';
+                      }}
+                      onMouseLeave={(e) => {
+                        (e.currentTarget as HTMLElement).style.background = isSelected
+                          ? 'rgba(99,102,241,0.06)'
+                          : 'transparent';
+                      }}
+                    >
+                      {/* Checkbox */}
+                      <td style={{ padding: '12px 16px' }} onClick={(e) => { e.stopPropagation(); toggleSelect(product.id); }}>
+                        {isSelected ? (
+                          <CheckSquare size={16} color="#6366f1" style={{ display: 'block' }} />
+                        ) : (
+                          <Square size={16} color="rgba(255,255,255,0.25)" style={{ display: 'block' }} />
+                        )}
+                      </td>
+                      {/* Image */}
+                      <td style={{ padding: '12px 16px' }}>
+                        {product.image_url ? (
+                          <img
+                            src={product.image_url}
+                            alt=""
+                            style={{ width: 40, height: 40, borderRadius: 8, objectFit: 'cover', display: 'block' }}
+                          />
+                        ) : (
+                          <div
+                            style={{
+                              width: 40,
+                              height: 40,
+                              borderRadius: 8,
+                              background: 'rgba(255,255,255,0.05)',
+                              display: 'flex',
+                              alignItems: 'center',
+                              justifyContent: 'center',
+                            }}
+                          >
+                            <Package size={16} color="rgba(255,255,255,0.2)" />
+                          </div>
+                        )}
+                      </td>
+                      {/* SKU */}
+                      <td style={{ padding: '12px 16px', color: 'rgba(255,255,255,0.45)', fontSize: 12, fontFamily: 'monospace' }}>
+                        {product.sku}
+                      </td>
+                      {/* Name */}
+                      <td style={{ padding: '12px 16px' }}>
+                        <span
+                          style={{
+                            color: 'rgba(255,255,255,0.85)',
+                            fontSize: 14,
+                            fontWeight: 500,
+                            display: '-webkit-box',
+                            WebkitLineClamp: 2,
+                            WebkitBoxOrient: 'vertical',
+                            overflow: 'hidden',
+                          }}
+                        >
+                          {product.name}
+                        </span>
+                      </td>
+                      {/* Brand */}
+                      <td style={{ padding: '12px 16px', color: 'rgba(255,255,255,0.55)', fontSize: 13 }}>
+                        {product.brand}
+                      </td>
+                      {/* Category */}
+                      <td style={{ padding: '12px 16px', color: 'rgba(255,255,255,0.45)', fontSize: 13 }}>
+                        {product.category}
+                      </td>
+                      {/* Completeness */}
+                      <td style={{ padding: '12px 16px' }}>
+                        <CompletenessBar value={product.completeness ?? 0} />
+                      </td>
+                      {/* Status */}
+                      <td style={{ padding: '12px 16px' }}>
+                        <StatusBadge status={product.status} />
+                      </td>
+                      {/* Actions */}
+                      <td style={{ padding: '12px 16px' }} onClick={(e) => e.stopPropagation()}>
+                        <div style={{ display: 'flex', gap: 6 }}>
+                          <button
+                            onClick={() => navigate(`/products/${product.id}`)}
+                            title="Редактировать"
+                            style={{
+                              background: 'rgba(99,102,241,0.1)',
+                              border: '1px solid rgba(99,102,241,0.2)',
+                              borderRadius: 7,
+                              color: '#6366f1',
+                              cursor: 'pointer',
+                              padding: '6px 8px',
+                              display: 'flex',
+                              alignItems: 'center',
+                            }}
+                          >
+                            <Edit3 size={13} />
+                          </button>
+                          <button
+                            onClick={(e) => handleDeleteOne(product.id, e)}
+                            title="Удалить"
+                            style={{
+                              background: 'rgba(248,113,113,0.08)',
+                              border: '1px solid rgba(248,113,113,0.2)',
+                              borderRadius: 7,
+                              color: '#f87171',
+                              cursor: 'pointer',
+                              padding: '6px 8px',
+                              display: 'flex',
+                              alignItems: 'center',
+                            }}
+                          >
+                            <Trash2 size={13} />
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })
+              )}
+            </tbody>
+          </table>
+        </div>
+
+        {/* Pagination */}
+        {pages > 1 && (
+          <div
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              gap: 8,
+              marginTop: 24,
+            }}
+          >
             <button
-              onClick={() => setBulkTask(null)}
-              className="text-slate-600 hover:text-slate-400 transition-colors"
+              onClick={() => setPage((p) => Math.max(1, p - 1))}
+              disabled={page <= 1}
+              style={{
+                background: 'rgba(255,255,255,0.04)',
+                border: '1px solid rgba(255,255,255,0.08)',
+                borderRadius: 8,
+                color: page <= 1 ? 'rgba(255,255,255,0.2)' : 'rgba(255,255,255,0.6)',
+                cursor: page <= 1 ? 'not-allowed' : 'pointer',
+                padding: '7px 12px',
+                display: 'flex',
+                alignItems: 'center',
+              }}
             >
-              <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-              </svg>
+              <ChevronLeft size={16} />
+            </button>
+            {Array.from({ length: Math.min(pages, 7) }, (_, i) => {
+              const p = i + 1;
+              return (
+                <button
+                  key={p}
+                  onClick={() => setPage(p)}
+                  style={{
+                    background: page === p ? 'linear-gradient(135deg, #6366f1, #a855f7)' : 'rgba(255,255,255,0.04)',
+                    border: page === p ? 'none' : '1px solid rgba(255,255,255,0.08)',
+                    borderRadius: 8,
+                    color: page === p ? '#fff' : 'rgba(255,255,255,0.55)',
+                    cursor: 'pointer',
+                    padding: '7px 13px',
+                    fontSize: 14,
+                    fontWeight: page === p ? 600 : 400,
+                  }}
+                >
+                  {p}
+                </button>
+              );
+            })}
+            <button
+              onClick={() => setPage((p) => Math.min(pages, p + 1))}
+              disabled={page >= pages}
+              style={{
+                background: 'rgba(255,255,255,0.04)',
+                border: '1px solid rgba(255,255,255,0.08)',
+                borderRadius: 8,
+                color: page >= pages ? 'rgba(255,255,255,0.2)' : 'rgba(255,255,255,0.6)',
+                cursor: page >= pages ? 'not-allowed' : 'pointer',
+                padding: '7px 12px',
+                display: 'flex',
+                alignItems: 'center',
+              }}
+            >
+              <ChevronRight size={16} />
             </button>
           </div>
-        </div>
-      )}
+        )}
+      </div>
 
-      {/* ── Import by SKU modal ────────────────────────────────────────────── */}
       {showImport && (
-        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center">
-          <div className="bg-[#13131a] border border-[#1e1e2c] rounded-2xl p-6 w-full max-w-md shadow-2xl">
-            <div className="flex items-center justify-between mb-5">
-              <h2 className="text-base font-semibold text-slate-100">Импорт по SKU</h2>
-              <button
-                onClick={() => setShowImport(false)}
-                className="text-slate-600 hover:text-slate-400 transition-colors"
-              >
-                <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-                </svg>
-              </button>
-            </div>
-            <div className="space-y-4">
-              <div>
-                <label className="block text-xs text-slate-500 mb-1.5">Артикул (SKU)</label>
-                <input
-                  value={importSku}
-                  onChange={(e) => setImportSku(e.target.value)}
-                  placeholder="Введите SKU товара"
-                  className="w-full bg-[#0d0d10] border border-[#28283a] rounded-lg px-3 py-2 text-sm text-slate-100 placeholder:text-slate-700 focus:border-indigo-500 outline-none transition-colors"
-                  onKeyDown={(e) => e.key === 'Enter' && handleImport()}
-                  autoFocus
-                />
-              </div>
-            </div>
-            <div className="flex justify-end gap-2 mt-6">
-              <button
-                onClick={() => setShowImport(false)}
-                className="bg-[#1c1c28] hover:bg-[#28283a] border border-[#1e1e2c] text-slate-300 px-3 py-1.5 rounded-lg text-sm transition-all"
-              >
-                Отмена
-              </button>
-              <button
-                onClick={handleImport}
-                disabled={!importSku.trim()}
-                className="bg-indigo-500 hover:bg-indigo-600 disabled:opacity-40 disabled:cursor-not-allowed text-white px-4 py-2 rounded-lg text-sm font-medium transition-all"
-              >
-                Импортировать
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* ── Bulk import modal ──────────────────────────────────────────────── */}
-      {showBulkImport && (
-        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center">
-          <div className="bg-[#13131a] border border-[#1e1e2c] rounded-2xl p-6 w-full max-w-md shadow-2xl">
-            <div className="flex items-center justify-between mb-5">
-              <h2 className="text-base font-semibold text-slate-100">Массовый импорт</h2>
-              <button
-                onClick={() => setShowBulkImport(false)}
-                className="text-slate-600 hover:text-slate-400 transition-colors"
-              >
-                <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-                </svg>
-              </button>
-            </div>
-            <div className="space-y-4">
-              <div>
-                <label className="block text-xs text-slate-500 mb-1.5">
-                  Запросы — каждый с новой строки
-                </label>
-                <textarea
-                  value={bulkQueries}
-                  onChange={(e) => setBulkQueries(e.target.value)}
-                  placeholder={'Iphone 15 Pro\nSamsung Galaxy S24\nAirPods Pro 2'}
-                  rows={8}
-                  className="w-full bg-[#0d0d10] border border-[#28283a] rounded-lg px-3 py-2 text-sm text-slate-100 placeholder:text-slate-700 focus:border-indigo-500 outline-none transition-colors resize-none font-mono"
-                />
-                <p className="text-xs text-slate-700 mt-1">
-                  {bulkQueries.split('\n').filter(Boolean).length} запросов
-                </p>
-              </div>
-            </div>
-            <div className="flex justify-end gap-2 mt-6">
-              <button
-                onClick={() => setShowBulkImport(false)}
-                className="bg-[#1c1c28] hover:bg-[#28283a] border border-[#1e1e2c] text-slate-300 px-3 py-1.5 rounded-lg text-sm transition-all"
-              >
-                Отмена
-              </button>
-              <button
-                onClick={handleBulkImport}
-                disabled={!bulkQueries.trim()}
-                className="bg-indigo-500 hover:bg-indigo-600 disabled:opacity-40 disabled:cursor-not-allowed text-white px-4 py-2 rounded-lg text-sm font-medium transition-all"
-              >
-                Запустить
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* ── Create product modal ───────────────────────────────────────────── */}
-      {showCreate && (
-        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center">
-          <div className="bg-[#13131a] border border-[#1e1e2c] rounded-2xl p-6 w-full max-w-md shadow-2xl">
-            <div className="flex items-center justify-between mb-5">
-              <h2 className="text-base font-semibold text-slate-100">Новый товар</h2>
-              <button
-                onClick={() => setShowCreate(false)}
-                className="text-slate-600 hover:text-slate-400 transition-colors"
-              >
-                <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-                </svg>
-              </button>
-            </div>
-            <div className="space-y-4">
-              {(['sku', 'name', 'category'] as const).map((field) => (
-                <div key={field}>
-                  <label className="block text-xs text-slate-500 mb-1.5 capitalize">
-                    {field === 'sku' ? 'Артикул (SKU)' : field === 'name' ? 'Название' : 'Категория'}
-                  </label>
-                  <input
-                    value={newProduct[field]}
-                    onChange={(e) => setNewProduct((p) => ({ ...p, [field]: e.target.value }))}
-                    placeholder={field === 'sku' ? 'SKU-001' : field === 'name' ? 'Название товара' : 'Электроника'}
-                    className="w-full bg-[#0d0d10] border border-[#28283a] rounded-lg px-3 py-2 text-sm text-slate-100 placeholder:text-slate-700 focus:border-indigo-500 outline-none transition-colors"
-                  />
-                </div>
-              ))}
-            </div>
-            <div className="flex justify-end gap-2 mt-6">
-              <button
-                onClick={() => setShowCreate(false)}
-                className="bg-[#1c1c28] hover:bg-[#28283a] border border-[#1e1e2c] text-slate-300 px-3 py-1.5 rounded-lg text-sm transition-all"
-              >
-                Отмена
-              </button>
-              <button
-                onClick={handleCreate}
-                disabled={!newProduct.sku.trim() || !newProduct.name.trim()}
-                className="bg-indigo-500 hover:bg-indigo-600 disabled:opacity-40 disabled:cursor-not-allowed text-white px-4 py-2 rounded-lg text-sm font-medium transition-all"
-              >
-                Создать
-              </button>
-            </div>
-          </div>
-        </div>
+        <ImportModal
+          connections={connections}
+          onClose={() => setShowImport(false)}
+          onDone={() => fetchProducts(1, search, category)}
+        />
       )}
     </div>
   );

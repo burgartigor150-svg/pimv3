@@ -1,135 +1,471 @@
-import React, { useState, useEffect } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
+import {
+  Plus,
+  Trash2,
+  Wifi,
+  WifiOff,
+  Loader2,
+  X,
+  CheckCircle2,
+  AlertCircle,
+  Clock,
+  Plug,
+  RefreshCw,
+} from 'lucide-react';
+import { api } from '../lib/api';
+import { useToast } from '../components/Toast';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
-type MarketplaceType = 'ozon' | 'yandex' | 'wildberries' | 'megamarket';
-
 interface Connection {
-  id: string | number;
+  id: string;
   name: string;
-  type: MarketplaceType | string;
-  api_key?: string;
-  client_id?: string;
-  status?: string;
-  [key: string]: unknown;
+  type: 'ozon' | 'wb' | 'yandex' | 'mega' | string;
+  status: 'connected' | 'error' | 'pending' | string;
+  last_sync?: string;
 }
 
-interface NewConnectionForm {
-  name: string;
-  type: MarketplaceType | '';
-  api_key: string;
-  client_id: string;
+// ─── Constants ────────────────────────────────────────────────────────────────
+
+const MARKETPLACE_META: Record<string, { emoji: string; label: string; color: string }> = {
+  ozon:    { emoji: '🟠', label: 'Ozon',           color: '#005BFF' },
+  wb:      { emoji: '🟣', label: 'Wildberries',    color: '#CB11AB' },
+  yandex:  { emoji: '🟡', label: 'Яндекс Маркет',  color: '#FFCC00' },
+  mega:    { emoji: '🟢', label: 'МегаМаркет',     color: '#00B065' },
+};
+
+const MARKETPLACES = ['ozon', 'wb', 'yandex', 'mega'] as const;
+
+const STATUS_CONFIG: Record<string, { color: string; borderGlow: string; icon: React.ReactNode; label: string }> = {
+  connected: {
+    color: '#10b981',
+    borderGlow: '0 0 0 1px rgba(16,185,129,0.35), 0 0 16px rgba(16,185,129,0.12)',
+    icon: <CheckCircle2 size={14} />,
+    label: 'Подключено',
+  },
+  error: {
+    color: '#f87171',
+    borderGlow: '0 0 0 1px rgba(248,113,113,0.35), 0 0 16px rgba(248,113,113,0.12)',
+    icon: <AlertCircle size={14} />,
+    label: 'Ошибка',
+  },
+  pending: {
+    color: '#f59e0b',
+    borderGlow: '0 0 0 1px rgba(245,158,11,0.3), 0 0 12px rgba(245,158,11,0.1)',
+    icon: <Clock size={14} />,
+    label: 'Ожидание',
+  },
+};
+
+function getStatusConfig(status: string) {
+  return STATUS_CONFIG[status] ?? {
+    color: 'rgba(255,255,255,0.3)',
+    borderGlow: 'none',
+    icon: <Plug size={14} />,
+    label: status,
+  };
 }
 
-// ─── Marketplace meta ─────────────────────────────────────────────────────────
+// ─── Add Connection Modal ─────────────────────────────────────────────────────
 
-const MARKETPLACES: {
-  type: MarketplaceType;
-  label: string;
-  initials: string;
-  color: string;
-  bgColor: string;
-  fields: { key: 'api_key' | 'client_id'; label: string; placeholder: string }[];
-}[] = [
-  {
-    type: 'ozon',
-    label: 'Ozon',
-    initials: 'OZ',
-    color: 'text-blue-400',
-    bgColor: 'bg-blue-500/15',
-    fields: [
-      { key: 'client_id', label: 'Client ID', placeholder: '123456' },
-      { key: 'api_key', label: 'API Key', placeholder: 'xxxx-xxxx-xxxx' },
-    ],
-  },
-  {
-    type: 'yandex',
-    label: 'Яндекс Маркет',
-    initials: 'YM',
-    color: 'text-yellow-400',
-    bgColor: 'bg-yellow-500/15',
-    fields: [
-      { key: 'client_id', label: 'Campaign ID', placeholder: '123456' },
-      { key: 'api_key', label: 'OAuth Token', placeholder: 'y0_xxxx' },
-    ],
-  },
-  {
-    type: 'wildberries',
-    label: 'Wildberries',
-    initials: 'WB',
-    color: 'text-purple-400',
-    bgColor: 'bg-purple-500/15',
-    fields: [{ key: 'api_key', label: 'API Token', placeholder: 'eyJhb...' }],
-  },
-  {
-    type: 'megamarket',
-    label: 'Мегамаркет',
-    initials: 'MM',
-    color: 'text-emerald-400',
-    bgColor: 'bg-emerald-500/15',
-    fields: [
-      { key: 'client_id', label: 'Merchant ID', placeholder: '123456' },
-      { key: 'api_key', label: 'API Key', placeholder: 'xxxx-xxxx' },
-    ],
-  },
-];
+interface AddModalProps {
+  onClose: () => void;
+  onAdded: () => void;
+}
 
-function getMarketplaceMeta(type: string) {
-  return MARKETPLACES.find((m) => m.type === type) ?? null;
+function AddModal({ onClose, onAdded }: AddModalProps) {
+  const { toast } = useToast();
+  const [type, setType] = useState<typeof MARKETPLACES[number]>('ozon');
+  const [name, setName] = useState('');
+  const [apiKey, setApiKey] = useState('');
+  const [loading, setLoading] = useState(false);
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!name.trim()) { toast('Введите название подключения', 'error'); return; }
+    if (!apiKey.trim()) { toast('Введите API ключ', 'error'); return; }
+    setLoading(true);
+    try {
+      await api.post('/api/v1/connections', { name: name.trim(), type, api_key: apiKey.trim() });
+      toast('Подключение добавлено', 'success');
+      onAdded();
+      onClose();
+    } catch (e: any) {
+      toast(e?.response?.data?.detail ?? e?.message ?? 'Ошибка создания подключения', 'error');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div
+      style={{
+        position: 'fixed',
+        inset: 0,
+        background: 'rgba(0,0,0,0.72)',
+        backdropFilter: 'blur(10px)',
+        zIndex: 100,
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        padding: 24,
+      }}
+      onClick={(e) => e.target === e.currentTarget && onClose()}
+    >
+      <div
+        style={{
+          background: 'rgba(255,255,255,0.03)',
+          border: '1px solid rgba(255,255,255,0.1)',
+          borderRadius: 20,
+          backdropFilter: 'blur(24px)',
+          padding: 36,
+          width: '100%',
+          maxWidth: 500,
+          position: 'relative',
+        }}
+        className="animate-fade-up"
+      >
+        <button
+          onClick={onClose}
+          style={{
+            position: 'absolute',
+            top: 16,
+            right: 16,
+            background: 'rgba(255,255,255,0.05)',
+            border: '1px solid rgba(255,255,255,0.08)',
+            borderRadius: 8,
+            color: 'rgba(255,255,255,0.4)',
+            cursor: 'pointer',
+            padding: 6,
+            display: 'flex',
+            alignItems: 'center',
+          }}
+        >
+          <X size={15} />
+        </button>
+
+        <h2 style={{ margin: '0 0 28px', fontSize: 22, fontWeight: 700, color: 'rgba(255,255,255,0.92)' }}>
+          Добавить подключение
+        </h2>
+
+        <form onSubmit={handleSubmit}>
+          {/* Marketplace type selector */}
+          <div style={{ marginBottom: 24 }}>
+            <p style={{ margin: '0 0 12px', color: 'rgba(255,255,255,0.45)', fontSize: 12 }}>
+              Маркетплейс
+            </p>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4,1fr)', gap: 10 }}>
+              {MARKETPLACES.map((m) => {
+                const meta = MARKETPLACE_META[m];
+                const active = type === m;
+                return (
+                  <button
+                    key={m}
+                    type="button"
+                    onClick={() => setType(m)}
+                    style={{
+                      background: active
+                        ? 'linear-gradient(135deg, rgba(99,102,241,0.2), rgba(168,85,247,0.2))'
+                        : 'rgba(255,255,255,0.03)',
+                      border: active
+                        ? '1px solid rgba(99,102,241,0.5)'
+                        : '1px solid rgba(255,255,255,0.07)',
+                      borderRadius: 12,
+                      cursor: 'pointer',
+                      padding: '14px 10px',
+                      display: 'flex',
+                      flexDirection: 'column',
+                      alignItems: 'center',
+                      gap: 6,
+                      transition: 'all 0.2s',
+                    }}
+                  >
+                    <span style={{ fontSize: 22 }}>{meta.emoji}</span>
+                    <span
+                      style={{
+                        color: active ? 'rgba(255,255,255,0.9)' : 'rgba(255,255,255,0.45)',
+                        fontSize: 11,
+                        fontWeight: active ? 600 : 400,
+                        textAlign: 'center',
+                        lineHeight: 1.3,
+                      }}
+                    >
+                      {meta.label}
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+
+          {/* Name */}
+          <div style={{ marginBottom: 16 }}>
+            <label
+              htmlFor="conn-name"
+              style={{ display: 'block', color: 'rgba(255,255,255,0.45)', fontSize: 12, marginBottom: 8 }}
+            >
+              Название
+            </label>
+            <input
+              id="conn-name"
+              className="input-premium"
+              style={{ width: '100%', padding: '10px 14px', boxSizing: 'border-box' }}
+              placeholder={`Мой ${MARKETPLACE_META[type]?.label ?? type}`}
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+            />
+          </div>
+
+          {/* API key */}
+          <div style={{ marginBottom: 28 }}>
+            <label
+              htmlFor="conn-key"
+              style={{ display: 'block', color: 'rgba(255,255,255,0.45)', fontSize: 12, marginBottom: 8 }}
+            >
+              API ключ
+            </label>
+            <input
+              id="conn-key"
+              className="input-premium"
+              type="password"
+              style={{ width: '100%', padding: '10px 14px', boxSizing: 'border-box' }}
+              placeholder="sk-••••••••••••"
+              value={apiKey}
+              onChange={(e) => setApiKey(e.target.value)}
+            />
+          </div>
+
+          <div style={{ display: 'flex', gap: 12 }}>
+            <button
+              type="button"
+              onClick={onClose}
+              style={{
+                flex: 1,
+                background: 'rgba(255,255,255,0.05)',
+                border: '1px solid rgba(255,255,255,0.1)',
+                borderRadius: 10,
+                color: 'rgba(255,255,255,0.55)',
+                cursor: 'pointer',
+                padding: '12px',
+                fontSize: 14,
+              }}
+            >
+              Отмена
+            </button>
+            <button
+              type="submit"
+              className="btn-glow"
+              disabled={loading}
+              style={{
+                flex: 2,
+                padding: '12px',
+                fontSize: 14,
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                gap: 8,
+              }}
+            >
+              {loading ? (
+                <Loader2 size={16} style={{ animation: 'spin 1s linear infinite' }} />
+              ) : (
+                <Plus size={16} />
+              )}
+              {loading ? 'Сохранение…' : 'Добавить'}
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+  );
 }
 
 // ─── Connection Card ──────────────────────────────────────────────────────────
 
-function ConnectionCard({
-  connection,
-  onDelete,
-}: {
+interface ConnectionCardProps {
   connection: Connection;
-  onDelete: (id: string | number) => void;
-}) {
-  const meta = getMarketplaceMeta(connection.type);
+  onDelete: (id: string) => void;
+  onTest: (id: string) => void;
+  testing: boolean;
+}
+
+function ConnectionCard({ connection, onDelete, onTest, testing }: ConnectionCardProps) {
+  const meta = MARKETPLACE_META[connection.type] ?? { emoji: '🔌', label: connection.type, color: '#6366f1' };
+  const sc = getStatusConfig(connection.status);
+
+  const formatSync = (dt?: string) => {
+    if (!dt) return 'Нет данных';
+    const d = new Date(dt);
+    const diff = Date.now() - d.getTime();
+    if (diff < 60000) return 'Только что';
+    if (diff < 3600000) return `${Math.floor(diff / 60000)} мин. назад`;
+    if (diff < 86400000) return `${Math.floor(diff / 3600000)} ч. назад`;
+    return d.toLocaleDateString('ru');
+  };
 
   return (
-    <div className="bg-[#13131a] border border-[#1e1e2c] rounded-xl p-5 flex flex-col gap-3 hover:border-[#28283a] transition-colors group">
-      <div className="flex items-start justify-between">
-        <div className="flex items-center gap-3">
-          {/* Logo placeholder */}
+    <div
+      style={{
+        background: 'rgba(255,255,255,0.03)',
+        border: '1px solid rgba(255,255,255,0.08)',
+        borderRadius: 16,
+        backdropFilter: 'blur(20px)',
+        padding: 24,
+        display: 'flex',
+        flexDirection: 'column',
+        gap: 16,
+        boxShadow: sc.borderGlow,
+        transition: 'box-shadow 0.3s, transform 0.2s',
+        position: 'relative',
+        overflow: 'hidden',
+      }}
+      onMouseEnter={(e) => {
+        (e.currentTarget as HTMLElement).style.transform = 'translateY(-2px)';
+      }}
+      onMouseLeave={(e) => {
+        (e.currentTarget as HTMLElement).style.transform = 'translateY(0)';
+      }}
+    >
+      {/* Subtle gradient background accent */}
+      <div
+        style={{
+          position: 'absolute',
+          top: 0,
+          left: 0,
+          right: 0,
+          height: 2,
+          background: `linear-gradient(90deg, ${sc.color}88, transparent)`,
+          borderRadius: '16px 16px 0 0',
+        }}
+      />
+
+      {/* Header row */}
+      <div style={{ display: 'flex', alignItems: 'flex-start', gap: 14 }}>
+        {/* Logo */}
+        <div
+          style={{
+            width: 52,
+            height: 52,
+            borderRadius: 14,
+            background: `${meta.color}18`,
+            border: `1px solid ${meta.color}30`,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            fontSize: 26,
+            flexShrink: 0,
+          }}
+        >
+          {meta.emoji}
+        </div>
+
+        {/* Name + type */}
+        <div style={{ flex: 1, minWidth: 0 }}>
           <div
-            className={`w-10 h-10 rounded-xl flex items-center justify-center font-bold text-sm ${
-              meta ? `${meta.bgColor} ${meta.color}` : 'bg-[#1c1c28] text-slate-400'
-            }`}
+            style={{
+              color: 'rgba(255,255,255,0.88)',
+              fontSize: 16,
+              fontWeight: 600,
+              whiteSpace: 'nowrap',
+              overflow: 'hidden',
+              textOverflow: 'ellipsis',
+            }}
           >
-            {meta ? meta.initials : connection.type.slice(0, 2).toUpperCase()}
+            {connection.name}
           </div>
-          <div>
-            <p className="text-slate-100 font-medium text-sm leading-tight">{connection.name}</p>
-            <span className="inline-block mt-0.5 text-xs bg-[#1c1c28] text-slate-400 px-2 py-0.5 rounded">
-              {meta ? meta.label : connection.type}
-            </span>
+          <div style={{ color: 'rgba(255,255,255,0.35)', fontSize: 12, marginTop: 3 }}>
+            {meta.label}
           </div>
         </div>
-        <button
-          onClick={() => onDelete(connection.id)}
-          className="p-1.5 rounded-lg text-slate-700 hover:text-red-400 hover:bg-red-500/10 transition-all opacity-0 group-hover:opacity-100"
-          title="Удалить подключение"
+
+        {/* Status badge */}
+        <span
+          style={{
+            background: `${sc.color}18`,
+            border: `1px solid ${sc.color}35`,
+            color: sc.color,
+            borderRadius: 8,
+            padding: '4px 10px',
+            fontSize: 11,
+            fontWeight: 600,
+            display: 'flex',
+            alignItems: 'center',
+            gap: 5,
+            whiteSpace: 'nowrap',
+          }}
         >
-          <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-            <path
-              strokeLinecap="round"
-              strokeLinejoin="round"
-              strokeWidth={2}
-              d="M19 7l-.867 12.142A2 2 0 0 1 16.138 21H7.862a2 2 0 0 1-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 0 0-1-1h-4a1 1 0 0 0-1 1v3M4 7h16"
-            />
-          </svg>
-        </button>
+          {sc.icon}
+          {sc.label}
+        </span>
       </div>
 
-      {/* Status */}
-      <div className="flex items-center gap-1.5">
-        <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 shadow-[0_0_6px_rgba(16,185,129,0.6)]" />
-        <span className="text-xs text-slate-500">
-          {connection.status === 'active' || !connection.status ? 'Подключено' : connection.status}
-        </span>
+      {/* Last sync */}
+      <div
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          gap: 6,
+          color: 'rgba(255,255,255,0.3)',
+          fontSize: 12,
+        }}
+      >
+        <Clock size={12} />
+        <span>Синхронизация: {formatSync(connection.last_sync)}</span>
+      </div>
+
+      {/* Divider */}
+      <div style={{ height: 1, background: 'rgba(255,255,255,0.05)' }} />
+
+      {/* Actions */}
+      <div style={{ display: 'flex', gap: 8 }}>
+        <button
+          onClick={() => onTest(connection.id)}
+          disabled={testing}
+          style={{
+            flex: 1,
+            background: 'rgba(99,102,241,0.08)',
+            border: '1px solid rgba(99,102,241,0.2)',
+            borderRadius: 9,
+            color: '#6366f1',
+            cursor: testing ? 'not-allowed' : 'pointer',
+            padding: '9px 12px',
+            fontSize: 13,
+            fontWeight: 500,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            gap: 7,
+            transition: 'all 0.2s',
+            opacity: testing ? 0.7 : 1,
+          }}
+        >
+          {testing ? (
+            <Loader2 size={14} style={{ animation: 'spin 1s linear infinite' }} />
+          ) : connection.status === 'connected' ? (
+            <Wifi size={14} />
+          ) : (
+            <RefreshCw size={14} />
+          )}
+          Проверить
+        </button>
+        <button
+          onClick={() => onDelete(connection.id)}
+          style={{
+            background: 'rgba(248,113,113,0.07)',
+            border: '1px solid rgba(248,113,113,0.18)',
+            borderRadius: 9,
+            color: '#f87171',
+            cursor: 'pointer',
+            padding: '9px 12px',
+            fontSize: 13,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            transition: 'all 0.2s',
+          }}
+        >
+          <Trash2 size={14} />
+        </button>
       </div>
     </div>
   );
@@ -138,248 +474,337 @@ function ConnectionCard({
 // ─── Main Component ───────────────────────────────────────────────────────────
 
 export default function IntegrationsPage() {
-  // ── State ──────────────────────────────────────────────────────────────────
+  const { toast } = useToast();
+
   const [connections, setConnections] = useState<Connection[]>([]);
-  const [showAddModal, setShowAddModal] = useState(false);
-  const [isLoading, setIsLoading] = useState(false);
-  const [isSaving, setIsSaving] = useState(false);
-  const [form, setForm] = useState<NewConnectionForm>({
-    name: '',
-    type: '',
-    api_key: '',
-    client_id: '',
-  });
+  const [loading, setLoading] = useState(true);
+  const [showAdd, setShowAdd] = useState(false);
+  const [testingIds, setTestingIds] = useState<Set<string>>(new Set());
 
-  // ── Fetch connections ──────────────────────────────────────────────────────
-  useEffect(() => {
-    fetchConnections();
-  }, []);
-
-  async function fetchConnections() {
-    setIsLoading(true);
+  const fetchConnections = useCallback(async () => {
     try {
-      const res = await fetch('/api/v1/connections');
-      const data = await res.json();
-      setConnections(Array.isArray(data) ? data : data.connections ?? []);
-    } catch (e) {
-      console.error('Failed to fetch connections', e);
+      const res = await api.get<Connection[]>('/api/v1/connections');
+      setConnections(Array.isArray(res.data) ? res.data : []);
+    } catch (e: any) {
+      toast(e?.message ?? 'Ошибка загрузки подключений', 'error');
     } finally {
-      setIsLoading(false);
+      setLoading(false);
     }
-  }
+  }, [toast]);
 
-  // ── Handlers ───────────────────────────────────────────────────────────────
-  async function handleAdd() {
-    if (!form.name.trim() || !form.type) return;
-    setIsSaving(true);
-    try {
-      const res = await fetch('/api/v1/connections', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          name: form.name,
-          type: form.type,
-          api_key: form.api_key,
-          client_id: form.client_id,
-        }),
-      });
-      const data = await res.json();
-      console.log('Connection added', data);
-      setShowAddModal(false);
-      setForm({ name: '', type: '', api_key: '', client_id: '' });
-      fetchConnections();
-    } catch (e) {
-      console.error('Failed to add connection', e);
-    } finally {
-      setIsSaving(false);
-    }
-  }
+  useEffect(() => { fetchConnections(); }, [fetchConnections]);
 
-  async function handleDelete(id: string | number) {
+  const handleDelete = async (id: string) => {
     try {
-      await fetch(`/api/v1/connections/${id}`, { method: 'DELETE' });
+      await api.delete(`/api/v1/connections/${id}`);
+      toast('Подключение удалено', 'success');
       setConnections((prev) => prev.filter((c) => c.id !== id));
-    } catch (e) {
-      console.error('Failed to delete connection', e);
+    } catch (e: any) {
+      toast(e?.response?.data?.detail ?? 'Ошибка удаления', 'error');
     }
-  }
+  };
 
-  function closeModal() {
-    setShowAddModal(false);
-    setForm({ name: '', type: '', api_key: '', client_id: '' });
-  }
+  const handleTest = async (id: string) => {
+    setTestingIds((prev) => new Set(prev).add(id));
+    try {
+      const res = await api.post(`/api/v1/connections/${id}/test`);
+      const ok = res.data?.success ?? res.data?.status === 'ok';
+      if (ok) {
+        toast('Подключение работает', 'success');
+        setConnections((prev) =>
+          prev.map((c) => (c.id === id ? { ...c, status: 'connected' } : c))
+        );
+      } else {
+        toast(res.data?.message ?? 'Проверка не прошла', 'error');
+        setConnections((prev) =>
+          prev.map((c) => (c.id === id ? { ...c, status: 'error' } : c))
+        );
+      }
+    } catch (e: any) {
+      toast(e?.response?.data?.detail ?? 'Ошибка проверки', 'error');
+      setConnections((prev) =>
+        prev.map((c) => (c.id === id ? { ...c, status: 'error' } : c))
+      );
+    } finally {
+      setTestingIds((prev) => {
+        const next = new Set(prev);
+        next.delete(id);
+        return next;
+      });
+    }
+  };
 
-  const selectedMeta = form.type ? getMarketplaceMeta(form.type) : null;
-  const canSave = form.name.trim() && form.type && form.api_key.trim();
+  // Stats summary
+  const connected = connections.filter((c) => c.status === 'connected').length;
+  const errors = connections.filter((c) => c.status === 'error').length;
 
-  // ─────────────────────────────────────────────────────────────────────────
   return (
-    <div className="min-h-screen bg-[#0d0d10] text-slate-100 pb-10">
-      {/* ── Page Header ───────────────────────────────────────────────────── */}
-      <div className="px-6 pt-8 pb-6">
-        <div className="flex items-center justify-between">
-          <div>
-            <h1 className="text-xl font-semibold text-slate-100">Подключения к маркетплейсам</h1>
-            <p className="text-sm text-slate-600 mt-0.5">Управляйте интеграциями с торговыми площадками</p>
-          </div>
-          <button
-            onClick={() => setShowAddModal(true)}
-            className="bg-indigo-500 hover:bg-indigo-600 text-white px-4 py-2 rounded-lg text-sm font-medium transition-all"
-          >
-            + Добавить
-          </button>
-        </div>
+    <div
+      style={{
+        minHeight: '100vh',
+        background: '#03030a',
+        color: 'rgba(255,255,255,0.9)',
+        fontFamily: 'Inter, system-ui, sans-serif',
+        padding: '32px 40px',
+        position: 'relative',
+        overflow: 'hidden',
+      }}
+    >
+      {/* Background orbs */}
+      <div style={{ position: 'fixed', inset: 0, zIndex: 0, pointerEvents: 'none', overflow: 'hidden' }}>
+        <div
+          style={{
+            position: 'absolute',
+            top: '-15%',
+            left: '-8%',
+            width: 550,
+            height: 550,
+            borderRadius: '50%',
+            background: 'radial-gradient(circle, rgba(99,102,241,0.10) 0%, transparent 70%)',
+            animation: 'orbFloat 13s ease-in-out infinite',
+          }}
+        />
+        <div
+          style={{
+            position: 'absolute',
+            bottom: '-12%',
+            right: '-6%',
+            width: 480,
+            height: 480,
+            borderRadius: '50%',
+            background: 'radial-gradient(circle, rgba(168,85,247,0.09) 0%, transparent 70%)',
+            animation: 'orbFloat 17s ease-in-out infinite reverse',
+          }}
+        />
+        <div
+          style={{
+            position: 'absolute',
+            top: '55%',
+            left: '45%',
+            width: 320,
+            height: 320,
+            borderRadius: '50%',
+            background: 'radial-gradient(circle, rgba(16,185,129,0.06) 0%, transparent 70%)',
+            animation: 'orbFloat 22s ease-in-out infinite 3s',
+          }}
+        />
+        <style>{`
+          @keyframes orbFloat {
+            0%, 100% { transform: translate(0,0) scale(1); }
+            33% { transform: translate(25px,-18px) scale(1.04); }
+            66% { transform: translate(-18px,12px) scale(0.97); }
+          }
+          @keyframes spin { to { transform: rotate(360deg); } }
+        `}</style>
       </div>
 
-      {/* ── Connections grid ───────────────────────────────────────────────── */}
-      <div className="px-6">
-        {isLoading ? (
-          <div className="flex items-center justify-center py-20 gap-3 text-slate-600">
-            <div className="w-5 h-5 border-2 border-indigo-500 border-t-transparent rounded-full animate-spin" />
-            <span className="text-sm">Загрузка...</span>
+      <div style={{ position: 'relative', zIndex: 1, maxWidth: 1200, margin: '0 auto' }}>
+
+        {/* Header */}
+        <div style={{ display: 'flex', alignItems: 'center', marginBottom: 32 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 14 }}>
+            <div
+              style={{
+                width: 42,
+                height: 42,
+                borderRadius: 12,
+                background: 'linear-gradient(135deg, rgba(99,102,241,0.2), rgba(168,85,247,0.2))',
+                border: '1px solid rgba(99,102,241,0.3)',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+              }}
+            >
+              <Plug size={20} color="#a855f7" />
+            </div>
+            <div>
+              <h1 style={{ margin: 0, fontSize: 28, fontWeight: 700, letterSpacing: '-0.5px' }}>
+                Подключения
+              </h1>
+              <p style={{ margin: 0, color: 'rgba(255,255,255,0.3)', fontSize: 13, marginTop: 2 }}>
+                Управление интеграциями с маркетплейсами
+              </p>
+            </div>
+          </div>
+          <button
+            className="btn-glow"
+            onClick={() => setShowAdd(true)}
+            style={{
+              marginLeft: 'auto',
+              padding: '10px 22px',
+              fontSize: 14,
+              display: 'flex',
+              alignItems: 'center',
+              gap: 8,
+            }}
+          >
+            <Plus size={16} />
+            Добавить
+          </button>
+        </div>
+
+        {/* Summary strip */}
+        {!loading && connections.length > 0 && (
+          <div
+            style={{
+              display: 'flex',
+              gap: 16,
+              marginBottom: 28,
+            }}
+            className="animate-fade-in"
+          >
+            {[
+              { label: 'Всего', value: connections.length, color: '#6366f1' },
+              { label: 'Подключено', value: connected, color: '#10b981' },
+              { label: 'Ошибки', value: errors, color: '#f87171' },
+            ].map(({ label, value, color }) => (
+              <div
+                key={label}
+                style={{
+                  background: 'rgba(255,255,255,0.03)',
+                  border: '1px solid rgba(255,255,255,0.07)',
+                  borderRadius: 12,
+                  padding: '12px 20px',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 10,
+                }}
+              >
+                <span style={{ color, fontSize: 22, fontWeight: 700, lineHeight: 1 }}>{value}</span>
+                <span style={{ color: 'rgba(255,255,255,0.35)', fontSize: 13 }}>{label}</span>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {/* Grid */}
+        {loading ? (
+          <div
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              padding: 100,
+              color: 'rgba(255,255,255,0.2)',
+              fontSize: 15,
+              gap: 12,
+            }}
+          >
+            <Loader2 size={22} style={{ animation: 'spin 1s linear infinite' }} />
+            Загрузка…
           </div>
         ) : connections.length === 0 ? (
-          <div className="flex flex-col items-center justify-center py-24 gap-4 text-slate-600">
-            <div className="w-14 h-14 rounded-2xl bg-[#13131a] border border-[#1e1e2c] flex items-center justify-center">
-              <svg className="w-7 h-7" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  strokeWidth={1.5}
-                  d="M13.828 10.172a4 4 0 0 0-5.656 0l-4 4a4 4 0 1 0 5.656 5.656l1.102-1.101m-.758-4.899a4 4 0 0 0 5.656 0l4-4a4 4 0 0 0-5.656-5.656l-1.1 1.1"
-                />
-              </svg>
-            </div>
-            <div className="text-center">
-              <p className="text-sm font-medium text-slate-500">Нет подключений</p>
-              <p className="text-xs text-slate-700 mt-1">Добавьте первый маркетплейс для синхронизации товаров</p>
-            </div>
-            <button
-              onClick={() => setShowAddModal(true)}
-              className="bg-indigo-500 hover:bg-indigo-600 text-white px-4 py-2 rounded-lg text-sm font-medium transition-all"
+          <div
+            style={{
+              background: 'rgba(255,255,255,0.02)',
+              border: '1px dashed rgba(255,255,255,0.08)',
+              borderRadius: 20,
+              padding: 80,
+              textAlign: 'center',
+            }}
+          >
+            <div
+              style={{
+                width: 64,
+                height: 64,
+                borderRadius: 18,
+                background: 'rgba(99,102,241,0.1)',
+                border: '1px solid rgba(99,102,241,0.2)',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                margin: '0 auto 20px',
+              }}
             >
-              + Добавить подключение
+              <WifiOff size={28} color="#6366f1" />
+            </div>
+            <p style={{ color: 'rgba(255,255,255,0.4)', fontSize: 15, margin: '0 0 8px' }}>
+              Нет подключений
+            </p>
+            <p style={{ color: 'rgba(255,255,255,0.2)', fontSize: 13, margin: '0 0 24px' }}>
+              Добавьте первое подключение к маркетплейсу
+            </p>
+            <button
+              className="btn-glow"
+              onClick={() => setShowAdd(true)}
+              style={{ padding: '10px 24px', fontSize: 14, display: 'inline-flex', alignItems: 'center', gap: 8 }}
+            >
+              <Plus size={16} />
+              Добавить подключение
             </button>
           </div>
         ) : (
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
-            {connections.map((connection) => (
-              <ConnectionCard
-                key={connection.id}
-                connection={connection}
-                onDelete={handleDelete}
-              />
+          <div
+            style={{
+              display: 'grid',
+              gridTemplateColumns: 'repeat(auto-fill, minmax(300px, 1fr))',
+              gap: 20,
+            }}
+          >
+            {connections.map((conn) => (
+              <div key={conn.id} className="animate-fade-up">
+                <ConnectionCard
+                  connection={conn}
+                  onDelete={handleDelete}
+                  onTest={handleTest}
+                  testing={testingIds.has(conn.id)}
+                />
+              </div>
             ))}
-            {/* Add card */}
+
+            {/* Add card shortcut */}
             <button
-              onClick={() => setShowAddModal(true)}
-              className="bg-[#13131a] border border-dashed border-[#28283a] rounded-xl p-5 flex flex-col items-center justify-center gap-2 text-slate-700 hover:text-slate-500 hover:border-[#3a3a54] transition-all min-h-[120px]"
+              onClick={() => setShowAdd(true)}
+              style={{
+                background: 'rgba(255,255,255,0.015)',
+                border: '1px dashed rgba(255,255,255,0.08)',
+                borderRadius: 16,
+                cursor: 'pointer',
+                padding: 24,
+                display: 'flex',
+                flexDirection: 'column',
+                alignItems: 'center',
+                justifyContent: 'center',
+                gap: 10,
+                minHeight: 200,
+                transition: 'border-color 0.2s, background 0.2s',
+              }}
+              onMouseEnter={(e) => {
+                const el = e.currentTarget as HTMLElement;
+                el.style.borderColor = 'rgba(99,102,241,0.3)';
+                el.style.background = 'rgba(99,102,241,0.04)';
+              }}
+              onMouseLeave={(e) => {
+                const el = e.currentTarget as HTMLElement;
+                el.style.borderColor = 'rgba(255,255,255,0.08)';
+                el.style.background = 'rgba(255,255,255,0.015)';
+              }}
             >
-              <svg className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M12 4v16m8-8H4" />
-              </svg>
-              <span className="text-xs">Добавить</span>
+              <div
+                style={{
+                  width: 44,
+                  height: 44,
+                  borderRadius: 12,
+                  background: 'rgba(99,102,241,0.1)',
+                  border: '1px solid rgba(99,102,241,0.2)',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                }}
+              >
+                <Plus size={20} color="#6366f1" />
+              </div>
+              <span style={{ color: 'rgba(255,255,255,0.3)', fontSize: 13 }}>Добавить подключение</span>
             </button>
           </div>
         )}
       </div>
 
-      {/* ── Add connection modal ───────────────────────────────────────────── */}
-      {showAddModal && (
-        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center">
-          <div className="bg-[#13131a] border border-[#1e1e2c] rounded-2xl p-6 w-full max-w-md shadow-2xl">
-            {/* Header */}
-            <div className="flex items-center justify-between mb-5">
-              <h2 className="text-base font-semibold text-slate-100">Новое подключение</h2>
-              <button
-                onClick={closeModal}
-                className="text-slate-600 hover:text-slate-400 transition-colors"
-              >
-                <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-                </svg>
-              </button>
-            </div>
-
-            <div className="space-y-5">
-              {/* Marketplace selector */}
-              <div>
-                <label className="block text-xs text-slate-500 mb-2">Площадка</label>
-                <div className="grid grid-cols-2 gap-2">
-                  {MARKETPLACES.map((mp) => (
-                    <button
-                      key={mp.type}
-                      onClick={() => setForm((f) => ({ ...f, type: mp.type }))}
-                      className={`flex items-center gap-3 p-3 rounded-xl border text-left transition-all ${
-                        form.type === mp.type
-                          ? 'border-indigo-500 bg-indigo-500/10'
-                          : 'border-[#28283a] bg-[#0d0d10] hover:border-[#3a3a54]'
-                      }`}
-                    >
-                      <div
-                        className={`w-8 h-8 rounded-lg flex items-center justify-center text-xs font-bold flex-shrink-0 ${mp.bgColor} ${mp.color}`}
-                      >
-                        {mp.initials}
-                      </div>
-                      <span className="text-sm text-slate-300 leading-tight">{mp.label}</span>
-                    </button>
-                  ))}
-                </div>
-              </div>
-
-              {/* Connection name */}
-              <div>
-                <label className="block text-xs text-slate-500 mb-1.5">Название подключения</label>
-                <input
-                  value={form.name}
-                  onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))}
-                  placeholder="Мой магазин"
-                  className="w-full bg-[#0d0d10] border border-[#28283a] rounded-lg px-3 py-2 text-sm text-slate-100 placeholder:text-slate-700 focus:border-indigo-500 outline-none transition-colors"
-                />
-              </div>
-
-              {/* Dynamic marketplace fields */}
-              {selectedMeta &&
-                selectedMeta.fields.map((field) => (
-                  <div key={field.key}>
-                    <label className="block text-xs text-slate-500 mb-1.5">{field.label}</label>
-                    <input
-                      value={form[field.key]}
-                      onChange={(e) => setForm((f) => ({ ...f, [field.key]: e.target.value }))}
-                      placeholder={field.placeholder}
-                      className="w-full bg-[#0d0d10] border border-[#28283a] rounded-lg px-3 py-2 text-sm text-slate-100 placeholder:text-slate-700 focus:border-indigo-500 outline-none transition-colors font-mono"
-                    />
-                  </div>
-                ))}
-
-              {/* Fallback if no marketplace selected yet */}
-              {!selectedMeta && (
-                <p className="text-xs text-slate-700 text-center py-2">
-                  Выберите площадку выше для продолжения
-                </p>
-              )}
-            </div>
-
-            <div className="flex justify-end gap-2 mt-6">
-              <button
-                onClick={closeModal}
-                className="bg-[#1c1c28] hover:bg-[#28283a] border border-[#1e1e2c] text-slate-300 px-3 py-1.5 rounded-lg text-sm transition-all"
-              >
-                Отмена
-              </button>
-              <button
-                onClick={handleAdd}
-                disabled={!canSave || isSaving}
-                className="bg-indigo-500 hover:bg-indigo-600 disabled:opacity-40 disabled:cursor-not-allowed text-white px-4 py-2 rounded-lg text-sm font-medium transition-all flex items-center gap-2"
-              >
-                {isSaving && (
-                  <span className="w-3.5 h-3.5 border-2 border-white/40 border-t-white rounded-full animate-spin" />
-                )}
-                Сохранить
-              </button>
-            </div>
-          </div>
-        </div>
+      {showAdd && (
+        <AddModal
+          onClose={() => setShowAdd(false)}
+          onAdded={fetchConnections}
+        />
       )}
     </div>
   );

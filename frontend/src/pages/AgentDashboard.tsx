@@ -1,356 +1,717 @@
-import React, { useEffect, useState, useCallback } from "react";
-import { api } from "../lib/api";
+import React, { useEffect, useRef, useState, useCallback } from 'react';
+import {
+  Activity,
+  CheckCircle2,
+  XCircle,
+  Clock,
+  Zap,
+  RefreshCw,
+  TrendingUp,
+  Cpu,
+  ListTodo,
+} from 'lucide-react';
+import { api } from '../lib/api';
+import { useToast } from '../components/Toast';
 
-// ---------------------------------------------------------------------------
-// Types
-// ---------------------------------------------------------------------------
+// ─── Types ────────────────────────────────────────────────────────────────────
 
-interface TaskRow {
-  task_id: string;
-  type: string;
-  status: "completed" | "failed" | "running" | "queued";
-  duration_ms: number;
-  tokens: number;
-  created_at: string;
-}
-
-interface HourlyBucket {
-  hour: string; // ISO string or "HH:00"
-  count: number;
-}
-
-interface ToolStat {
-  name: string;
-  calls: number;
-}
-
-interface AgentMetrics {
+interface DashboardData {
   total_tasks: number;
-  success_rate_pct: number;
-  avg_tokens: number;
-  avg_duration_ms: number;
-  recent_tasks: TaskRow[];
-  hourly_activity: HourlyBucket[];
-  top_tools: ToolStat[];
+  pending: number;
+  running: number;
+  completed: number;
+  failed: number;
+  success_rate: number;
+  avg_duration_sec: number;
+  tasks_today: number;
+  last_24h: { hour: number; count: number }[];
 }
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-function truncate(s: string, n = 12): string {
-  return s.length > n ? `${s.slice(0, n)}…` : s;
+interface Task {
+  id: string;
+  name: string;
+  status: 'pending' | 'running' | 'completed' | 'failed';
+  updated_at: string;
+  duration_sec?: number;
 }
 
-function fmtDuration(ms: number): string {
-  if (ms < 1000) return `${ms}ms`;
-  return `${(ms / 1000).toFixed(1)}s`;
+interface ParallelStats {
+  active_workers: number;
+  queued: number;
+  processed_today: number;
 }
 
-function fmtDate(iso: string): string {
-  try {
-    return new Date(iso).toLocaleString(undefined, {
-      month: "short",
-      day: "numeric",
-      hour: "2-digit",
-      minute: "2-digit",
-    });
-  } catch {
-    return iso;
-  }
-}
+// ─── Constants ────────────────────────────────────────────────────────────────
 
-const STATUS_CLASSES: Record<TaskRow["status"], string> = {
-  completed: "bg-green-100 text-green-800",
-  failed: "bg-red-100 text-red-800",
-  running: "bg-yellow-100 text-yellow-800",
-  queued: "bg-gray-100 text-gray-700",
+const STATUS_COLORS: Record<string, string> = {
+  pending: '#f59e0b',
+  running: '#6366f1',
+  completed: '#10b981',
+  failed: '#f87171',
 };
 
-// ---------------------------------------------------------------------------
-// Sub-components
-// ---------------------------------------------------------------------------
+const STATUS_LABELS: Record<string, string> = {
+  pending: 'Ожидание',
+  running: 'Выполняется',
+  completed: 'Завершено',
+  failed: 'Ошибка',
+};
 
-interface SummaryCardProps {
-  label: string;
-  value: string | number;
-  sub?: string;
+const CARD_STYLE: React.CSSProperties = {
+  background: 'rgba(255,255,255,0.03)',
+  border: '1px solid rgba(255,255,255,0.08)',
+  borderRadius: 16,
+  backdropFilter: 'blur(20px)',
+  position: 'relative',
+  zIndex: 1,
+};
+
+// ─── Animated Counter ─────────────────────────────────────────────────────────
+
+function useAnimatedCounter(target: number, duration = 800) {
+  const [value, setValue] = useState(0);
+  const raf = useRef<number>(0);
+
+  useEffect(() => {
+    const start = performance.now();
+    const from = value;
+
+    const tick = (now: number) => {
+      const progress = Math.min((now - start) / duration, 1);
+      const eased = 1 - Math.pow(1 - progress, 3);
+      setValue(Math.round(from + (target - from) * eased));
+      if (progress < 1) raf.current = requestAnimationFrame(tick);
+    };
+
+    raf.current = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf.current);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [target]);
+
+  return value;
 }
 
-function SummaryCard({ label, value, sub }: SummaryCardProps) {
+// ─── Sparkline ────────────────────────────────────────────────────────────────
+
+function Sparkline({ values, color }: { values: number[]; color: string }) {
+  const W = 80;
+  const H = 28;
+  if (!values.length) return null;
+  const max = Math.max(...values, 1);
+  const pts = values
+    .map((v, i) => `${(i / (values.length - 1)) * W},${H - (v / max) * H}`)
+    .join(' ');
   return (
-    <div className="bg-white rounded-lg shadow p-5 flex flex-col gap-1">
-      <span className="text-xs font-semibold uppercase tracking-wide text-gray-500">
-        {label}
-      </span>
-      <span className="text-3xl font-bold text-gray-900">{value}</span>
-      {sub && <span className="text-xs text-gray-400">{sub}</span>}
+    <svg width={W} height={H} style={{ display: 'block' }}>
+      <polyline
+        points={pts}
+        fill="none"
+        stroke={color}
+        strokeWidth={1.5}
+        strokeLinejoin="round"
+        strokeLinecap="round"
+        opacity={0.7}
+      />
+    </svg>
+  );
+}
+
+// ─── KPI Card ─────────────────────────────────────────────────────────────────
+
+interface KpiCardProps {
+  label: string;
+  value: number;
+  suffix?: string;
+  color: string;
+  icon: React.ReactNode;
+  sparkValues?: number[];
+  trend?: string;
+}
+
+function KpiCard({ label, value, suffix = '', color, icon, sparkValues, trend }: KpiCardProps) {
+  const animated = useAnimatedCounter(value);
+
+  return (
+    <div
+      style={{
+        ...CARD_STYLE,
+        padding: '20px 24px',
+        display: 'flex',
+        flexDirection: 'column',
+        gap: 12,
+        flex: 1,
+        minWidth: 0,
+      }}
+      className="animate-fade-up"
+    >
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+        <span style={{ color: 'rgba(255,255,255,0.45)', fontSize: 13 }}>{label}</span>
+        <span style={{ color }}>{icon}</span>
+      </div>
+      <div style={{ display: 'flex', alignItems: 'flex-end', justifyContent: 'space-between' }}>
+        <div>
+          <span style={{ color: 'rgba(255,255,255,0.9)', fontSize: 32, fontWeight: 700, lineHeight: 1 }}>
+            {suffix === '%' ? animated.toFixed(0) : animated.toLocaleString()}
+          </span>
+          {suffix && (
+            <span style={{ color: 'rgba(255,255,255,0.45)', fontSize: 16, marginLeft: 4 }}>{suffix}</span>
+          )}
+        </div>
+        {sparkValues && <Sparkline values={sparkValues} color={color} />}
+      </div>
+      {trend && (
+        <span
+          className="badge-purple"
+          style={{ fontSize: 11, alignSelf: 'flex-start', padding: '2px 8px' }}
+        >
+          {trend}
+        </span>
+      )}
     </div>
   );
 }
 
-interface StatusBadgeProps {
-  status: TaskRow["status"];
-}
+// ─── Bar Chart ────────────────────────────────────────────────────────────────
 
-function StatusBadge({ status }: StatusBadgeProps) {
+function BarChart24h({ data }: { data: { hour: number; count: number }[] }) {
+  if (!data.length) return null;
+  const max = Math.max(...data.map((d) => d.count), 1);
+  const W = 100;
+  const H = 60;
+  const barW = W / data.length - 1;
+
   return (
-    <span
-      className={`inline-block px-2 py-0.5 rounded text-xs font-medium ${STATUS_CLASSES[status] ?? "bg-gray-100 text-gray-600"}`}
-    >
-      {status}
-    </span>
+    <svg width="100%" viewBox={`0 0 ${W * data.length} ${H + 20}`} style={{ display: 'block' }}>
+      {data.map((d, i) => {
+        const barH = (d.count / max) * H;
+        const x = i * W + (W - barW) / 2;
+        const y = H - barH;
+        return (
+          <g key={i}>
+            <rect
+              x={x}
+              y={y}
+              width={barW}
+              height={barH}
+              rx={3}
+              fill="url(#barGrad)"
+              opacity={0.85}
+            />
+            <text
+              x={x + barW / 2}
+              y={H + 14}
+              textAnchor="middle"
+              fill="rgba(255,255,255,0.3)"
+              fontSize={10}
+            >
+              {d.hour}
+            </text>
+          </g>
+        );
+      })}
+      <defs>
+        <linearGradient id="barGrad" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stopColor="#6366f1" />
+          <stop offset="100%" stopColor="#a855f7" stopOpacity={0.4} />
+        </linearGradient>
+      </defs>
+    </svg>
   );
 }
 
-// ---------------------------------------------------------------------------
-// Main component
-// ---------------------------------------------------------------------------
+// ─── Worker Gauge ─────────────────────────────────────────────────────────────
+
+function WorkerGauge({ active, max = 8 }: { active: number; max?: number }) {
+  const pct = Math.min(active / max, 1);
+  const r = 38;
+  const circ = 2 * Math.PI * r;
+  const dashOffset = circ * (1 - pct * 0.75);
+  const rotation = -135;
+
+  return (
+    <svg width={100} height={80} style={{ display: 'block', margin: '0 auto' }}>
+      <circle
+        cx={50}
+        cy={60}
+        r={r}
+        fill="none"
+        stroke="rgba(255,255,255,0.06)"
+        strokeWidth={8}
+        strokeDasharray={`${circ * 0.75} ${circ}`}
+        strokeDashoffset={0}
+        strokeLinecap="round"
+        transform={`rotate(${rotation} 50 60)`}
+      />
+      <circle
+        cx={50}
+        cy={60}
+        r={r}
+        fill="none"
+        stroke="url(#gaugeGrad)"
+        strokeWidth={8}
+        strokeDasharray={`${circ * 0.75} ${circ}`}
+        strokeDashoffset={dashOffset}
+        strokeLinecap="round"
+        transform={`rotate(${rotation} 50 60)`}
+        style={{ transition: 'stroke-dashoffset 0.8s ease' }}
+      />
+      <text x={50} y={56} textAnchor="middle" fill="rgba(255,255,255,0.9)" fontSize={18} fontWeight={700}>
+        {active}
+      </text>
+      <text x={50} y={70} textAnchor="middle" fill="rgba(255,255,255,0.35)" fontSize={10}>
+        / {max}
+      </text>
+      <defs>
+        <linearGradient id="gaugeGrad" x1="0" y1="0" x2="1" y2="0">
+          <stop offset="0%" stopColor="#6366f1" />
+          <stop offset="100%" stopColor="#a855f7" />
+        </linearGradient>
+      </defs>
+    </svg>
+  );
+}
+
+// ─── Main Component ───────────────────────────────────────────────────────────
 
 export default function AgentDashboard() {
-  const [metrics, setMetrics] = useState<AgentMetrics | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-  const [lastRefresh, setLastRefresh] = useState<Date | null>(null);
+  const { toast } = useToast();
 
-  const fetchMetrics = useCallback(async () => {
-    setLoading(true);
-    setError(null);
+  const [dashboard, setDashboard] = useState<DashboardData | null>(null);
+  const [tasks, setTasks] = useState<Task[]>([]);
+  const [parallel, setParallel] = useState<ParallelStats | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [countdown, setCountdown] = useState(15);
+  const countdownRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const refreshRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const fetchAll = useCallback(async () => {
     try {
-      const { data } = await api.get<AgentMetrics>("/agent/metrics");
-      setMetrics(data);
-      setLastRefresh(new Date());
-    } catch (err: unknown) {
-      const msg =
-        err instanceof Error ? err.message : "Failed to load metrics";
-      setError(msg);
+      const [dashRes, tasksRes, parallelRes] = await Promise.all([
+        api.get('/api/v1/agent/dashboard'),
+        api.get('/api/v1/agent/tasks?limit=5&sort=updated_at'),
+        api.get('/api/v1/agent/parallel/stats'),
+      ]);
+      setDashboard(dashRes.data);
+      setTasks(tasksRes.data?.items ?? tasksRes.data ?? []);
+      setParallel(parallelRes.data);
+    } catch (e: any) {
+      toast(e?.message ?? 'Ошибка загрузки данных', 'error');
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [toast]);
 
-  // Initial load + 30-second auto-refresh
   useEffect(() => {
-    fetchMetrics();
-    const interval = setInterval(fetchMetrics, 30_000);
-    return () => clearInterval(interval);
-  }, [fetchMetrics]);
+    fetchAll();
+  }, [fetchAll]);
 
-  // Max bar height in the hourly chart (px equivalent via percentage)
-  const maxHourlyCount =
-    metrics && metrics.hourly_activity.length > 0
-      ? Math.max(...metrics.hourly_activity.map((b) => b.count), 1)
-      : 1;
+  // Countdown + auto-refresh
+  useEffect(() => {
+    countdownRef.current = setInterval(() => {
+      setCountdown((c) => {
+        if (c <= 1) {
+          fetchAll();
+          return 15;
+        }
+        return c - 1;
+      });
+    }, 1000);
+    return () => {
+      if (countdownRef.current) clearInterval(countdownRef.current);
+      if (refreshRef.current) clearTimeout(refreshRef.current);
+    };
+  }, [fetchAll]);
 
-  const maxToolCalls =
-    metrics && metrics.top_tools.length > 0
-      ? Math.max(...metrics.top_tools.map((t) => t.calls), 1)
-      : 1;
+  const sparkData = dashboard?.last_24h?.map((d) => d.count) ?? [2, 4, 3, 8, 5, 9, 7, 12, 10, 8];
+
+  const kpis: KpiCardProps[] = dashboard
+    ? [
+        {
+          label: 'Всего задач',
+          value: dashboard.total_tasks,
+          color: '#6366f1',
+          icon: <ListTodo size={18} />,
+          sparkValues: sparkData,
+          trend: `+${dashboard.tasks_today} сегодня`,
+        },
+        {
+          label: 'Выполнено',
+          value: dashboard.completed,
+          color: '#10b981',
+          icon: <CheckCircle2 size={18} />,
+          sparkValues: sparkData.map((v) => Math.round(v * 0.7)),
+        },
+        {
+          label: 'Ошибки',
+          value: dashboard.failed,
+          color: '#f87171',
+          icon: <XCircle size={18} />,
+          sparkValues: sparkData.map((v) => Math.round(v * 0.1)),
+        },
+        {
+          label: 'Успешность',
+          value: dashboard.success_rate,
+          suffix: '%',
+          color: '#a855f7',
+          icon: <TrendingUp size={18} />,
+          sparkValues: [80, 82, 85, 88, 87, 90, 91, 89, 92, dashboard.success_rate],
+        },
+        {
+          label: 'Среднее время',
+          value: Math.round(dashboard.avg_duration_sec),
+          suffix: 'с',
+          color: '#f59e0b',
+          icon: <Clock size={18} />,
+          sparkValues: [12, 10, 14, 9, 11, 8, 10, 9, 11, Math.round(dashboard.avg_duration_sec)],
+        },
+      ]
+    : [];
 
   return (
-    <div className="min-h-screen bg-gray-50">
-      {/* Header */}
-      <header className="bg-gray-900 text-white px-6 py-4 flex items-center justify-between shadow-md">
-        <div className="flex items-center gap-3">
-          <div className="w-2 h-6 bg-blue-500 rounded-sm" />
-          <h1 className="text-xl font-semibold tracking-tight">
-            Agent Dashboard
-          </h1>
-        </div>
-        <div className="flex items-center gap-4">
-          {lastRefresh && (
-            <span className="text-xs text-gray-400">
-              Updated {lastRefresh.toLocaleTimeString()}
+    <div
+      style={{
+        minHeight: '100vh',
+        background: '#03030a',
+        color: 'rgba(255,255,255,0.9)',
+        fontFamily: 'Inter, system-ui, sans-serif',
+        padding: '32px 40px',
+        position: 'relative',
+        overflow: 'hidden',
+      }}
+    >
+      {/* Animated orbs */}
+      <div
+        style={{
+          position: 'fixed',
+          inset: 0,
+          zIndex: 0,
+          pointerEvents: 'none',
+          overflow: 'hidden',
+        }}
+      >
+        <div
+          style={{
+            position: 'absolute',
+            top: '-15%',
+            left: '-10%',
+            width: 500,
+            height: 500,
+            borderRadius: '50%',
+            background: 'radial-gradient(circle, rgba(99,102,241,0.12) 0%, transparent 70%)',
+            animation: 'orbFloat 12s ease-in-out infinite',
+          }}
+        />
+        <div
+          style={{
+            position: 'absolute',
+            bottom: '-10%',
+            right: '-5%',
+            width: 600,
+            height: 600,
+            borderRadius: '50%',
+            background: 'radial-gradient(circle, rgba(168,85,247,0.10) 0%, transparent 70%)',
+            animation: 'orbFloat 16s ease-in-out infinite reverse',
+          }}
+        />
+        <div
+          style={{
+            position: 'absolute',
+            top: '40%',
+            left: '40%',
+            width: 300,
+            height: 300,
+            borderRadius: '50%',
+            background: 'radial-gradient(circle, rgba(16,185,129,0.07) 0%, transparent 70%)',
+            animation: 'orbFloat 20s ease-in-out infinite 4s',
+          }}
+        />
+        <style>{`
+          @keyframes orbFloat {
+            0%, 100% { transform: translate(0, 0) scale(1); }
+            33% { transform: translate(30px, -20px) scale(1.05); }
+            66% { transform: translate(-20px, 15px) scale(0.97); }
+          }
+          @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.4; }
+          }
+        `}</style>
+      </div>
+
+      {/* Content wrapper */}
+      <div style={{ position: 'relative', zIndex: 1, maxWidth: 1400, margin: '0 auto' }}>
+
+        {/* Header */}
+        <div
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            marginBottom: 32,
+          }}
+        >
+          <div style={{ display: 'flex', alignItems: 'center', gap: 16 }}>
+            <h1 style={{ margin: 0, fontSize: 28, fontWeight: 700, letterSpacing: '-0.5px' }}>
+              Агент{' '}
+              <span
+                style={{
+                  background: 'linear-gradient(135deg, #6366f1, #a855f7)',
+                  WebkitBackgroundClip: 'text',
+                  WebkitTextFillColor: 'transparent',
+                }}
+              >
+                / Метрики
+              </span>
+            </h1>
+            {/* Live indicator */}
+            <div
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: 6,
+                background: 'rgba(16,185,129,0.12)',
+                border: '1px solid rgba(16,185,129,0.2)',
+                borderRadius: 20,
+                padding: '4px 12px',
+              }}
+            >
+              <span
+                style={{
+                  width: 7,
+                  height: 7,
+                  borderRadius: '50%',
+                  background: '#10b981',
+                  display: 'inline-block',
+                  animation: 'pulse 1.5s ease-in-out infinite',
+                  boxShadow: '0 0 6px #10b981',
+                }}
+              />
+              <span style={{ color: '#10b981', fontSize: 12, fontWeight: 600 }}>Live</span>
+            </div>
+          </div>
+
+          {/* Countdown + refresh */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+            <span style={{ color: 'rgba(255,255,255,0.35)', fontSize: 13 }}>
+              Обновление через{' '}
+              <span style={{ color: 'rgba(255,255,255,0.6)', fontWeight: 600 }}>{countdown}с</span>
             </span>
-          )}
-          <button
-            onClick={fetchMetrics}
-            disabled={loading}
-            className="flex items-center gap-2 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed text-sm font-medium px-4 py-2 rounded transition-colors"
-          >
-            {loading ? (
-              <>
-                <span className="inline-block w-3 h-3 border-2 border-white border-t-transparent rounded-full animate-spin" />
-                Refreshing…
-              </>
-            ) : (
-              "Refresh"
-            )}
-          </button>
+            <button
+              onClick={() => { fetchAll(); setCountdown(15); }}
+              style={{
+                background: 'rgba(255,255,255,0.05)',
+                border: '1px solid rgba(255,255,255,0.1)',
+                borderRadius: 8,
+                padding: '6px 12px',
+                color: 'rgba(255,255,255,0.6)',
+                cursor: 'pointer',
+                display: 'flex',
+                alignItems: 'center',
+                gap: 6,
+                fontSize: 13,
+              }}
+            >
+              <RefreshCw size={14} />
+              Обновить
+            </button>
+          </div>
         </div>
-      </header>
 
-      <main className="max-w-7xl mx-auto px-4 sm:px-6 py-8 space-y-8">
-        {/* Error banner */}
-        {error && (
-          <div className="bg-red-50 border border-red-200 text-red-700 rounded-lg px-5 py-4 text-sm">
-            <strong>Error:</strong> {error}
+        {loading ? (
+          <div style={{ textAlign: 'center', padding: 80, color: 'rgba(255,255,255,0.3)', fontSize: 16 }}>
+            Загрузка…
           </div>
-        )}
-
-        {/* Loading skeleton overlay */}
-        {loading && !metrics && (
-          <div className="flex justify-center items-center py-24">
-            <div className="w-10 h-10 border-4 border-blue-500 border-t-transparent rounded-full animate-spin" />
-          </div>
-        )}
-
-        {metrics && (
+        ) : (
           <>
-            {/* Summary cards */}
-            <section>
-              <h2 className="text-sm font-semibold uppercase tracking-wide text-gray-500 mb-3">
-                Overview
-              </h2>
-              <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
-                <SummaryCard
-                  label="Total Tasks"
-                  value={metrics.total_tasks.toLocaleString()}
-                />
-                <SummaryCard
-                  label="Success Rate"
-                  value={`${metrics.success_rate_pct.toFixed(1)}%`}
-                  sub="completed / total"
-                />
-                <SummaryCard
-                  label="Avg Tokens"
-                  value={metrics.avg_tokens.toLocaleString()}
-                  sub="per task"
-                />
-                <SummaryCard
-                  label="Avg Duration"
-                  value={fmtDuration(metrics.avg_duration_ms)}
-                  sub="per task"
-                />
-              </div>
-            </section>
+            {/* KPI Row */}
+            <div
+              style={{
+                display: 'flex',
+                gap: 16,
+                marginBottom: 24,
+                flexWrap: 'wrap',
+              }}
+            >
+              {kpis.map((kpi) => (
+                <KpiCard key={kpi.label} {...kpi} />
+              ))}
+            </div>
 
-            {/* Hourly activity chart */}
-            <section className="bg-white rounded-lg shadow p-6">
-              <h2 className="text-sm font-semibold uppercase tracking-wide text-gray-500 mb-4">
-                Hourly Activity — Last 24 Hours
-              </h2>
-              <div className="flex items-end gap-1 h-32">
-                {metrics.hourly_activity.map((bucket, idx) => {
-                  const heightPct = (bucket.count / maxHourlyCount) * 100;
-                  return (
-                    <div
-                      key={idx}
-                      className="flex-1 flex flex-col items-center gap-1"
-                      title={`${bucket.hour}: ${bucket.count} tasks`}
-                    >
-                      <div className="w-full flex flex-col justify-end h-28">
-                        <div
-                          className="w-full bg-blue-500 rounded-t hover:bg-blue-600 transition-colors"
-                          style={{ height: `${heightPct}%`, minHeight: bucket.count > 0 ? "4px" : "0" }}
-                        />
-                      </div>
-                      {/* Show label every 4 hours to avoid clutter */}
-                      {idx % 4 === 0 && (
-                        <span className="text-xs text-gray-400 truncate w-full text-center">
-                          {bucket.hour}
-                        </span>
-                      )}
-                    </div>
-                  );
-                })}
-              </div>
-            </section>
+            {/* Middle Row */}
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16, marginBottom: 24 }}>
 
-            {/* Two-column section: recent tasks + top tools */}
-            <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-              {/* Recent tasks table */}
-              <section className="lg:col-span-2 bg-white rounded-lg shadow overflow-hidden">
-                <div className="px-6 py-4 border-b border-gray-100">
-                  <h2 className="text-sm font-semibold uppercase tracking-wide text-gray-500">
-                    Recent Tasks
-                  </h2>
+              {/* Active tasks */}
+              <div style={{ ...CARD_STYLE, padding: 24 }}>
+                <div
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: 10,
+                    marginBottom: 20,
+                  }}
+                >
+                  <Activity size={18} color="#6366f1" />
+                  <h2 style={{ margin: 0, fontSize: 16, fontWeight: 600 }}>Активные задачи</h2>
                 </div>
-                <div className="overflow-x-auto">
-                  <table className="w-full text-sm">
-                    <thead>
-                      <tr className="bg-gray-50 text-xs uppercase tracking-wide text-gray-500">
-                        <th className="px-4 py-3 text-left font-medium">Task ID</th>
-                        <th className="px-4 py-3 text-left font-medium">Type</th>
-                        <th className="px-4 py-3 text-left font-medium">Status</th>
-                        <th className="px-4 py-3 text-right font-medium">Duration</th>
-                        <th className="px-4 py-3 text-right font-medium">Tokens</th>
-                        <th className="px-4 py-3 text-left font-medium">Created</th>
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-gray-50">
-                      {metrics.recent_tasks.slice(0, 10).map((task) => (
-                        <tr
-                          key={task.task_id}
-                          className="hover:bg-gray-50 transition-colors"
-                        >
-                          <td className="px-4 py-3 font-mono text-xs text-gray-600">
-                            {truncate(task.task_id, 14)}
-                          </td>
-                          <td className="px-4 py-3 text-gray-700">{task.type}</td>
-                          <td className="px-4 py-3">
-                            <StatusBadge status={task.status} />
-                          </td>
-                          <td className="px-4 py-3 text-right text-gray-600">
-                            {fmtDuration(task.duration_ms)}
-                          </td>
-                          <td className="px-4 py-3 text-right text-gray-600">
-                            {task.tokens.toLocaleString()}
-                          </td>
-                          <td className="px-4 py-3 text-gray-500 text-xs whitespace-nowrap">
-                            {fmtDate(task.created_at)}
-                          </td>
-                        </tr>
-                      ))}
-                      {metrics.recent_tasks.length === 0 && (
-                        <tr>
-                          <td
-                            colSpan={6}
-                            className="px-4 py-8 text-center text-gray-400"
-                          >
-                            No tasks yet.
-                          </td>
-                        </tr>
-                      )}
-                    </tbody>
-                  </table>
-                </div>
-              </section>
-
-              {/* Top tools */}
-              <section className="bg-white rounded-lg shadow p-6">
-                <h2 className="text-sm font-semibold uppercase tracking-wide text-gray-500 mb-4">
-                  Top Tools Used
-                </h2>
-                <div className="space-y-3">
-                  {metrics.top_tools.length === 0 && (
-                    <p className="text-sm text-gray-400">No tool data.</p>
-                  )}
-                  {metrics.top_tools.map((tool) => {
-                    const widthPct = (tool.calls / maxToolCalls) * 100;
-                    return (
-                      <div key={tool.name}>
-                        <div className="flex justify-between text-xs text-gray-600 mb-1">
-                          <span className="font-medium truncate">{tool.name}</span>
-                          <span className="ml-2 text-gray-400 shrink-0">
-                            {tool.calls.toLocaleString()}
-                          </span>
-                        </div>
-                        <div className="w-full bg-gray-100 rounded-full h-2">
+                {tasks.length === 0 ? (
+                  <p style={{ color: 'rgba(255,255,255,0.25)', fontSize: 14 }}>Нет задач</p>
+                ) : (
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+                    {tasks.map((t) => (
+                      <div
+                        key={t.id}
+                        style={{
+                          display: 'flex',
+                          alignItems: 'center',
+                          justifyContent: 'space-between',
+                          padding: '10px 14px',
+                          background: 'rgba(255,255,255,0.02)',
+                          border: '1px solid rgba(255,255,255,0.05)',
+                          borderRadius: 10,
+                        }}
+                      >
+                        <div style={{ minWidth: 0 }}>
                           <div
-                            className="bg-blue-500 h-2 rounded-full transition-all"
-                            style={{ width: `${widthPct}%` }}
-                          />
+                            style={{
+                              color: 'rgba(255,255,255,0.85)',
+                              fontSize: 13,
+                              fontWeight: 500,
+                              whiteSpace: 'nowrap',
+                              overflow: 'hidden',
+                              textOverflow: 'ellipsis',
+                              maxWidth: 220,
+                            }}
+                          >
+                            {t.name ?? `Задача #${t.id}`}
+                          </div>
+                          <div style={{ color: 'rgba(255,255,255,0.3)', fontSize: 11, marginTop: 2 }}>
+                            {new Date(t.updated_at).toLocaleTimeString('ru')}
+                          </div>
                         </div>
+                        <span
+                          style={{
+                            background: `${STATUS_COLORS[t.status]}22`,
+                            border: `1px solid ${STATUS_COLORS[t.status]}44`,
+                            color: STATUS_COLORS[t.status],
+                            borderRadius: 6,
+                            padding: '3px 10px',
+                            fontSize: 11,
+                            fontWeight: 600,
+                            whiteSpace: 'nowrap',
+                          }}
+                        >
+                          {STATUS_LABELS[t.status] ?? t.status}
+                        </span>
                       </div>
-                    );
-                  })}
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              {/* Parallel workers */}
+              <div style={{ ...CARD_STYLE, padding: 24 }}>
+                <div
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: 10,
+                    marginBottom: 20,
+                  }}
+                >
+                  <Cpu size={18} color="#a855f7" />
+                  <h2 style={{ margin: 0, fontSize: 16, fontWeight: 600 }}>Параллельные воркеры</h2>
                 </div>
-              </section>
+
+                {parallel ? (
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 32 }}>
+                    <WorkerGauge active={parallel.active_workers} max={8} />
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 16, flex: 1 }}>
+                      {[
+                        { label: 'Активных воркеров', value: parallel.active_workers, color: '#6366f1' },
+                        { label: 'В очереди', value: parallel.queued, color: '#f59e0b' },
+                        { label: 'Обработано сегодня', value: parallel.processed_today, color: '#10b981' },
+                      ].map(({ label, value, color }) => (
+                        <div key={label}>
+                          <div
+                            style={{
+                              display: 'flex',
+                              justifyContent: 'space-between',
+                              marginBottom: 6,
+                            }}
+                          >
+                            <span style={{ color: 'rgba(255,255,255,0.45)', fontSize: 12 }}>{label}</span>
+                            <span style={{ color: 'rgba(255,255,255,0.85)', fontSize: 13, fontWeight: 600 }}>
+                              {value}
+                            </span>
+                          </div>
+                          <div
+                            style={{
+                              height: 4,
+                              background: 'rgba(255,255,255,0.06)',
+                              borderRadius: 2,
+                              overflow: 'hidden',
+                            }}
+                          >
+                            <div
+                              style={{
+                                height: '100%',
+                                width: `${Math.min((value / Math.max(parallel.processed_today, 1)) * 100, 100)}%`,
+                                background: color,
+                                borderRadius: 2,
+                                transition: 'width 0.8s ease',
+                              }}
+                            />
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                ) : (
+                  <p style={{ color: 'rgba(255,255,255,0.25)', fontSize: 14 }}>Нет данных</p>
+                )}
+              </div>
+            </div>
+
+            {/* Bar chart 24h */}
+            <div style={{ ...CARD_STYLE, padding: 24 }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 20 }}>
+                <Zap size={18} color="#f59e0b" />
+                <h2 style={{ margin: 0, fontSize: 16, fontWeight: 600 }}>Задачи за 24 часа</h2>
+                {dashboard?.tasks_today !== undefined && (
+                  <span
+                    style={{
+                      marginLeft: 'auto',
+                      color: 'rgba(255,255,255,0.35)',
+                      fontSize: 13,
+                    }}
+                  >
+                    Всего сегодня:{' '}
+                    <strong style={{ color: 'rgba(255,255,255,0.7)' }}>{dashboard.tasks_today}</strong>
+                  </span>
+                )}
+              </div>
+              <div style={{ overflowX: 'auto' }}>
+                {dashboard?.last_24h?.length ? (
+                  <BarChart24h data={dashboard.last_24h} />
+                ) : (
+                  <div
+                    style={{
+                      height: 80,
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      color: 'rgba(255,255,255,0.2)',
+                      fontSize: 14,
+                    }}
+                  >
+                    Нет данных
+                  </div>
+                )}
+              </div>
             </div>
           </>
         )}
-      </main>
+      </div>
     </div>
   );
 }

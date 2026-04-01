@@ -1037,7 +1037,7 @@ async def agent_task_create(
     if req.auto_run and created.get("ok"):
         task_id = (((created or {}).get("task") or {}).get("task_id") or "")
         if task_id:
-            _queue_task_for_dispatch(task_id)
+            _queue_task_for_dispatch(task_id)d)
     return created
 
 
