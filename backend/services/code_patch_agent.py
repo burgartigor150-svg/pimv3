@@ -1,13 +1,25 @@
 """
 code_patch_agent.py — ReAct Tool Loop агент для генерации кода.
 
-Архитектура: LLM получает 7 инструментов и работает в цикле до 30 шагов.
+Архитектура: LLM получает 8 инструментов и работает в цикле до 30 шагов.
 На каждом шаге LLM:
   1. Читает нужные файлы (read_file, list_dir, search_code)
-  2. Пишет/редактирует код (write_file, edit_file)
+  2. Пишет/редактирует код (write_file, edit_file, append_file)
   3. Запускает тесты и видит реальный вывод (run_shell)
   4. Сам исправляет ошибки если тесты упали
   5. Завершает когда всё готово (task_done)
+
+Улучшения v4:
+  - [#1] Авто-retry при edit_file ERROR: системное сообщение после ошибки
+  - [#2] Инструмент append_file для добавления в конец файла
+  - [#3] Компрессия истории сообщений при переполнении
+  - [#4] Явные инструкции по написанию тестов в промпте
+  - [#5] Baseline pytest перед стартом агента
+  - [#6] Progress callback для обновления Redis
+  - [#7] Ленивая загрузка контекста (только дерево файлов + тесты в начале)
+  - [#8] Список тестов в системном промпте
+  - [#9] Checkpoint в Redis после каждого write/edit
+  - [#10] Ruff lint после task_done
 """
 from __future__ import annotations
 
@@ -19,7 +31,9 @@ import os
 import subprocess
 import tempfile
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
+
+import redis
 
 log = logging.getLogger(__name__)
 
@@ -35,6 +49,8 @@ _ALLOWED_SHELL_PREFIXES = (
     "python -m pytest",
     "npm run build",
     "npm run lint",
+    "ruff check",
+    "ruff format",
     "grep ",
     "find ",
     "ls ",
@@ -43,20 +59,26 @@ _ALLOWED_SHELL_PREFIXES = (
     "tail ",
 )
 
-# Файлы ядра — всегда включаем в начальный контекст
-_CORE_CONTEXT_FILES = [
-    "backend/main.py",
-    "backend/models.py",
-    "backend/schemas.py",
-    "backend/services/adapters.py",
-    "backend/services/ai_service.py",
-    "backend/database.py",
-    "frontend/src/lib/api.ts",
-]
+# Максимальное количество сообщений до компрессии
+_MAX_MESSAGES_BEFORE_COMPRESS = 40
+# Сколько последних сообщений оставляем нетронутыми при компрессии
+_KEEP_RECENT_MESSAGES = 10
 
-_MAX_FILE_CHARS = 6000
-_MAX_CONTEXT_FILES = 15
-_MAX_CODE_CONTEXT_CHARS = 60_000
+_redis_client: Optional[redis.Redis] = None
+
+
+def _get_redis() -> Optional[redis.Redis]:
+    global _redis_client
+    if _redis_client is None:
+        try:
+            _redis_client = redis.Redis.from_url(
+                os.getenv("REDIS_URL", "redis://localhost:6379/0"),
+                decode_responses=True,
+            )
+            _redis_client.ping()
+        except Exception:
+            _redis_client = None
+    return _redis_client
 
 
 # ---------------------------------------------------------------------------
@@ -123,7 +145,7 @@ TOOLS_SCHEMA = [
         "type": "function",
         "function": {
             "name": "write_file",
-            "description": "Create a new file or completely overwrite an existing one. Use for NEW files. For editing existing files, prefer edit_file.",
+            "description": "Create a new file or completely overwrite an existing one. Use for NEW files only. For editing existing files, prefer edit_file or append_file.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -144,7 +166,7 @@ TOOLS_SCHEMA = [
         "type": "function",
         "function": {
             "name": "edit_file",
-            "description": "Make a targeted edit to an existing file by replacing an exact snippet. Always read_file first to get the exact current content.",
+            "description": "Make a targeted edit to an existing file by replacing an exact snippet. ALWAYS call read_file first to get the exact current content before editing.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -154,7 +176,7 @@ TOOLS_SCHEMA = [
                     },
                     "old_snippet": {
                         "type": "string",
-                        "description": "EXACT text to replace — must match character-for-character including whitespace"
+                        "description": "EXACT text to replace — must match character-for-character including whitespace and indentation"
                     },
                     "new_snippet": {
                         "type": "string",
@@ -168,8 +190,33 @@ TOOLS_SCHEMA = [
     {
         "type": "function",
         "function": {
+            "name": "append_file",
+            "description": "Append content to the end of an existing file, or after a specific pattern. Use for adding new routes, functions, imports without rewriting the whole file.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "File path relative to project root"
+                    },
+                    "content": {
+                        "type": "string",
+                        "description": "Content to append"
+                    },
+                    "after_pattern": {
+                        "type": "string",
+                        "description": "Optional: insert AFTER the last occurrence of this pattern. If omitted, appends to end of file."
+                    }
+                },
+                "required": ["path", "content"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "run_shell",
-            "description": "Run a shell command and see its output. Allowed: pytest, python3 -c, npm run build/lint, grep, find, ls. Use to run tests and verify your changes work.",
+            "description": "Run a shell command and see its output. Allowed: pytest, python3 -c, npm run build/lint, ruff, grep, find, ls. Use to run tests and verify your changes work.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -246,10 +293,11 @@ def _tool_list_dir(path: str, workspace_root: str) -> str:
         entries = sorted(abs_path.iterdir(), key=lambda p: (p.is_file(), p.name))
         lines = []
         for e in entries[:120]:
-            prefix = "📁" if e.is_dir() else "📄"
+            prefix = "[dir]" if e.is_dir() else "[file]"
             lines.append(f"{prefix} {e.name}")
-        if len(list(abs_path.iterdir())) > 120:
-            lines.append("... (truncated)")
+        total = sum(1 for _ in abs_path.iterdir())
+        if total > 120:
+            lines.append(f"... ({total - 120} more)")
         return f"DIR: {path}/\n" + "\n".join(lines)
     except Exception as e:
         return f"ERROR listing {path}: {e}"
@@ -270,7 +318,6 @@ def _tool_search_code(query: str, path: Optional[str], workspace_root: str) -> s
         if not files:
             return f"No matches for '{query}' in {search_path}"
 
-        # Показываем контекст из первых 5 файлов
         output_parts = [f"Found '{query}' in {len(files)} file(s):"]
         for f in files[:5]:
             rel = os.path.relpath(f, workspace_root)
@@ -293,14 +340,10 @@ def _tool_write_file(path: str, content: str, workspace_root: str) -> Tuple[str,
     if abs_path is None:
         return f"ERROR: path traversal: {path}", None
 
-    # [FIX-2] Синтакс до записи
     if path.endswith(".py"):
         ok, err = _validate_python_syntax(content, path)
         if not ok:
             return f"ERROR: syntax validation failed — {err}\nFix the syntax error before writing.", None
-
-    # [FIX-6] Проверка импортов
-    if path.endswith(".py"):
         import_err = _check_new_imports(content, workspace_root)
         if import_err:
             return f"WARNING: unresolvable imports detected: {import_err}\nMake sure all imports exist.", None
@@ -308,8 +351,7 @@ def _tool_write_file(path: str, content: str, workspace_root: str) -> Tuple[str,
     try:
         abs_path.parent.mkdir(parents=True, exist_ok=True)
         abs_path.write_text(content, encoding="utf-8")
-        action = "Created" if not abs_path.exists() else "Written"
-        return f"OK: {action} {path} ({len(content)} chars)", path
+        return f"OK: Written {path} ({len(content)} chars)", path
     except Exception as e:
         return f"ERROR writing {path}: {e}", None
 
@@ -335,7 +377,6 @@ def _tool_edit_file(path: str, old_snippet: str, new_snippet: str, workspace_roo
         if content_norm.count(old_norm) == 1:
             new_content = content_norm.replace(old_norm, new_snippet, 1)
         else:
-            # Показываем похожие строки для диагностики
             first_line = old_snippet.splitlines()[0][:60] if old_snippet else ""
             hint = ""
             if first_line:
@@ -344,15 +385,14 @@ def _tool_edit_file(path: str, old_snippet: str, new_snippet: str, workspace_roo
                     hint = f"\nNearby content found at char {idx}:\n{content[max(0,idx-100):idx+200]}"
             return (
                 f"ERROR: old_snippet not found in {path} (0 matches).{hint}\n"
-                f"Use read_file('{path}') to get the EXACT current content, then retry.",
+                f"IMPORTANT: Call read_file('{path}') first to get the EXACT current content, then retry edit_file with the correct snippet.",
                 None
             )
     elif count > 1:
-        return f"ERROR: old_snippet matches {count} times in {path}. Make it more specific.", None
+        return f"ERROR: old_snippet matches {count} times in {path}. Make the snippet more specific (include more context lines).", None
     else:
         new_content = content.replace(old_snippet, new_snippet, 1)
 
-    # [FIX-2] Синтакс до записи
     if path.endswith(".py"):
         ok, err = _validate_python_syntax(new_content, path)
         if not ok:
@@ -366,8 +406,46 @@ def _tool_edit_file(path: str, old_snippet: str, new_snippet: str, workspace_roo
         return f"ERROR writing {path}: {e}", None
 
 
+def _tool_append_file(path: str, content: str, after_pattern: Optional[str], workspace_root: str) -> Tuple[str, Optional[str]]:
+    """Append content to file, optionally after a specific pattern."""
+    abs_path = _safe_resolve(path, workspace_root)
+    if abs_path is None:
+        return f"ERROR: path traversal: {path}", None
+    if not abs_path.exists():
+        return f"ERROR: file not found: {path}", None
+
+    try:
+        existing = abs_path.read_text(encoding="utf-8", errors="replace")
+    except Exception as e:
+        return f"ERROR reading {path}: {e}", None
+
+    if after_pattern:
+        idx = existing.rfind(after_pattern)
+        if idx == -1:
+            return (
+                f"ERROR: after_pattern not found in {path}: '{after_pattern[:60]}'\n"
+                f"Appending to end of file instead — retry without after_pattern or use edit_file.",
+                None
+            )
+        insert_pos = idx + len(after_pattern)
+        new_content = existing[:insert_pos] + "\n" + content + existing[insert_pos:]
+    else:
+        separator = "\n" if existing.endswith("\n") else "\n\n"
+        new_content = existing + separator + content
+
+    if path.endswith(".py"):
+        ok, err = _validate_python_syntax(new_content, path)
+        if not ok:
+            return f"ERROR: syntax validation failed after append — {err}", None
+
+    try:
+        abs_path.write_text(new_content, encoding="utf-8")
+        return f"OK: appended {len(content)} chars to {path}", path
+    except Exception as e:
+        return f"ERROR writing {path}: {e}", None
+
+
 def _tool_run_shell(command: str, workspace_root: str) -> str:
-    # [FIX] Белый список команд
     cmd_lower = command.strip().lower()
     allowed = any(cmd_lower.startswith(p.lower()) for p in _ALLOWED_SHELL_PREFIXES)
     if not allowed:
@@ -405,7 +483,7 @@ def _safe_resolve(rel_path: str, workspace_root: str) -> Optional[Path]:
     try:
         base = Path(workspace_root).resolve()
         full = (base / rel_path).resolve()
-        full.relative_to(base)  # бросит ValueError если за пределами
+        full.relative_to(base)
         return full
     except ValueError:
         return None
@@ -428,17 +506,14 @@ def _check_new_imports(code: str, workspace_root: str) -> str:
         line = line.strip()
         if not line.startswith("from backend.") and not line.startswith("import backend."):
             continue
-        # Извлекаем модуль
         try:
             if line.startswith("from "):
                 module = line.split()[1]
             else:
                 module = line.split()[1].split(".")[0]
-            # backend.services.foo → backend/services/foo.py
             mod_path = module.replace(".", "/") + ".py"
             full = Path(workspace_root) / mod_path
             if not full.exists():
-                # Может быть пакет (папка)
                 pkg = Path(workspace_root) / module.replace(".", "/")
                 if not pkg.exists():
                     errors.append(f"'{module}' not found")
@@ -455,7 +530,7 @@ def _load_conventions(workspace_root: str) -> str:
     return ""
 
 
-def _read_file_safe(path: str, max_chars: int = _MAX_FILE_CHARS) -> Optional[str]:
+def _read_file_safe(path: str, max_chars: int = 6000) -> Optional[str]:
     try:
         content = Path(path).read_text(encoding="utf-8", errors="replace")
         if len(content) > max_chars:
@@ -466,49 +541,164 @@ def _read_file_safe(path: str, max_chars: int = _MAX_FILE_CHARS) -> Optional[str
         return None
 
 
-def _build_initial_context(workspace_root: str, task_type: str, description: str) -> str:
-    """Строим начальный контекст из core-файлов + дерево проекта."""
-    parts = []
-
-    # Дерево файлов
+def _build_file_tree(workspace_root: str) -> str:
+    """[#7] Только дерево файлов — контекст подгружается лениво через read_file."""
     try:
         result = subprocess.run(
             ["find", "backend", "frontend/src", "-type", "f",
-             "-name", "*.py", "-o", "-name", "*.ts", "-o", "-name", "*.tsx",
+             "(", "-name", "*.py", "-o", "-name", "*.ts", "-o", "-name", "*.tsx", ")",
              "-not", "-path", "*/__pycache__/*", "-not", "-path", "*/node_modules/*"],
-            cwd=workspace_root, capture_output=True, text=True, timeout=10
+            cwd=workspace_root, capture_output=True, text=True, timeout=10, shell=False
         )
-        tree = result.stdout[:3000]
-        parts.append(f"## PROJECT FILE TREE\n{tree}")
+        # fallback с shell=True если find не поддерживает скобки
+        if result.returncode != 0:
+            result = subprocess.run(
+                "find backend frontend/src -type f \\( -name '*.py' -o -name '*.ts' -o -name '*.tsx' \\) "
+                "! -path '*/__pycache__/*' ! -path '*/node_modules/*' 2>/dev/null | sort | head -200",
+                cwd=workspace_root, capture_output=True, text=True, timeout=10, shell=True
+            )
+        tree = result.stdout[:4000]
+        return f"## PROJECT FILE TREE\n{tree}"
+    except Exception:
+        return "## PROJECT FILE TREE\n(could not generate)"
+
+
+def _list_tests(workspace_root: str) -> str:
+    """[#8] Список существующих тест-файлов."""
+    tests_dir = Path(workspace_root) / "backend" / "tests"
+    if not tests_dir.exists():
+        return ""
+    files = sorted(tests_dir.glob("test_*.py"))
+    if not files:
+        return ""
+    lines = [f"  - {f.name}" for f in files[:20]]
+    return "## EXISTING TESTS\n" + "\n".join(lines) + f"\nTests directory: backend/tests/"
+
+
+def _run_baseline_tests(workspace_root: str) -> str:
+    """[#5] Прогоняем тесты до старта агента — показываем baseline."""
+    try:
+        py = str(Path(workspace_root) / "backend" / "venv" / "bin" / "python3")
+        if not Path(py).exists():
+            py = "python3"
+        result = subprocess.run(
+            [py, "-m", "pytest", "backend/tests/", "-q", "--tb=line", "--no-header", "--timeout=30"],
+            cwd=workspace_root, capture_output=True, text=True, timeout=60
+        )
+        output = ((result.stdout or "") + (result.stderr or ""))[-2000:]
+        status = "PASSING" if result.returncode == 0 else "FAILING"
+        return f"## BASELINE TEST STATUS: {status}\n{output}"
+    except Exception as e:
+        return f"## BASELINE TEST STATUS: unknown ({e})"
+
+
+def _run_ruff_check(affected_files: List[str], workspace_root: str) -> Dict[str, Any]:
+    """[#10] Запускаем ruff на изменённых файлах после task_done."""
+    py_files = [f for f in affected_files if f.endswith(".py")]
+    if not py_files:
+        return {"ok": True, "skipped": True}
+    try:
+        result = subprocess.run(
+            ["ruff", "check", "--select=E,F,W", "--output-format=text"] + py_files,
+            cwd=workspace_root, capture_output=True, text=True, timeout=30
+        )
+        issues = (result.stdout or "").strip()
+        passed = result.returncode == 0
+        return {"ok": passed, "issues": issues[:2000] if issues else "", "files_checked": py_files}
+    except FileNotFoundError:
+        return {"ok": True, "skipped": True, "reason": "ruff not installed"}
+    except Exception as e:
+        return {"ok": True, "skipped": True, "reason": str(e)}
+
+
+def _compress_messages(messages: List[Dict], keep_recent: int = _KEEP_RECENT_MESSAGES) -> List[Dict]:
+    """[#3] Компрессия истории: схлопываем старые tool results в краткий summary."""
+    if len(messages) <= keep_recent + 2:  # +2 для system + первого user
+        return messages
+
+    system_msg = messages[0]  # system всегда первый
+    first_user = messages[1]  # task description
+    recent = messages[-keep_recent:]
+    middle = messages[2:-keep_recent]
+
+    if not middle:
+        return messages
+
+    # Собираем краткий summary средней части
+    summary_lines = ["[COMPRESSED HISTORY — earlier steps summary:]"]
+    tool_counts: Dict[str, int] = {}
+    written_files: List[str] = []
+    errors: List[str] = []
+
+    for m in middle:
+        role = m.get("role", "")
+        if role == "assistant":
+            tcs = m.get("tool_calls") or []
+            for tc in tcs:
+                name = tc.get("function", {}).get("name", "")
+                tool_counts[name] = tool_counts.get(name, 0) + 1
+        elif role == "tool":
+            content = str(m.get("content", ""))
+            if content.startswith("OK: Written") or content.startswith("OK: edited") or content.startswith("OK: appended"):
+                # Извлекаем имя файла
+                parts = content.split(" ")
+                if len(parts) > 2:
+                    written_files.append(parts[2])
+            elif content.startswith("ERROR:"):
+                errors.append(content[:100])
+
+    summary_lines.append(f"Tools called: {dict(tool_counts)}")
+    if written_files:
+        summary_lines.append(f"Files modified: {list(set(written_files))}")
+    if errors:
+        summary_lines.append(f"Errors encountered (resolved): {errors[:3]}")
+
+    compressed_msg = {
+        "role": "user",
+        "content": "\n".join(summary_lines),
+    }
+
+    return [system_msg, first_user, compressed_msg] + recent
+
+
+def _save_checkpoint(task_id: str, step: int, affected_files: List[str]) -> None:
+    """[#9] Сохраняем checkpoint в Redis после каждого write/edit."""
+    r = _get_redis()
+    if r is None:
+        return
+    try:
+        key = f"agent:checkpoint:{task_id}"
+        r.hset(key, mapping={
+            "step": str(step),
+            "affected_files": json.dumps(affected_files),
+            "ts": str(__import__("time").time()),
+        })
+        r.expire(key, 3600)
     except Exception:
         pass
 
-    # Core файлы
-    total_chars = 0
-    for rel in _CORE_CONTEXT_FILES:
-        if total_chars > _MAX_CODE_CONTEXT_CHARS:
-            break
-        abs_p = Path(workspace_root) / rel
-        content = _read_file_safe(str(abs_p))
-        if content:
-            block = f"\n## FILE: {rel}\n```\n{content}\n```\n"
-            parts.append(block)
-            total_chars += len(block)
 
-    return "\n".join(parts)
-
-
-def _build_knowledge_context(rewrite_plan: Dict[str, Any]) -> str:
-    hits_by_ns = rewrite_plan.get("knowledge_hits", {})
-    if not hits_by_ns:
-        return ""
-    parts = ["## RELEVANT DOCUMENTATION"]
-    for ns, hits in hits_by_ns.items():
-        for h in (hits or [])[:2]:
-            if isinstance(h, dict) and h.get("content_excerpt"):
-                src = h.get("source_uri") or h.get("title") or ns
-                parts.append(f"\nSource: {src}\n{h['content_excerpt'][:1000]}")
-    return "\n".join(parts)
+def _update_progress(task_id: str, step: int, max_steps: int, tool_name: str, progress_callback: Optional[Callable]) -> None:
+    """[#6] Обновляем прогресс в Redis и вызываем callback."""
+    if not task_id:
+        return
+    # Прогресс от 55% до 90% в рамках шагов агента
+    pct = 55 + int((step / max_steps) * 35)
+    r = _get_redis()
+    if r:
+        try:
+            r.hset(f"agent_task:{task_id}", mapping={
+                "progress_percent": str(pct),
+                "stage": f"react_step_{step}_{tool_name}",
+                "updated_at_ts": str(int(__import__("time").time())),
+            })
+        except Exception:
+            pass
+    if progress_callback:
+        try:
+            progress_callback(step=step, tool=tool_name, progress=pct)
+        except Exception:
+            pass
 
 
 # ---------------------------------------------------------------------------
@@ -525,8 +715,12 @@ async def _react_agent_loop(
     workspace_root: str,
     conventions: str,
     knowledge_context: str,
-    initial_context: str,
+    file_tree: str,
+    tests_list: str,
+    baseline_tests: str,
+    task_id: str = "",
     max_steps: int = _MAX_REACT_STEPS,
+    progress_callback: Optional[Callable] = None,
 ) -> Dict[str, Any]:
     """
     ReAct (Reasoning + Acting) цикл.
@@ -537,24 +731,31 @@ async def _react_agent_loop(
 You have access to tools to explore and modify the codebase. Work like a skilled developer:
 1. EXPLORE first — read relevant files before making changes
 2. PLAN your changes — understand what exists before modifying
-3. IMPLEMENT incrementally — make focused, targeted changes
-4. VERIFY — run tests after each significant change
-5. FIX issues — if tests fail, read the error, understand the root cause, fix it
-6. Call task_done only when tests pass
+3. IMPLEMENT incrementally — use edit_file for existing files, write_file for new files, append_file for adding new functions/routes
+4. TEST — run tests after each significant change: python3 -m pytest backend/tests/ -q --tb=short
+5. FIX issues — if tests fail, read the error carefully, find the root cause, fix it
+6. LINT — after implementation run: ruff check --select=E,F,W <your_files>
+7. Call task_done only when tests pass and lint is clean
 
-WORKFLOW:
-- Start by reading key files to understand the current structure
-- Search for existing patterns you should follow
-- Make changes using edit_file (for existing files) or write_file (for new files)
-- After implementing, run: python3 -m pytest backend/tests/ -q --tb=short
-- If tests fail, read the error and fix the specific issue
-- Write tests for new code when appropriate
-- Call task_done when everything works{conventions}
+TOOL USAGE RULES:
+- edit_file: ALWAYS call read_file first on the file you want to edit. Use exact content from read_file output.
+- append_file: use to add new routes/functions/imports without touching existing code
+- If edit_file returns ERROR about old_snippet not found: immediately call read_file again and retry with exact content
+- write_file: only for NEW files, never overwrite existing important files
+
+TEST WRITING:
+- For every new feature or function, write a test in backend/tests/
+- Test file naming: test_<feature_name>.py
+- Use pytest with async support where needed
+- Run your test before calling task_done{conventions}
 
 {knowledge_context}
 
-## INITIAL CODEBASE CONTEXT
-{initial_context}
+{file_tree}
+
+{tests_list}
+
+{baseline_tests}
 """
 
     user_message = f"""Task: {task_title}
@@ -562,7 +763,7 @@ WORKFLOW:
 {task_description}
 
 Start by exploring the relevant parts of the codebase, then implement the task step by step.
-Run tests when you're done to verify everything works correctly."""
+Remember to write tests and run them before calling task_done."""
 
     messages: List[Dict] = [
         {"role": "system", "content": system_prompt},
@@ -571,8 +772,14 @@ Run tests when you're done to verify everything works correctly."""
 
     affected_files: List[str] = []
     steps_log: List[str] = []
+    last_tool_was_error = False
 
     for step in range(max_steps):
+        # [#3] Компрессия истории при переполнении
+        if len(messages) > _MAX_MESSAGES_BEFORE_COMPRESS:
+            messages = _compress_messages(messages)
+            log.info(f"ReAct step {step}: compressed message history to {len(messages)} messages")
+
         try:
             response = await client.chat.completions.create(
                 model=model,
@@ -590,7 +797,6 @@ Run tests when you're done to verify everything works correctly."""
         tool_calls = msg.tool_calls
 
         if not tool_calls:
-            # Если LLM ответил текстом без tool call — подталкиваем
             content = msg.content or ""
             log.warning(f"Step {step}: no tool call, content: {content[:200]}")
             messages.append({"role": "assistant", "content": content})
@@ -600,7 +806,6 @@ Run tests when you're done to verify everything works correctly."""
             })
             continue
 
-        # Берём первый tool call
         tc = tool_calls[0]
         tool_name = tc.function.name
         try:
@@ -610,6 +815,9 @@ Run tests when you're done to verify everything works correctly."""
 
         log.info(f"ReAct step {step}: {tool_name}({list(tool_args.keys())})")
         steps_log.append(f"Step {step}: {tool_name}")
+
+        # [#6] Обновляем прогресс
+        _update_progress(task_id, step, max_steps, tool_name, progress_callback)
 
         # Добавляем вызов инструмента в историю
         messages.append({
@@ -626,6 +834,8 @@ Run tests when you're done to verify everything works correctly."""
 
         # Выполняем инструмент
         tool_result = ""
+        is_write_op = False
+
         if tool_name == "read_file":
             tool_result = _tool_read_file(tool_args.get("path", ""), workspace_root)
 
@@ -648,6 +858,7 @@ Run tests when you're done to verify everything works correctly."""
             tool_result = msg_str
             if affected and affected not in affected_files:
                 affected_files.append(affected)
+                is_write_op = True
 
         elif tool_name == "edit_file":
             msg_str, affected = _tool_edit_file(
@@ -659,6 +870,19 @@ Run tests when you're done to verify everything works correctly."""
             tool_result = msg_str
             if affected and affected not in affected_files:
                 affected_files.append(affected)
+                is_write_op = True
+
+        elif tool_name == "append_file":
+            msg_str, affected = _tool_append_file(
+                tool_args.get("path", ""),
+                tool_args.get("content", ""),
+                tool_args.get("after_pattern"),
+                workspace_root,
+            )
+            tool_result = msg_str
+            if affected and affected not in affected_files:
+                affected_files.append(affected)
+                is_write_op = True
 
         elif tool_name == "run_shell":
             tool_result = _tool_run_shell(tool_args.get("command", ""), workspace_root)
@@ -667,8 +891,25 @@ Run tests when you're done to verify everything works correctly."""
             summary = tool_args.get("summary", "")
             done_files = tool_args.get("affected_files", [])
             wrote_tests = tool_args.get("wrote_tests", False)
-            # Объединяем с тем что реально изменили
             all_affected = list(set(affected_files + done_files))
+
+            # [#10] Запускаем ruff на изменённых файлах
+            lint_result = _run_ruff_check(all_affected, workspace_root)
+            if not lint_result.get("ok") and not lint_result.get("skipped"):
+                # Есть lint-ошибки — возвращаем агенту чтобы исправил
+                lint_issues = lint_result.get("issues", "")
+                log.info(f"ReAct step {step}: ruff found issues, asking agent to fix")
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": tc.id,
+                    "content": (
+                        f"LINT CHECK FAILED before task_done:\n{lint_issues}\n\n"
+                        f"Fix all lint errors, then call task_done again."
+                    ),
+                })
+                steps_log.append(f"Step {step}: ruff_issues_found")
+                continue
+
             log.info(f"ReAct task_done after {step} steps. Files: {all_affected}")
             return {
                 "ok": True,
@@ -680,10 +921,15 @@ Run tests when you're done to verify everything works correctly."""
                     "wrote_tests": wrote_tests,
                     "steps": step + 1,
                     "steps_log": steps_log,
+                    "lint": lint_result,
                 },
             }
         else:
             tool_result = f"ERROR: unknown tool '{tool_name}'"
+
+        # [#9] Checkpoint после каждой записи
+        if is_write_op and task_id:
+            _save_checkpoint(task_id, step, affected_files)
 
         # Добавляем результат в историю
         messages.append({
@@ -691,6 +937,21 @@ Run tests when you're done to verify everything works correctly."""
             "tool_call_id": tc.id,
             "content": str(tool_result)[:8000],
         })
+
+        # [#1] Авто-подсказка при ошибке edit_file: следующий шаг должен быть read_file
+        tool_result_str = str(tool_result)
+        if tool_name in ("edit_file", "append_file") and tool_result_str.startswith("ERROR:"):
+            if not last_tool_was_error:  # избегаем бесконечного цикла подсказок
+                messages.append({
+                    "role": "user",
+                    "content": (
+                        f"The {tool_name} failed. You MUST call read_file('{tool_args.get('path', '')}') "
+                        f"to get the current exact content of the file, then retry the edit with the correct snippet."
+                    ),
+                })
+                last_tool_was_error = True
+        else:
+            last_tool_was_error = False
 
     # Превышен лимит шагов
     log.warning(f"ReAct loop exceeded {max_steps} steps without task_done")
@@ -714,7 +975,8 @@ async def generate_code_patch_proposal(
     rewrite_plan: Dict[str, Any],
     allowlist_files: List[str],
     workspace_root: str = _WORKSPACE_ROOT,
-    max_retries: int = 3,
+    task_id: str = "",
+    progress_callback: Optional[Callable] = None,
 ) -> Dict[str, Any]:
     """
     Главная функция агента. Запускает ReAct Tool Loop.
@@ -724,7 +986,7 @@ async def generate_code_patch_proposal(
     - пишет/редактирует код
     - запускает тесты и видит реальный вывод
     - сам исправляет ошибки
-    - завершает когда тесты зелёные
+    - завершает когда тесты зелёные и lint чистый
     """
     from backend.services.ai_service import get_client_and_model
 
@@ -746,7 +1008,13 @@ async def generate_code_patch_proposal(
 
     conventions = _load_conventions(workspace_root)
     knowledge_context = _build_knowledge_context(rewrite_plan)
-    initial_context = _build_initial_context(workspace_root, task_type, description)
+
+    # [#7] Только дерево файлов — core файлы подгружаются лениво через read_file
+    file_tree = _build_file_tree(workspace_root)
+    # [#8] Список тестов
+    tests_list = _list_tests(workspace_root)
+    # [#5] Baseline тесты
+    baseline_tests = _run_baseline_tests(workspace_root)
 
     return await _react_agent_loop(
         client=client,
@@ -757,8 +1025,25 @@ async def generate_code_patch_proposal(
         workspace_root=workspace_root,
         conventions=conventions,
         knowledge_context=knowledge_context,
-        initial_context=initial_context,
+        file_tree=file_tree,
+        tests_list=tests_list,
+        baseline_tests=baseline_tests,
+        task_id=task_id,
+        progress_callback=progress_callback,
     )
+
+
+def _build_knowledge_context(rewrite_plan: Dict[str, Any]) -> str:
+    hits_by_ns = rewrite_plan.get("knowledge_hits", {})
+    if not hits_by_ns:
+        return ""
+    parts = ["## RELEVANT DOCUMENTATION"]
+    for ns, hits in hits_by_ns.items():
+        for h in (hits or [])[:2]:
+            if isinstance(h, dict) and h.get("content_excerpt"):
+                src = h.get("source_uri") or h.get("title") or ns
+                parts.append(f"\nSource: {src}\n{h['content_excerpt'][:1000]}")
+    return "\n".join(parts)
 
 
 # ---------------------------------------------------------------------------
@@ -957,7 +1242,10 @@ def run_code_patch_agent(task_id: str, patch_content: str, repo_path: str) -> Di
             'new_snippet': '\n'.join(new_lines),
         })
 
-    success, error = apply_fallback_edit_ops(edit_ops, repo_path)
+    if not edit_ops:
+        return {"status": "error", "message": error}
+
+    success, err2 = apply_fallback_edit_ops(edit_ops, repo_path)
     if success:
-        return {"status": "success", "message": "Fallback edit ops applied successfully"}
-    return {"status": "error", "error": error}
+        return {"status": "success_fallback", "message": "Applied via fallback edit ops"}
+    return {"status": "error", "message": f"Both methods failed. Patch: {error}. Fallback: {err2}"}

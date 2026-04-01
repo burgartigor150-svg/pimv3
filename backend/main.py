@@ -178,6 +178,7 @@ async def system_status():
 
 @app.get("/api/v1/version")
 async def get_version():
+    return {"version": "3.0"}
 
 @app.get("/api/v1/uptime")
 async def get_uptime():
