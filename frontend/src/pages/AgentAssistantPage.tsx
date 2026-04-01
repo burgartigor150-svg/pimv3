@@ -230,7 +230,7 @@ const AgentAssistantPage: React.FC = () => {
   // ── API helpers ──────────────────────────────────────────────────────────────
   const fetchConversations = async () => {
     try {
-      const data = await api.get('/api/v1/agent/assistant/conversations');
+      const data = await api.get('/agent/assistant/conversations');
       setConversations(Array.isArray(data) ? data : []);
     } catch {
       toast('Failed to load conversations', 'error');
@@ -253,7 +253,7 @@ const AgentAssistantPage: React.FC = () => {
     e.stopPropagation();
     setDeletingId(id);
     try {
-      await api.delete(`/api/v1/agent/assistant/conversations/${id}`);
+      await api.delete(`/agent/assistant/conversations/${id}`);
       setConversations((prev) => prev.filter((c) => c.id !== id));
       if (activeConversationId === id) {
         setActiveConversationId(null);

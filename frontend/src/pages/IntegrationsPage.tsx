@@ -86,7 +86,7 @@ function AddModal({ onClose, onAdded }: AddModalProps) {
     if (!apiKey.trim()) { toast('Введите API ключ', 'error'); return; }
     setLoading(true);
     try {
-      await api.post('/api/v1/connections', { name: name.trim(), type, api_key: apiKey.trim() });
+      await api.post('/connections', { name: name.trim(), type, api_key: apiKey.trim() });
       toast('Подключение добавлено', 'success');
       onAdded();
       onClose();
@@ -483,7 +483,7 @@ export default function IntegrationsPage() {
 
   const fetchConnections = useCallback(async () => {
     try {
-      const res = await api.get<Connection[]>('/api/v1/connections');
+      const res = await api.get<Connection[]>('/connections');
       setConnections(Array.isArray(res.data) ? res.data : []);
     } catch (e: any) {
       toast(e?.message ?? 'Ошибка загрузки подключений', 'error');
@@ -496,7 +496,7 @@ export default function IntegrationsPage() {
 
   const handleDelete = async (id: string) => {
     try {
-      await api.delete(`/api/v1/connections/${id}`);
+      await api.delete(`/connections/${id}`);
       toast('Подключение удалено', 'success');
       setConnections((prev) => prev.filter((c) => c.id !== id));
     } catch (e: any) {
@@ -507,7 +507,7 @@ export default function IntegrationsPage() {
   const handleTest = async (id: string) => {
     setTestingIds((prev) => new Set(prev).add(id));
     try {
-      const res = await api.post(`/api/v1/connections/${id}/test`);
+      const res = await api.post(`/connections/${id}/test`);
       const ok = res.data?.success ?? res.data?.status === 'ok';
       if (ok) {
         toast('Подключение работает', 'success');

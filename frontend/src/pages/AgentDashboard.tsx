@@ -287,9 +287,9 @@ export default function AgentDashboard() {
   const fetchAll = useCallback(async () => {
     try {
       const [dashRes, tasksRes, parallelRes] = await Promise.all([
-        api.get('/api/v1/agent/dashboard'),
-        api.get('/api/v1/agent/tasks?limit=5&sort=updated_at'),
-        api.get('/api/v1/agent/parallel/stats'),
+        api.get('/agent/dashboard'),
+        api.get('/agent/tasks?limit=5&sort=updated_at'),
+        api.get('/agent/parallel/stats'),
       ]);
       setDashboard(dashRes.data);
       setTasks(tasksRes.data?.items ?? tasksRes.data ?? []);

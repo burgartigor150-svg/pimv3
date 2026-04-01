@@ -130,16 +130,16 @@ function ImportModal({ connections, onClose, onDone }: ImportModalProps) {
     setLoading(true);
     try {
       if (validUrls.length === 1) {
-        await api.post('/api/v1/import/product', { url: validUrls[0], connection_id: connectionId });
+        await api.post('/import/product', { url: validUrls[0], connection_id: connectionId });
         toast('Товар поставлен в очередь', 'success');
       } else {
-        const res = await api.post('/api/v1/import/bulk', { urls: validUrls, connection_id: connectionId });
+        const res = await api.post('/import/bulk', { urls: validUrls, connection_id: connectionId });
         const taskId = res.data?.task_id;
         if (taskId) {
           toast('Задача импорта создана, ждём…', 'info');
           // poll
           const poll = async () => {
-            const s = await api.get(`/api/v1/import/tasks/${taskId}`);
+            const s = await api.get(`/import/tasks/${taskId}`);
             if (s.data?.status === 'completed') {
               toast('Импорт завершён', 'success');
             } else if (s.data?.status === 'failed') {
@@ -350,17 +350,19 @@ export default function ProductsPage() {
     setLoading(true);
     try {
       const res = await api.get<ProductsResponse>(
-        `/api/v1/products?page=${p}&limit=50&search=${encodeURIComponent(s)}&category=${encodeURIComponent(cat)}`
+        `/products?page=${p}&limit=50&search=${encodeURIComponent(s)}&category=${encodeURIComponent(cat)}`
       );
-      setProducts(res.data.items);
-      setTotal(res.data.total);
-      setPages(res.data.pages);
+      const rawData = res.data;
+      const items = Array.isArray(rawData) ? rawData : (rawData.items ?? []);
+      setProducts(items);
+      setTotal(Array.isArray(rawData) ? rawData.length : (rawData.total ?? items.length));
+      setPages(Array.isArray(rawData) ? 1 : (rawData.pages ?? 1));
     } catch (e: any) {
       toast(e?.message ?? 'Ошибка загрузки товаров', 'error');
     } finally {
       setLoading(false);
     }
-  }, [page, search, category,toast]);
+  }, [page, search, category, toast]);
 
   useEffect(() => { fetchProducts(); }, [page, category]);
 
@@ -374,7 +376,7 @@ export default function ProductsPage() {
   }, [search]);
 
   useEffect(() => {
-    api.get<Connection[]>('/api/v1/connections').then((r) => {
+    api.get<Connection[]>('/connections').then((r) => {
       setConnections(Array.isArray(r.data) ? r.data : []);
     });
   }, []);
@@ -399,7 +401,7 @@ export default function ProductsPage() {
     if (!selected.size) return;
     setAiLoading(true);
     try {
-      await api.post('/api/v1/ai/generate-bulk', { product_ids: Array.from(selected) });
+      await api.post('/ai/generate-bulk', { product_ids: Array.from(selected) });
       toast(`ИИ генерация запущена для ${selected.size} товаров`, 'success');
       setSelected(new Set());
     } catch (e: any) {
@@ -413,7 +415,7 @@ export default function ProductsPage() {
     if (!selected.size) return;
     setBulkDeleteLoading(true);
     try {
-      await Promise.all(Array.from(selected).map((id) => api.delete(`/api/v1/products/${id}`)));
+      await Promise.all(Array.from(selected).map((id) => api.delete(`/products/${id}`)));
       toast(`Удалено ${selected.size} товаров`, 'success');
       setSelected(new Set());
       fetchProducts();
@@ -427,7 +429,7 @@ export default function ProductsPage() {
   const handleDeleteOne = async (id: string, e: React.MouseEvent) => {
     e.stopPropagation();
     try {
-      await api.delete(`/api/v1/products/${id}`);
+      await api.delete(`/products/${id}`);
       toast('Товар удалён', 'success');
       fetchProducts();
     } catch (e: any) {

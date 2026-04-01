@@ -157,7 +157,7 @@ export default function AttributeStarMapPage() {
   const handleDeleteEdge = async (edgeId: string) => {
     setDeletingEdgeId(edgeId);
     try {
-      await api.delete(`/api/v1/attributes/star-map/link/${edgeId}`);
+      await api.delete(`/attributes/star-map/link/${edgeId}`);
       setEdges((prev) => prev.filter((e) => e.id !== edgeId));
       toast('Маппинг удалён', 'success');
     } catch {

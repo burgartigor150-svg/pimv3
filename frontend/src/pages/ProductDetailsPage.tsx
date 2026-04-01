@@ -201,7 +201,7 @@ export default function ProductDetailsPage() {
     setLoading(true);
     try {
       const [prodRes, connRes] = await Promise.all([
-        api.get(`/api/v1/products/${id}`),
+        api.get(`/products/${id}`),
         api.get("/api/v1/connections"),
       ]);
       const p: Product = prodRes.data;
@@ -230,7 +230,7 @@ export default function ProductDetailsPage() {
     if (!id) return;
     setSaving(true);
     try {
-      const res = await api.put(`/api/v1/products/${id}`, { ...fields, attributes });
+      const res = await api.put(`/products/${id}`, { ...fields, attributes });
       setProduct(res.data);
       toast("Продукт сохранён", "success");
     } catch {
@@ -244,7 +244,7 @@ export default function ProductDetailsPage() {
     if (!id) return;
     setEnriching(true);
     try {
-      const res = await api.post(`/api/v1/ai/enrich/${id}`);
+      const res = await api.post(`/ai/enrich/${id}`);
       const d = res.data;
       setFields((f) => ({
         name: d.name ?? f.name,
@@ -266,9 +266,9 @@ export default function ProductDetailsPage() {
     if (!id) return;
     setPushingId(connectionId);
     try {
-      await api.post(`/api/v1/syndication/push/${id}`, { connection_id: connectionId });
+      await api.post(`/syndication/push/${id}`, { connection_id: connectionId });
       toast("Продукт отправлен на маркетплейс", "success");
-      const res = await api.get(`/api/v1/products/${id}`);
+      const res = await api.get(`/products/${id}`);
       setProduct(res.data);
     } catch {
       toast("Ошибка синдикации", "error");
