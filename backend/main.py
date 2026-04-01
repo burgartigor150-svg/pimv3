@@ -119,6 +119,11 @@ VISUAL_AI_BASE = os.getenv("VISUAL_AI_SERVICE_URL", "http://127.0.0.1:8001").rst
 
 app = FastAPI(title="PIM V3 API")
 
+@app.get("/api/v1/health")
+async def health_check():
+    """Проверка работоспособности backend."""
+    return {"status": "ok", "service": "pimv3-backend", "timestamp": time.time()}
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_cors_origins(),
