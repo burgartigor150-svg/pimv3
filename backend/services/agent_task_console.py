@@ -33,6 +33,9 @@ from backend.services.test_orchestrator import run_tests
 from backend.services.helper_agents import auto_spawn_helpers_for_task
 
 _redis = redis.Redis.from_url(os.getenv("REDIS_URL", "redis://localhost:6379/0"), decode_responses=True)
+
+_GIT_LOCK_KEY = "agent:git_execution_lock"
+_GIT_LOCK_TTL = 900  # 15 минут — максимальное время одной задачи
 _GIT_BIN = shutil.which("git") or "/usr/bin/git"
 
 
@@ -348,6 +351,37 @@ def _git_is_clean(workspace_root: str) -> bool:
     return not bool((st.get("stdout") or "").strip())
 
 
+def _git_stash(workspace_root: str) -> Dict[str, Any]:
+    """[FIX-1] Сохраняем текущее состояние в stash перед применением патча."""
+    r = _run([_GIT_BIN, "stash", "push", "-u", "-m", "agent_pre_patch_stash"], cwd=workspace_root)
+    return {"ok": r["ok"], "stdout": r.get("stdout", ""), "stderr": r.get("stderr", "")}
+
+
+def _git_stash_pop(workspace_root: str) -> Dict[str, Any]:
+    """[FIX-1] Восстанавливаем состояние из stash (откат при провале)."""
+    r = _run([_GIT_BIN, "stash", "pop"], cwd=workspace_root)
+    return {"ok": r["ok"], "stdout": r.get("stdout", ""), "stderr": r.get("stderr", "")}
+
+
+def _git_reset_hard(workspace_root: str) -> Dict[str, Any]:
+    """[FIX-1] Жёсткий откат к HEAD если stash не помог."""
+    r = _run([_GIT_BIN, "checkout", "."], cwd=workspace_root)
+    _run([_GIT_BIN, "clean", "-fd"], cwd=workspace_root)
+    return {"ok": r["ok"]}
+
+
+def _acquire_git_lock(task_id: str) -> bool:
+    """[FIX-4] Захватываем Redis-лок — только один агент работает с git одновременно."""
+    return bool(_redis.set(_GIT_LOCK_KEY, task_id, nx=True, ex=_GIT_LOCK_TTL))
+
+
+def _release_git_lock(task_id: str) -> None:
+    """[FIX-4] Освобождаем лок если он принадлежит этой задаче."""
+    current = _redis.get(_GIT_LOCK_KEY)
+    if current == task_id:
+        _redis.delete(_GIT_LOCK_KEY)
+
+
 def _allowlist_for_task_type(task_type: str, workspace_root: str = "/mnt/data/Pimv3") -> List[str]:
     tt = str(task_type or "").strip().lower()
     root = Path(workspace_root)
@@ -589,6 +623,16 @@ async def run_agent_task(task_id: str, ai_key: str = "") -> Dict[str, Any]:
             _append_team_message(task_id, "project_manager", "Остановлено: рабочее дерево git не чистое.", kind="error")
             return {"ok": False, "error": "dirty_worktree", "task_id": task_id}
 
+        # [FIX-4] Захватываем Redis-лок — один агент работает с git одновременно
+        if not _acquire_git_lock(task_id):
+            owner = _redis.get(_GIT_LOCK_KEY) or "unknown"
+            _set_task(task_id, {"status": "failed", "stage": "failed_git_lock", "updated_at_ts": int(time.time())})
+            _append_log(task_id, f"Git lock busy, held by task {owner}")
+            _append_team_message(task_id, "project_manager", f"Другая задача ({owner}) сейчас работает с репозиторием. Попробуй позже.", kind="error")
+            return {"ok": False, "error": "git_lock_busy", "lock_owner": owner}
+
+        _append_log(task_id, f"Git lock acquired by {task_id}")
+
         _set_task(task_id, {"stage": "execution_branch", "progress_percent": 25, "eta_seconds": 240, "updated_at_ts": int(time.time())})
         await _wait_if_paused(task_id)
         br = create_incident_branch(workspace_root, task_id)
@@ -643,10 +687,18 @@ async def run_agent_task(task_id: str, ai_key: str = "") -> Dict[str, Any]:
         _set_task(task_id, {"stage": "execution_apply_patch", "progress_percent": 55, "eta_seconds": 170, "updated_at_ts": int(time.time())})
         await _wait_if_paused(task_id)
         _append_team_message(task_id, "backend_dev", "Применяю изменения к репозиторию.")
+
+        # [FIX-1] Stash перед применением — чтобы можно было откатиться
+        stash_result = _git_stash(workspace_root)
+        _append_log(task_id, f"Git stash before patch: ok={stash_result.get('ok')}")
+
         ap = _apply_unified_diff(workspace_root, patch_text)
         result["apply_patch"] = ap
         _append_log(task_id, f"Apply patch result: ok={ap.get('ok')}")
         if not ap.get("ok"):
+            # Откатываем stash
+            _git_stash_pop(workspace_root)
+            _release_git_lock(task_id)
             _set_task(task_id, {"status": "failed", "stage": "failed_apply_patch", "updated_at_ts": int(time.time()), "result": result})
             return {"ok": False, "error": "apply_patch_failed", "apply": ap}
 
@@ -667,6 +719,12 @@ async def run_agent_task(task_id: str, ai_key: str = "") -> Dict[str, Any]:
         _append_log(task_id, f"Quality gate: ok={gate.get('ok')}")
 
         if not tests.get("ok") or not gate.get("ok"):
+            # [FIX-1] Откатываем изменения через stash pop
+            _append_team_message(task_id, "qa", "Тесты или quality gate упали — откатываю изменения.", kind="error")
+            _git_reset_hard(workspace_root)
+            pop = _git_stash_pop(workspace_root)
+            _append_log(task_id, f"Rollback via stash pop: ok={pop.get('ok')}")
+            _release_git_lock(task_id)
             _set_task(task_id, {"status": "failed", "stage": "failed_tests_or_gate", "updated_at_ts": int(time.time()), "result": result})
             return {"ok": False, "error": "tests_or_gate_failed", "result": result}
         _queue_step(task_id, dev_queue, "test", "Тесты и quality gate пройдены, передаю PM на релиз.")
@@ -714,6 +772,7 @@ async def run_agent_task(task_id: str, ai_key: str = "") -> Dict[str, Any]:
             "result": result,
         },
     )
+    _release_git_lock(task_id)  # [FIX-4] освобождаем лок при успехе
     _append_log(task_id, "Task completed")
     _append_team_message(task_id, "project_manager", "Задача завершена. Отчёт и логи готовы.", kind="done")
     return {"ok": True, "task_id": task_id, "result": result}
@@ -723,6 +782,7 @@ def run_agent_task_in_background(task_id: str, ai_key: str = "") -> None:
     try:
         asyncio.run(run_agent_task(task_id, ai_key=ai_key))
     except Exception as e:
+        _release_git_lock(task_id)  # [FIX-4] освобождаем лок при любом падении
         _set_task(
             task_id,
             {

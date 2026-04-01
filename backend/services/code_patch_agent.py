@@ -1,3 +1,4 @@
+import ast
 import difflib
 import json
 import logging
@@ -205,8 +206,43 @@ def _build_diff_from_edit_ops(edit_ops: List[Dict], workspace_root: str) -> Tupl
     return "\n".join(all_diffs), affected
 
 
+def _validate_python_syntax(code: str, file_path: str) -> Tuple[bool, str]:
+    """[FIX-2] Проверяем синтаксис Python до записи файла."""
+    if not file_path.endswith(".py"):
+        return True, ""
+    try:
+        ast.parse(code)
+        return True, ""
+    except SyntaxError as e:
+        return False, f"SyntaxError in {file_path} line {e.lineno}: {e.msg}"
+
+
+def _validate_file_paths(edit_ops: List[Dict], workspace_root: str) -> Tuple[bool, str]:
+    """[FIX-5] Проверяем пути файлов до генерации/применения."""
+    for op in edit_ops:
+        rel_path = op.get("file_path", "")
+        if not rel_path:
+            return False, "edit_op missing file_path"
+        # Защита от path traversal
+        try:
+            resolved = (Path(workspace_root) / rel_path).resolve()
+            resolved.relative_to(Path(workspace_root).resolve())
+        except ValueError:
+            return False, f"Path traversal detected: {rel_path}"
+        # Если файл должен существовать — проверяем
+        is_new = op.get("new_file", False)
+        if not is_new and not (Path(workspace_root) / rel_path).exists():
+            return False, f"File does not exist: {rel_path}"
+    return True, ""
+
+
 def _apply_edit_ops_directly(edit_ops: List[Dict], workspace_root: str) -> Tuple[bool, str]:
     """Прямое применение edit_ops без diff (fallback)."""
+    # [FIX-5] Валидируем пути
+    ok, err = _validate_file_paths(edit_ops, workspace_root)
+    if not ok:
+        return False, f"Path validation failed: {err}"
+
     applied = []
     for i, op in enumerate(edit_ops):
         rel_path = op.get("file_path", "")
@@ -217,6 +253,10 @@ def _apply_edit_ops_directly(edit_ops: List[Dict], workspace_root: str) -> Tuple
 
         try:
             if is_new_file:
+                # [FIX-2] Синтакс-проверка до записи
+                syntax_ok, syntax_err = _validate_python_syntax(new_snip, rel_path)
+                if not syntax_ok:
+                    return False, syntax_err
                 abs_path.parent.mkdir(parents=True, exist_ok=True)
                 abs_path.write_text(new_snip, encoding="utf-8")
                 applied.append(rel_path)
@@ -228,6 +268,9 @@ def _apply_edit_ops_directly(edit_ops: List[Dict], workspace_root: str) -> Tuple
             content = abs_path.read_text(encoding="utf-8", errors="replace")
             if not old_snip:
                 # полная замена файла
+                syntax_ok, syntax_err = _validate_python_syntax(new_snip, rel_path)
+                if not syntax_ok:
+                    return False, syntax_err
                 abs_path.write_text(new_snip, encoding="utf-8")
                 applied.append(rel_path)
                 continue
@@ -239,6 +282,9 @@ def _apply_edit_ops_directly(edit_ops: List[Dict], workspace_root: str) -> Tuple
                 content_stripped = "\n".join(l.rstrip() for l in content.splitlines())
                 if content_stripped.count(old_stripped) == 1:
                     new_content = content_stripped.replace(old_stripped, new_snip)
+                    syntax_ok, syntax_err = _validate_python_syntax(new_content, rel_path)
+                    if not syntax_ok:
+                        return False, syntax_err
                     abs_path.write_text(new_content, encoding="utf-8")
                     applied.append(rel_path)
                     continue
@@ -247,6 +293,10 @@ def _apply_edit_ops_directly(edit_ops: List[Dict], workspace_root: str) -> Tuple
                 return False, f"Op[{i}] snippet ambiguous ({count} matches) in {rel_path}"
 
             new_content = content.replace(old_snip, new_snip, 1)
+            # [FIX-2] Синтакс-проверка до записи
+            syntax_ok, syntax_err = _validate_python_syntax(new_content, rel_path)
+            if not syntax_ok:
+                return False, syntax_err
             abs_path.write_text(new_content, encoding="utf-8")
             applied.append(rel_path)
         except Exception as e:
@@ -259,24 +309,35 @@ def _apply_edit_ops_directly(edit_ops: List[Dict], workspace_root: str) -> Tuple
 # Основная функция — ЯДРО АГЕНТА
 # ---------------------------------------------------------------------------
 
+def _load_conventions(workspace_root: str) -> str:
+    """[FIX-6] Загружаем CONVENTIONS.md — стиль и правила проекта для LLM."""
+    conv_path = Path(workspace_root) / "CONVENTIONS.md"
+    if conv_path.exists():
+        content = conv_path.read_text(encoding="utf-8")
+        return f"\n### PROJECT CONVENTIONS\n{content[:3000]}\n"
+    return ""
+
+
 async def generate_code_patch_proposal(
     *,
     ai_config: str,
     rewrite_plan: Dict[str, Any],
     allowlist_files: List[str],
     workspace_root: str = _WORKSPACE_ROOT,
+    max_retries: int = 3,
 ) -> Dict[str, Any]:
     """
     Генерирует патч кода для выполнения задачи.
 
     Алгоритм:
     1. Извлекаем ключевые слова из задачи
-    2. Выбираем наиболее релевантные файлы кодобазы
-    3. Читаем их содержимое
-    4. Фаза 1 (LLM): планирование — какие файлы менять и как
-    5. Фаза 2 (LLM): генерация — конкретные изменения кода
-    6. Строим unified diff через difflib
-    7. Применяем изменения
+    2. [FIX-5] Проверяем существование файлов
+    3. Выбираем наиболее релевантные файлы кодобазы
+    4. [FIX-6] Добавляем CONVENTIONS.md в промпт
+    5. Фаза 1 (LLM): планирование — какие файлы менять и как
+    6. [FIX-3] Retry-цикл фазы 2: генерация → валидация → если ошибка, LLM видит её и исправляет
+    7. [FIX-2] ast.parse() до записи файлов
+    8. Строим unified diff через difflib
     """
     from backend.services.ai_service import get_client_and_model
 
@@ -306,6 +367,7 @@ async def generate_code_patch_proposal(
 
     code_context = _build_code_context(selected_files, workspace_root)
     knowledge_context = _build_knowledge_context(rewrite_plan)
+    conventions = _load_conventions(workspace_root)  # [FIX-6]
 
     # --- Получаем дерево файлов проекта для ориентирования LLM ---
     try:
@@ -322,25 +384,26 @@ async def generate_code_patch_proposal(
     # -----------------------------------------------------------------------
     # ФАЗА 1 — Планирование: LLM решает какие файлы менять и что делать
     # -----------------------------------------------------------------------
-    plan_system = """You are a senior software engineer working on a Python/FastAPI + React/TypeScript project called PIMv3 — a product information management system for Russian e-commerce marketplaces (Ozon, Wildberries, Yandex Market, Megamarket).
+    plan_system = f"""You are a senior software engineer working on a Python/FastAPI + React/TypeScript project called PIMv3 — a product information management system for Russian e-commerce marketplaces (Ozon, Wildberries, Yandex Market, Megamarket).
 
 Your job: analyze the task and produce a clear implementation plan.
 
 Return ONLY valid JSON (no markdown):
-{
+{{
   "plan_summary": "one paragraph description of what you will implement",
   "files_to_modify": [
-    {"path": "backend/services/adapters.py", "reason": "add new adapter class", "action": "modify"},
-    {"path": "backend/services/new_service.py", "reason": "new service file", "action": "create"}
+    {{"path": "backend/services/adapters.py", "reason": "add new adapter class", "action": "modify"}},
+    {{"path": "backend/services/new_service.py", "reason": "new service file", "action": "create"}}
   ],
   "implementation_steps": ["step 1 description", "step 2 description"]
-}
+}}
 
 Rules:
 - Use EXISTING patterns from the codebase (same style, imports, error handling)
 - Prefer modifying existing files over creating new ones
 - File paths are relative to project root /mnt/data/Pimv3
 - Maximum 6 files to change
+- Only list files that ACTUALLY EXIST in the project tree (except action=create){conventions}
 """
 
     plan_user = f"""TASK: {title}
@@ -402,27 +465,27 @@ EXISTING CODE CONTEXT (most relevant files):
     targeted_context = "\n".join(targeted_context_parts)
 
     # -----------------------------------------------------------------------
-    # ФАЗА 2 — Генерация кода
+    # ФАЗА 2 — Генерация кода с retry-циклом [FIX-3]
     # -----------------------------------------------------------------------
-    gen_system = """You are a senior software engineer. Generate the actual code changes needed to implement the task.
+    gen_system = f"""You are a senior software engineer. Generate the actual code changes needed to implement the task.
 
 Return ONLY valid JSON (no markdown):
-{
+{{
   "edit_ops": [
-    {
+    {{
       "file_path": "backend/services/adapters.py",
       "new_file": false,
       "old_snippet": "EXACT existing code to replace (copy-paste from file, preserve indentation)",
       "new_snippet": "new code to put in place of old_snippet"
-    },
-    {
+    }},
+    {{
       "file_path": "backend/services/new_service.py",
       "new_file": true,
       "old_snippet": "",
       "new_snippet": "FULL FILE CONTENT here"
-    }
+    }}
   ]
-}
+}}
 
 CRITICAL RULES:
 1. old_snippet must be an EXACT copy from the existing file (same whitespace, same indentation)
@@ -433,9 +496,10 @@ CRITICAL RULES:
 6. Use async/await patterns (FastAPI async everywhere)
 7. Russian comments are fine (existing codebase uses Russian)
 8. Maximum 8 edit_ops total
+9. Only reference files that exist in the project tree{conventions}
 """
 
-    gen_user = f"""TASK: {title}
+    gen_user_base = f"""TASK: {title}
 
 IMPLEMENTATION PLAN:
 {plan_summary}
@@ -454,76 +518,109 @@ ADDITIONAL CODEBASE CONTEXT:
 Generate edit_ops to implement this task completely and correctly.
 """
 
-    try:
-        gen_resp = await client.chat.completions.create(
-            model=model,
-            messages=[
-                {"role": "system", "content": gen_system},
-                {"role": "user", "content": gen_user},
-            ],
-            temperature=0.05,
-            response_format={"type": "json_object"},
-            max_tokens=8000,
-        )
-        gen_raw = (gen_resp.choices[0].message.content or "").strip()
-        if gen_raw.startswith("```"):
-            gen_raw = gen_raw.split("```")[1]
-            if gen_raw.startswith("json"):
-                gen_raw = gen_raw[4:]
-        gen_data = json.loads(gen_raw)
-    except Exception as e:
-        return {"ok": False, "error": f"code_generation_failed: {e}"}
+    # [FIX-3] Retry-цикл: генерация → валидация → если ошибка, LLM видит её и исправляет
+    last_error = ""
+    messages: List[Dict] = [
+        {"role": "system", "content": gen_system},
+        {"role": "user", "content": gen_user_base},
+    ]
 
-    edit_ops = gen_data.get("edit_ops", [])
-    if not edit_ops:
-        return {"ok": False, "error": "llm_returned_empty_edit_ops"}
+    for attempt in range(max_retries):
+        try:
+            gen_resp = await client.chat.completions.create(
+                model=model,
+                messages=messages,
+                temperature=0.05 if attempt == 0 else 0.15,
+                response_format={"type": "json_object"},
+                max_tokens=8000,
+            )
+            gen_raw = (gen_resp.choices[0].message.content or "").strip()
+            if gen_raw.startswith("```"):
+                gen_raw = gen_raw.split("```")[1]
+                if gen_raw.startswith("json"):
+                    gen_raw = gen_raw[4:]
+            gen_data = json.loads(gen_raw)
+        except Exception as e:
+            last_error = f"LLM call failed: {e}"
+            log.warning(f"Attempt {attempt+1}/{max_retries} gen failed: {e}")
+            continue
 
-    # -----------------------------------------------------------------------
-    # Строим unified diff из edit_ops
-    # -----------------------------------------------------------------------
-    patch_text, affected_files = _build_diff_from_edit_ops(edit_ops, workspace_root)
+        edit_ops = gen_data.get("edit_ops", [])
+        if not edit_ops:
+            last_error = "llm_returned_empty_edit_ops"
+            messages.append({"role": "assistant", "content": gen_raw})
+            messages.append({"role": "user", "content": "You returned empty edit_ops. Please provide actual code changes."})
+            continue
 
-    if not patch_text.strip() and affected_files:
-        # diff пустой — возможно файлы новые (create), применяем напрямую
-        ok, err = _apply_edit_ops_directly(edit_ops, workspace_root)
-        if not ok:
-            return {"ok": False, "error": f"direct_apply_failed: {err}"}
-        affected_files = [op["file_path"] for op in edit_ops if op.get("file_path")]
+        # [FIX-5] Валидация путей
+        paths_ok, paths_err = _validate_file_paths(edit_ops, workspace_root)
+        if not paths_ok:
+            last_error = paths_err
+            log.warning(f"Attempt {attempt+1}/{max_retries} path validation failed: {paths_err}")
+            messages.append({"role": "assistant", "content": gen_raw})
+            messages.append({
+                "role": "user",
+                "content": f"Path validation error: {paths_err}\n\nPlease fix the file paths. Only use files that exist in the project tree (shown above). For new files use new_file=true.",
+            })
+            continue
+
+        # [FIX-2] Синтакс-проверка new_snippet до применения
+        syntax_errors = []
+        for op in edit_ops:
+            if op.get("file_path", "").endswith(".py") and op.get("new_snippet"):
+                syn_ok, syn_err = _validate_python_syntax(op["new_snippet"], op["file_path"])
+                if not syn_ok:
+                    syntax_errors.append(syn_err)
+        if syntax_errors:
+            last_error = "; ".join(syntax_errors)
+            log.warning(f"Attempt {attempt+1}/{max_retries} syntax errors: {last_error}")
+            messages.append({"role": "assistant", "content": gen_raw})
+            messages.append({
+                "role": "user",
+                "content": f"Syntax errors in generated code:\n{chr(10).join(syntax_errors)}\n\nPlease fix these syntax errors and regenerate the edit_ops.",
+            })
+            continue
+
+        # Всё прошло валидацию — применяем
+        log.info(f"Attempt {attempt+1}/{max_retries} passed validation, applying {len(edit_ops)} edit_ops")
+
+        patch_text, affected_files = _build_diff_from_edit_ops(edit_ops, workspace_root)
+
+        if not patch_text.strip():
+            # Новые файлы или нет изменений — применяем напрямую
+            ok, err = _apply_edit_ops_directly(edit_ops, workspace_root)
+            if not ok:
+                last_error = err
+                messages.append({"role": "assistant", "content": gen_raw})
+                messages.append({
+                    "role": "user",
+                    "content": f"Apply failed: {err}\n\nThe old_snippet was not found exactly in the file. Please copy the EXACT text from the file shown above, preserving all whitespace and indentation.",
+                })
+                continue
+            affected_files = [op["file_path"] for op in edit_ops if op.get("file_path")]
+            return {
+                "ok": True,
+                "proposal": {
+                    "patch_unified_diff": "",
+                    "affected_files": affected_files,
+                    "applied_directly": True,
+                    "edit_ops": edit_ops,
+                    "attempts": attempt + 1,
+                },
+            }
+
         return {
             "ok": True,
             "proposal": {
-                "patch_unified_diff": "",
+                "patch_unified_diff": patch_text,
                 "affected_files": affected_files,
-                "applied_directly": True,
                 "edit_ops": edit_ops,
+                "plan": plan_data,
+                "attempts": attempt + 1,
             },
         }
 
-    if not patch_text.strip():
-        # Fallback: пробуем применить напрямую через edit_ops
-        ok, err = _apply_edit_ops_directly(edit_ops, workspace_root)
-        if not ok:
-            return {"ok": False, "error": f"no_diff_and_direct_apply_failed: {err}"}
-        affected_files = [op["file_path"] for op in edit_ops if op.get("file_path")]
-        return {
-            "ok": True,
-            "proposal": {
-                "patch_unified_diff": "",
-                "affected_files": affected_files,
-                "applied_directly": True,
-                "edit_ops": edit_ops,
-            },
-        }
-
-    return {
-        "ok": True,
-        "proposal": {
-            "patch_unified_diff": patch_text,
-            "affected_files": affected_files,
-            "edit_ops": edit_ops,
-            "plan": plan_data,
-        },
-    }
+    return {"ok": False, "error": f"all_{max_retries}_attempts_failed: {last_error}"}
 
 
 # ---------------------------------------------------------------------------
