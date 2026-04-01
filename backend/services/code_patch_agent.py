@@ -1,10 +1,27 @@
 """
-code_patch_agent.py — ReAct Tool Loop агент для генерации кода. v7
+code_patch_agent.py — ReAct Tool Loop агент для генерации кода. v8
 
 Архитектура: LLM получает инструменты и работает в цикле до 40 шагов.
 Полное соответствие возможностям Claude Code внутри проекта.
 
-v7 новое (поверх v6):
+v8 новое (поверх v7):
+  - [#1]  web_search — поиск в DuckDuckGo для документации и решений ошибок
+  - [#2]  api_request — HTTP-запросы к локальному API серверу (localhost:4877)
+  - [#3]  db_query — read-only SQL запросы к базе данных (SELECT/SHOW/DESCRIBE/EXPLAIN)
+  - [#4]  read_logs — чтение логов systemd сервисов и лог-файлов
+  - [#5]  run_coverage — pytest coverage report с term-missing
+  - [#6]  Security scan (bandit) — блокирует task_done при High/Medium severity
+  - [#7]  Dead code detection (vulture) — advisory, не блокирует
+  - [#8]  run_tests_incremental — запуск только тестов связанных с изменёнными файлами
+  - [#9]  check_env — проверка env переменных в .env.example и .env
+  - [#10] check_circular_imports — обнаружение циклических импортов
+  - [#11] workspace_snapshot — git stash сохранение/восстановление перед рискованными операциями
+  - [#12] search_library_docs — поиск документации библиотек (FastAPI, SQLAlchemy, etc.)
+  - [#13] profile_code — профилирование Python кода через cProfile
+  - [#14] batch_edit — атомарное применение нескольких правок файлов
+  - [#15] Auto workspace snapshot в generate_code_patch_proposal перед ReAct loop
+
+v7 (сохранено):
   - [#1]  Extended shell whitelist — alembic, pip install, npm install, git log/blame/show/stash/diff
   - [#2]  install_package tool — pip/npm установка с обновлением requirements.txt / package.json
   - [#3]  run_migration tool — создание и применение Alembic миграций
@@ -465,6 +482,208 @@ TOOLS_SCHEMA = [
                     "question": {"type": "string", "description": "what to look for in the image (optional)"}
                 },
                 "required": ["path"]
+            }
+        }
+    },
+
+    # [v8 #1] web_search tool
+    {
+        "type": "function",
+        "function": {
+            "name": "web_search",
+            "description": "Search the web for documentation, error solutions, API specs. Use when you need information not in the codebase.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "search query"},
+                    "max_results": {"type": "integer", "description": "number of results (default 5)"}
+                },
+                "required": ["query"]
+            }
+        }
+    },
+    # [v8 #2] api_request tool
+    {
+        "type": "function",
+        "function": {
+            "name": "api_request",
+            "description": "Make an HTTP request to the running local API server to test an endpoint. Base URL is http://localhost:4877.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "method": {"type": "string", "description": "GET/POST/PUT/DELETE/PATCH"},
+                    "path": {"type": "string", "description": "/api/v1/..."},
+                    "body": {"type": "object", "description": "optional JSON body as object"},
+                    "headers": {"type": "object", "description": "optional headers object"}
+                },
+                "required": ["method", "path"]
+            }
+        }
+    },
+    # [v8 #3] db_query tool
+    {
+        "type": "function",
+        "function": {
+            "name": "db_query",
+            "description": "Run a read-only SQL query against the database. Only SELECT statements allowed.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "sql": {"type": "string", "description": "SQL query (SELECT only)"},
+                    "limit": {"type": "integer", "description": "max rows (default 20)"}
+                },
+                "required": ["sql"]
+            }
+        }
+    },
+    # [v8 #4] read_logs tool
+    {
+        "type": "function",
+        "function": {
+            "name": "read_logs",
+            "description": "Read recent logs from a system service or log file.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "service": {"type": "string", "description": "systemd service name (e.g. pimv3-backend) or log file path"},
+                    "lines": {"type": "integer", "description": "number of lines (default 50)"},
+                    "filter": {"type": "string", "description": "optional grep filter string"}
+                },
+                "required": ["service"]
+            }
+        }
+    },
+    # [v8 #5] run_coverage tool
+    {
+        "type": "function",
+        "function": {
+            "name": "run_coverage",
+            "description": "Run pytest with coverage report to see which lines are not tested.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "module": {"type": "string", "description": "module to measure coverage for (default: backend)"},
+                    "test_path": {"type": "string", "description": "test path (default: backend/tests/)"}
+                }
+            }
+        }
+    },
+    # [v8 #8] run_tests_incremental tool
+    {
+        "type": "function",
+        "function": {
+            "name": "run_tests_incremental",
+            "description": "Run only tests related to the files you modified. Much faster than running the full test suite.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "affected_files": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "list of modified files"
+                    }
+                },
+                "required": ["affected_files"]
+            }
+        }
+    },
+    # [v8 #9] check_env tool
+    {
+        "type": "function",
+        "function": {
+            "name": "check_env",
+            "description": "Check that required environment variables are declared in .env.example and set in .env. Use when adding code that reads new env vars.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "vars": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "list of variable names to check"
+                    }
+                },
+                "required": ["vars"]
+            }
+        }
+    },
+    # [v8 #10] check_circular_imports tool
+    {
+        "type": "function",
+        "function": {
+            "name": "check_circular_imports",
+            "description": "Detect circular imports in Python modules. Run after adding new imports to catch circular dependency issues before they break the app.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "module": {"type": "string", "description": "module to check (default: backend)"}
+                }
+            }
+        }
+    },
+    # [v8 #11] workspace_snapshot tool
+    {
+        "type": "function",
+        "function": {
+            "name": "workspace_snapshot",
+            "description": "Create or restore a git stash snapshot of the current workspace. Use before risky operations.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "action": {"type": "string", "description": "save, restore, or list"},
+                    "label": {"type": "string", "description": "snapshot label (for save)"}
+                },
+                "required": ["action"]
+            }
+        }
+    },
+    # [v8 #12] search_library_docs tool
+    {
+        "type": "function",
+        "function": {
+            "name": "search_library_docs",
+            "description": "Search live documentation for a library (SQLAlchemy, FastAPI, Celery, React, etc.). Returns accurate up-to-date API docs.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "library": {"type": "string", "description": "library name"},
+                    "query": {"type": "string", "description": "what to find in the docs"}
+                },
+                "required": ["library", "query"]
+            }
+        }
+    },
+    # [v8 #13] profile_code tool
+    {
+        "type": "function",
+        "function": {
+            "name": "profile_code",
+            "description": "Profile a Python function or script to find performance bottlenecks.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "code": {"type": "string", "description": "Python code to profile (function call or script)"},
+                    "top_n": {"type": "integer", "description": "show top N slowest calls (default 10)"}
+                },
+                "required": ["code"]
+            }
+        }
+    },
+    # [v8 #14] batch_edit tool
+    {
+        "type": "function",
+        "function": {
+            "name": "batch_edit",
+            "description": "Apply multiple file edits atomically — all succeed or all are rolled back. Use when changing multiple interdependent files.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "edits": {
+                        "type": "array",
+                        "items": {"type": "object"},
+                        "description": "array of {path, old_snippet, new_snippet} objects"
+                    }
+                },
+                "required": ["edits"]
             }
         }
     },
@@ -1212,6 +1431,655 @@ def _tool_read_image(
             return f"ERROR: model does not support vision/images: {e}"
         return f"ERROR calling vision API: {e}"
 
+
+
+
+# ---------------------------------------------------------------------------
+# [v8 #1] web_search tool implementation
+# ---------------------------------------------------------------------------
+
+def _tool_web_search(query: str, max_results: int, workspace_root: str) -> str:
+    """[v8 #1] Поиск в DuckDuckGo."""
+    max_results = max(1, min(max_results or 5, 10))
+    try:
+        import httpx
+        import urllib.parse
+        encoded = urllib.parse.quote_plus(query)
+        url = f"https://api.duckduckgo.com/?q={encoded}&format=json&no_html=1&skip_disambig=1"
+        with httpx.Client(timeout=15, follow_redirects=True) as client:
+            resp = client.get(url, headers={"User-Agent": "Mozilla/5.0"})
+            resp.raise_for_status()
+            data = resp.json()
+
+        results = []
+        abstract = (data.get("AbstractText") or "").strip()
+        if abstract:
+            src = data.get("AbstractSource") or "DuckDuckGo"
+            results.append(f"[1] {src}: {abstract[:500]}")
+
+        for topic in (data.get("RelatedTopics") or []):
+            if len(results) >= max_results:
+                break
+            if isinstance(topic, dict):
+                text = (topic.get("Text") or "").strip()
+                if text:
+                    results.append(f"[{len(results)+1}] {text[:300]}")
+
+        for r in (data.get("Results") or []):
+            if len(results) >= max_results:
+                break
+            if isinstance(r, dict):
+                text = (r.get("Text") or "").strip()
+                if text:
+                    results.append(f"[{len(results)+1}] {text[:300]}")
+
+        if not results:
+            # Fallback: HTML scrape
+            html_url = f"https://duckduckgo.com/html/?q={encoded}"
+            with httpx.Client(timeout=15, follow_redirects=True) as client2:
+                resp2 = client2.get(html_url, headers={"User-Agent": "Mozilla/5.0"})
+                html = resp2.text
+            snippets = re.findall(r'<a class="result__a"[^>]*>([^<]+)</a>', html)
+            for s in snippets[:max_results]:
+                results.append(f"[{len(results)+1}] {s.strip()[:300]}")
+
+        if not results:
+            return f"Search: {query}\n\nNo results found."
+
+        return f"Search: {query}\n\n" + "\n".join(results[:max_results])
+    except Exception as e:
+        return f"Search: {query}\n\nERROR: could not complete search — {e}"
+
+
+# ---------------------------------------------------------------------------
+# [v8 #2] api_request tool implementation
+# ---------------------------------------------------------------------------
+
+def _tool_api_request(
+    method: str,
+    path: str,
+    body: Optional[Dict],
+    headers: Optional[Dict],
+    workspace_root: str,
+) -> str:
+    """[v8 #2] HTTP запрос к локальному API серверу."""
+    base_url = "http://localhost:4877"
+    url = base_url + path
+    try:
+        import httpx
+        with httpx.Client(timeout=10) as client:
+            resp = client.request(
+                method.upper(),
+                url,
+                json=body,
+                headers=headers or {},
+            )
+        return (
+            f"{method.upper()} {path}\n"
+            f"Status: {resp.status_code}\n"
+            f"Response:\n{resp.text[:3000]}"
+        )
+    except Exception as e:
+        err_str = str(e).lower()
+        if "connection" in err_str or "refused" in err_str or "connect" in err_str:
+            return "ERROR: API server not reachable at localhost:4877 — is pimv3-backend running?"
+        return f"ERROR: {e}"
+
+
+# ---------------------------------------------------------------------------
+# [v8 #3] db_query tool implementation
+# ---------------------------------------------------------------------------
+
+def _tool_db_query(sql: str, limit: int, workspace_root: str) -> str:
+    """[v8 #3] Read-only SQL запрос к базе данных."""
+    limit = limit or 20
+    sql_stripped = sql.strip()
+    first_word = sql_stripped.upper().split()[0] if sql_stripped else ""
+    allowed_starters = ("SELECT", "SHOW", "DESCRIBE", "EXPLAIN")
+    if first_word not in allowed_starters:
+        return "ERROR: only SELECT/SHOW/DESCRIBE/EXPLAIN allowed"
+
+    # Add LIMIT if needed
+    if first_word == "SELECT" and "LIMIT" not in sql_stripped.upper():
+        sql_with_limit = sql_stripped.rstrip(";") + f" LIMIT {limit}"
+    else:
+        sql_with_limit = sql_stripped
+
+    # Get DATABASE_URL
+    db_url = os.getenv("DATABASE_URL", "")
+    if not db_url:
+        env_path = Path(workspace_root) / ".env"
+        if env_path.exists():
+            for line in env_path.read_text(encoding="utf-8", errors="replace").splitlines():
+                if line.startswith("DATABASE_URL="):
+                    db_url = line.split("=", 1)[1].strip().strip('"\'  ')
+                    break
+    if not db_url:
+        return "ERROR: DATABASE_URL not found in environment or .env"
+
+    # Convert async URL to sync
+    sync_url = db_url.replace("postgresql+asyncpg://", "postgresql://")
+
+    try:
+        import psycopg2
+        conn = psycopg2.connect(sync_url)
+        conn.set_session(readonly=True, autocommit=True)
+        cur = conn.cursor()
+        cur.execute(sql_with_limit)
+        rows = cur.fetchmany(limit)
+        col_names = [desc[0] for desc in (cur.description or [])]
+        cur.close()
+        conn.close()
+
+        if not col_names:
+            return f"Query executed. No columns returned.\nSQL: {sql_with_limit}"
+
+        # Format as table
+        header = " | ".join(col_names)
+        separator = "-" * len(header)
+        lines = [header, separator]
+        for row in rows:
+            lines.append(" | ".join(str(v) if v is not None else "NULL" for v in row))
+        lines.append(f"\n({len(rows)} rows)")
+        return "\n".join(lines)
+
+    except ImportError:
+        # Fallback to psql
+        try:
+            result = subprocess.run(
+                ["psql", sync_url, "-c", sql_with_limit],
+                capture_output=True, text=True, timeout=15
+            )
+            out = (result.stdout or "") + (result.stderr or "")
+            return out[:3000] if out else "No output from psql"
+        except Exception as e2:
+            return f"ERROR: psycopg2 not installed and psql fallback failed: {e2}"
+    except Exception as e:
+        return f"ERROR db_query: {e}"
+
+
+# ---------------------------------------------------------------------------
+# [v8 #4] read_logs tool implementation
+# ---------------------------------------------------------------------------
+
+_ALLOWED_LOG_SERVICES = ["pimv3-backend", "pim-celery", "pimv3-agent-worker", "nginx", "redis", "postgresql"]
+
+
+def _tool_read_logs(service: str, lines: int, filter_str: Optional[str], workspace_root: str) -> str:
+    """[v8 #4] Читать логи сервиса или файла."""
+    lines = lines or 50
+    is_file = service.endswith(".log") or service.startswith("/")
+    if not is_file and service not in _ALLOWED_LOG_SERVICES:
+        return f"ERROR: service not in allowed list. Allowed: {_ALLOWED_LOG_SERVICES}"
+
+    try:
+        if is_file:
+            cmd = f"tail -n {lines} {service}"
+        else:
+            cmd = f"journalctl -u {service} -n {lines} --no-pager --output=short"
+
+        if filter_str:
+            import shlex
+            cmd = cmd + f" | grep {shlex.quote(filter_str)}"
+
+        result = subprocess.run(
+            cmd, shell=True, capture_output=True, text=True, timeout=30
+        )
+        output = (result.stdout or "") + (result.stderr or "")
+        return output[:6000] if output else f"No output from: {cmd}"
+    except Exception as e:
+        return f"ERROR read_logs: {e}"
+
+
+# ---------------------------------------------------------------------------
+# [v8 #5] run_coverage tool implementation
+# ---------------------------------------------------------------------------
+
+def _tool_run_coverage(module: Optional[str], test_path: Optional[str], workspace_root: str) -> str:
+    """[v8 #5] Запустить pytest с coverage report."""
+    module = module or "backend"
+    test_path = test_path or "backend/tests/"
+    py = str(Path(workspace_root) / "backend" / "venv" / "bin" / "python3")
+    if not Path(py).exists():
+        py = "python3"
+    try:
+        result = subprocess.run(
+            [py, "-m", "pytest", test_path,
+             f"--cov={module}", "--cov-report=term-missing",
+             "-q", "--tb=no", "--timeout=60"],
+            cwd=workspace_root, capture_output=True, text=True, timeout=120
+        )
+        out = ((result.stdout or "") + (result.stderr or ""))
+        return out[:4000] if out else "No coverage output"
+    except subprocess.TimeoutExpired:
+        return "ERROR: coverage run timed out after 120s"
+    except Exception as e:
+        return f"ERROR run_coverage: {e}"
+
+
+# ---------------------------------------------------------------------------
+# [v8 #6] Bandit security scan
+# ---------------------------------------------------------------------------
+
+def _run_bandit_check(affected_files: List[str], workspace_root: str) -> Dict[str, Any]:
+    """[v8 #6] Запуск bandit для проверки безопасности."""
+    py_files = [f for f in affected_files if f.endswith('.py')]
+    if not py_files:
+        return {"ok": True, "skipped": True}
+    try:
+        result = subprocess.run(
+            ["bandit", "-ll", "-q", "--format", "text"] + py_files,
+            cwd=workspace_root, capture_output=True, text=True, timeout=30
+        )
+        issues = (result.stdout or "").strip()
+        has_high = "Severity: High" in issues or "Severity: Medium" in issues
+        return {"ok": not has_high, "issues": issues[:2000], "files_checked": py_files}
+    except FileNotFoundError:
+        return {"ok": True, "skipped": True, "reason": "bandit not installed"}
+    except Exception as e:
+        return {"ok": True, "skipped": True, "reason": str(e)}
+
+
+# ---------------------------------------------------------------------------
+# [v8 #7] Vulture dead code detection
+# ---------------------------------------------------------------------------
+
+def _run_vulture_check(affected_files: List[str], workspace_root: str) -> Dict[str, Any]:
+    """[v8 #7] Запуск vulture для поиска мёртвого кода."""
+    py_files = [f for f in affected_files if f.endswith('.py')]
+    if not py_files:
+        return {"ok": True, "skipped": True}
+    try:
+        result = subprocess.run(
+            ["vulture"] + py_files + ["--min-confidence", "80"],
+            cwd=workspace_root, capture_output=True, text=True, timeout=30
+        )
+        issues = (result.stdout or "").strip()
+        return {"ok": True, "issues": issues[:1000], "skipped": not issues}
+    except FileNotFoundError:
+        return {"ok": True, "skipped": True, "reason": "vulture not installed"}
+    except Exception as e:
+        return {"ok": True, "skipped": True, "reason": str(e)}
+
+
+# ---------------------------------------------------------------------------
+# [v8 #8] Incremental test runner
+# ---------------------------------------------------------------------------
+
+def _find_related_tests(affected_files: List[str], workspace_root: str) -> List[str]:
+    """[v8 #8] Найти тесты связанные с изменёнными файлами."""
+    tests_dir = Path(workspace_root) / "backend" / "tests"
+    if not tests_dir.exists():
+        return []
+    related: set = set()
+    for f in affected_files:
+        module = Path(f).stem
+        for test_file in tests_dir.glob("test_*.py"):
+            if module in test_file.stem:
+                related.add(str(test_file.relative_to(workspace_root)))
+    return list(related)
+
+
+def _tool_run_tests_incremental(affected_files: List[str], workspace_root: str) -> str:
+    """[v8 #8] Запустить только тесты связанные с изменёнными файлами."""
+    related = _find_related_tests(affected_files, workspace_root)
+    py = str(Path(workspace_root) / "backend" / "venv" / "bin" / "python3")
+    if not Path(py).exists():
+        py = "python3"
+    if related:
+        test_targets = " ".join(related)
+        note = f"Running {len(related)} related test file(s): {related}"
+    else:
+        test_targets = "backend/tests/"
+        note = "No related tests found — running full test suite"
+    try:
+        result = subprocess.run(
+            f"{py} -m pytest {test_targets} -q --tb=short --timeout=60",
+            shell=True, cwd=workspace_root,
+            capture_output=True, text=True, timeout=120
+        )
+        out = ((result.stdout or "") + (result.stderr or ""))[-4000:]
+        return f"{note}\n\n{out}"
+    except subprocess.TimeoutExpired:
+        return "ERROR: tests timed out after 120s"
+    except Exception as e:
+        return f"ERROR run_tests_incremental: {e}"
+
+
+# ---------------------------------------------------------------------------
+# [v8 #9] check_env tool implementation
+# ---------------------------------------------------------------------------
+
+def _tool_check_env(vars: List[str], workspace_root: str) -> str:
+    """[v8 #9] Проверить env переменные в .env.example и .env."""
+    def _parse_var_names(path: Path) -> set:
+        names: set = set()
+        if not path.exists():
+            return names
+        for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+            line = line.strip()
+            if line and not line.startswith("#") and "=" in line:
+                names.add(line.split("=", 1)[0].strip())
+        return names
+
+    example_vars = _parse_var_names(Path(workspace_root) / ".env.example")
+    env_vars = _parse_var_names(Path(workspace_root) / ".env")
+
+    output_lines = ["## ENV Variables Check"]
+    for var in vars:
+        in_example = var in example_vars
+        in_env = var in env_vars
+        status_parts = []
+        if in_example:
+            status_parts.append("declared in .env.example")
+        else:
+            status_parts.append(f"WARNING: {var} not in .env.example — add it")
+        if in_env:
+            status_parts.append("set in .env")
+        else:
+            status_parts.append(f"WARNING: {var} not set in .env")
+        output_lines.append(f"  {var}: {'; '.join(status_parts)}")
+    return "\n".join(output_lines)
+
+
+# ---------------------------------------------------------------------------
+# [v8 #10] check_circular_imports tool implementation
+# ---------------------------------------------------------------------------
+
+def _tool_check_circular_imports(module: Optional[str], workspace_root: str) -> str:
+    """[v8 #10] Обнаружить циклические импорты."""
+    module = module or "backend"
+    py = str(Path(workspace_root) / "backend" / "venv" / "bin" / "python3")
+    if not Path(py).exists():
+        py = "python3"
+
+    # Try importing the module
+    try:
+        result = subprocess.run(
+            [py, "-c", f"import {module}"],
+            cwd=workspace_root, capture_output=True, text=True, timeout=15
+        )
+        stderr = (result.stderr or "").strip()
+        if result.returncode != 0 and ("circular" in stderr.lower() or "cannot import" in stderr.lower()):
+            return f"CIRCULAR IMPORT DETECTED:\n{stderr[:2000]}"
+    except Exception:
+        pass
+
+    # Build import graph and detect cycles with DFS
+    base = Path(workspace_root)
+    module_dir = base / module.replace(".", "/")
+    if not module_dir.exists():
+        module_dir = base
+
+    py_files = list(module_dir.rglob("*.py"))
+    skip = {"__pycache__", "venv", ".venv", "node_modules"}
+    py_files = [f for f in py_files if not any(s in f.parts for s in skip)]
+
+    graph: Dict[str, List[str]] = {}
+    for pyf in py_files:
+        try:
+            rel = str(pyf.relative_to(base)).replace("/", ".").removesuffix(".py")
+            imports: List[str] = []
+            text = pyf.read_text(encoding="utf-8", errors="replace")
+            for line in text.splitlines():
+                line = line.strip()
+                m = re.match(r'from (\S+) import', line)
+                if m:
+                    imports.append(m.group(1))
+                m2 = re.match(r'import (\S+)', line)
+                if m2:
+                    imports.append(m2.group(1).split(".")[0])
+            graph[rel] = imports
+        except Exception:
+            continue
+
+    # DFS cycle detection
+    cycles: List[str] = []
+    visited: set = set()
+    rec_stack: set = set()
+
+    def dfs(node: str, path: List[str]) -> None:
+        visited.add(node)
+        rec_stack.add(node)
+        for neighbor in graph.get(node, []):
+            if neighbor not in graph:
+                continue
+            if neighbor not in visited:
+                dfs(neighbor, path + [neighbor])
+            elif neighbor in rec_stack:
+                cycle_start = path.index(neighbor) if neighbor in path else -1
+                if cycle_start >= 0:
+                    cycle = path[cycle_start:] + [neighbor]
+                    cycles.append(" -> ".join(cycle))
+        rec_stack.discard(node)
+
+    for node in list(graph.keys())[:50]:
+        if node not in visited:
+            try:
+                dfs(node, [node])
+            except RecursionError:
+                pass
+
+    if cycles:
+        return "CIRCULAR IMPORTS FOUND:\n" + "\n".join(cycles[:10])
+    return f"No circular imports found in {module}"
+
+
+# ---------------------------------------------------------------------------
+# [v8 #11] workspace_snapshot tool implementation
+# ---------------------------------------------------------------------------
+
+def _tool_workspace_snapshot(action: str, label: Optional[str], workspace_root: str) -> str:
+    """[v8 #11] Git stash snapshot сохранение/восстановление."""
+    action = (action or "").strip().lower()
+    try:
+        if action == "save":
+            stash_msg = f"agent-snapshot: {label or 'unnamed'}"
+            result = subprocess.run(
+                ["git", "stash", "push", "-m", stash_msg],
+                cwd=workspace_root, capture_output=True, text=True, timeout=30
+            )
+            out = (result.stdout or result.stderr or "").strip()
+            if result.returncode == 0:
+                return f"OK: workspace snapshot saved — {out}"
+            return f"ERROR: git stash push failed — {out}"
+        elif action == "restore":
+            result = subprocess.run(
+                ["git", "stash", "pop"],
+                cwd=workspace_root, capture_output=True, text=True, timeout=30
+            )
+            out = (result.stdout or result.stderr or "").strip()
+            if result.returncode == 0:
+                return f"OK: workspace restored — {out}"
+            return f"ERROR: git stash pop failed — {out}"
+        elif action == "list":
+            result = subprocess.run(
+                ["git", "stash", "list"],
+                cwd=workspace_root, capture_output=True, text=True, timeout=15
+            )
+            out = (result.stdout or "").strip()
+            return out if out else "No stashes found."
+        else:
+            return f"ERROR: unknown action '{action}'. Use: save, restore, list"
+    except Exception as e:
+        return f"ERROR workspace_snapshot: {e}"
+
+
+# ---------------------------------------------------------------------------
+# [v8 #12] search_library_docs tool implementation
+# ---------------------------------------------------------------------------
+
+_LIBRARY_DOCS_URLS: Dict[str, str] = {
+    "fastapi": "https://fastapi.tiangolo.com/",
+    "sqlalchemy": "https://docs.sqlalchemy.org/en/20/",
+    "celery": "https://docs.celeryq.dev/en/stable/",
+    "redis": "https://redis-py.readthedocs.io/en/stable/",
+    "httpx": "https://www.python-httpx.org/",
+    "alembic": "https://alembic.sqlalchemy.org/en/latest/",
+    "react": "https://react.dev/",
+    "typescript": "https://www.typescriptlang.org/docs/",
+}
+
+
+def _tool_search_library_docs(library: str, query: str, workspace_root: str) -> str:
+    """[v8 #12] Поиск документации библиотеки."""
+    lib_key = library.lower().strip()
+
+    # Check if context7 MCP is available
+    context7_paths = [
+        "/home/igun2/.cursor/projects/mnt-data-Pimv3/mcps/context7",
+        str(Path.home() / ".cursor" / "mcps" / "context7"),
+    ]
+    for ctx7_path in context7_paths:
+        if Path(ctx7_path).exists():
+            return (
+                f"Context7 MCP is available. Use the context7 MCP tool directly for live docs: "
+                f"library={library}, query={query}"
+            )
+
+    # Fallback: fetch docs URL
+    url = _LIBRARY_DOCS_URLS.get(lib_key)
+    if not url:
+        return _tool_web_search(f"{library} {query} documentation", 5, workspace_root)
+
+    try:
+        result = _tool_web_fetch(url, 8000, workspace_root)
+        query_lower = query.lower()
+        lines = result.splitlines()
+        relevant = []
+        for i, line in enumerate(lines):
+            if query_lower in line.lower():
+                start = max(0, i - 2)
+                end = min(len(lines), i + 10)
+                relevant.extend(lines[start:end])
+                relevant.append("---")
+                if len("\n".join(relevant)) > 3000:
+                    break
+        if relevant:
+            return f"Library docs: {library} — {url}\n\n" + "\n".join(relevant[:80])
+        return result[:3000]
+    except Exception as e:
+        return f"ERROR search_library_docs: {e}"
+
+
+# ---------------------------------------------------------------------------
+# [v8 #13] profile_code tool implementation
+# ---------------------------------------------------------------------------
+
+def _tool_profile_code(code: str, top_n: int, workspace_root: str) -> str:
+    """[v8 #13] Профилирование Python кода через cProfile."""
+    top_n = top_n or 10
+    profile_wrapper = f"""import cProfile, pstats, io
+pr = cProfile.Profile()
+pr.enable()
+{code}
+pr.disable()
+s = io.StringIO()
+ps = pstats.Stats(pr, stream=s).sort_stats('cumulative')
+ps.print_stats({top_n})
+print(s.getvalue())
+"""
+    py = str(Path(workspace_root) / "backend" / "venv" / "bin" / "python3")
+    if not Path(py).exists():
+        py = "python3"
+    try:
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False, encoding="utf-8") as f:
+            f.write(profile_wrapper)
+            tmp_path = f.name
+        result = subprocess.run(
+            [py, tmp_path],
+            cwd=workspace_root, capture_output=True, text=True, timeout=30
+        )
+        try:
+            os.unlink(tmp_path)
+        except Exception:
+            pass
+        out = (result.stdout or "") + (result.stderr or "")
+        return out[:3000] if out else "No profiling output"
+    except subprocess.TimeoutExpired:
+        return "ERROR: profiling timed out after 30s"
+    except Exception as e:
+        return f"ERROR profile_code: {e}"
+
+
+# ---------------------------------------------------------------------------
+# [v8 #14] batch_edit tool implementation
+# ---------------------------------------------------------------------------
+
+def _tool_batch_edit(
+    edits: List[Dict],
+    dry_run: bool,
+    allowlist: Optional[List[str]],
+    workspace_root: str,
+) -> Tuple[str, List[str]]:
+    """[v8 #14] Атомарное применение нескольких правок файлов."""
+    if not edits:
+        return "ERROR: no edits provided", []
+
+    backups: Dict[str, str] = {}
+    for i, edit in enumerate(edits):
+        path = edit.get("path", "")
+        old_snippet = edit.get("old_snippet", "")
+        new_snippet = edit.get("new_snippet", "")
+
+        if not path:
+            return f"ERROR: edit[{i}] missing path", []
+
+        scope_err = _check_scope(path, allowlist or [])
+        if scope_err:
+            return f"ERROR: edit[{i}] — {scope_err}", []
+
+        abs_path = _safe_resolve(path, workspace_root)
+        if abs_path is None:
+            return f"ERROR: edit[{i}] path traversal: {path}", []
+        if not abs_path.exists():
+            return f"ERROR: edit[{i}] file not found: {path}", []
+
+        try:
+            content = abs_path.read_text(encoding="utf-8", errors="replace")
+        except Exception as e:
+            return f"ERROR: edit[{i}] cannot read {path}: {e}", []
+
+        backups[path] = content
+
+        count = content.count(old_snippet)
+        if count == 0:
+            return f"ERROR: edit[{i}] old_snippet not found in {path}. Call read_file first.", []
+        if count > 1:
+            return f"ERROR: edit[{i}] old_snippet matches {count} times in {path}. Make it more specific.", []
+
+        new_content = content.replace(old_snippet, new_snippet, 1)
+        if path.endswith(".py"):
+            ok, err = _validate_python_syntax(new_content, path)
+            if not ok:
+                return f"ERROR: edit[{i}] syntax error after edit in {path}: {err}", []
+
+    if dry_run:
+        paths = [e.get("path", "") for e in edits]
+        return f"DRY-RUN: would apply {len(edits)} edits atomically to {paths}", paths
+
+    applied: List[str] = []
+    for i, edit in enumerate(edits):
+        path = edit.get("path", "")
+        old_snippet = edit.get("old_snippet", "")
+        new_snippet = edit.get("new_snippet", "")
+        abs_path = _safe_resolve(path, workspace_root)
+        try:
+            content = abs_path.read_text(encoding="utf-8", errors="replace")  # type: ignore[union-attr]
+            new_content = content.replace(old_snippet, new_snippet, 1)
+            abs_path.write_text(new_content, encoding="utf-8")  # type: ignore[union-attr]
+            applied.append(path)
+        except Exception as e:
+            for rev_path in applied:
+                try:
+                    rev_abs = _safe_resolve(rev_path, workspace_root)
+                    if rev_abs and rev_path in backups:
+                        rev_abs.write_text(backups[rev_path], encoding="utf-8")
+                except Exception:
+                    pass
+            return f"ERROR: edit[{i}] failed ({e}). Rolled back {len(applied)} already-applied edits.", []
+
+    return f"OK: applied {len(edits)} edits atomically to {applied}", applied
 
 # ---------------------------------------------------------------------------
 # Вспомогательные функции
@@ -2172,6 +3040,109 @@ Start with your implementation plan (no tool call), then proceed step by step.""
                     model,
                 )
 
+            elif tool_name == "web_search":
+                # [v8 #1]
+                tool_result = _tool_web_search(
+                    tool_args.get("query", ""),
+                    tool_args.get("max_results", 5),
+                    workspace_root,
+                )
+
+            elif tool_name == "api_request":
+                # [v8 #2]
+                tool_result = _tool_api_request(
+                    tool_args.get("method", "GET"),
+                    tool_args.get("path", "/"),
+                    tool_args.get("body"),
+                    tool_args.get("headers"),
+                    workspace_root,
+                )
+
+            elif tool_name == "db_query":
+                # [v8 #3]
+                tool_result = _tool_db_query(
+                    tool_args.get("sql", ""),
+                    tool_args.get("limit", 20),
+                    workspace_root,
+                )
+
+            elif tool_name == "read_logs":
+                # [v8 #4]
+                tool_result = _tool_read_logs(
+                    tool_args.get("service", ""),
+                    tool_args.get("lines", 50),
+                    tool_args.get("filter"),
+                    workspace_root,
+                )
+
+            elif tool_name == "run_coverage":
+                # [v8 #5]
+                tool_result = _tool_run_coverage(
+                    tool_args.get("module"),
+                    tool_args.get("test_path"),
+                    workspace_root,
+                )
+
+            elif tool_name == "run_tests_incremental":
+                # [v8 #8]
+                tool_result = _tool_run_tests_incremental(
+                    tool_args.get("affected_files", affected_files),
+                    workspace_root,
+                )
+
+            elif tool_name == "check_env":
+                # [v8 #9]
+                tool_result = _tool_check_env(
+                    tool_args.get("vars", []),
+                    workspace_root,
+                )
+
+            elif tool_name == "check_circular_imports":
+                # [v8 #10]
+                tool_result = _tool_check_circular_imports(
+                    tool_args.get("module"),
+                    workspace_root,
+                )
+
+            elif tool_name == "workspace_snapshot":
+                # [v8 #11]
+                tool_result = _tool_workspace_snapshot(
+                    tool_args.get("action", "list"),
+                    tool_args.get("label"),
+                    workspace_root,
+                )
+
+            elif tool_name == "search_library_docs":
+                # [v8 #12]
+                tool_result = _tool_search_library_docs(
+                    tool_args.get("library", ""),
+                    tool_args.get("query", ""),
+                    workspace_root,
+                )
+
+            elif tool_name == "profile_code":
+                # [v8 #13]
+                tool_result = _tool_profile_code(
+                    tool_args.get("code", ""),
+                    tool_args.get("top_n", 10),
+                    workspace_root,
+                )
+
+            elif tool_name == "batch_edit":
+                # [v8 #14]
+                msg_str, batch_affected = _tool_batch_edit(
+                    tool_args.get("edits", []),
+                    dry_run,
+                    allowlist,
+                    workspace_root,
+                )
+                tool_result = msg_str
+                for f in batch_affected:
+                    if f not in affected_files:
+                        affected_files.append(f)
+                        is_write_op = True
+
+
             elif tool_name == "ask_user":
                 question = tool_args.get("question", "")
                 context = tool_args.get("context", "")
@@ -2202,80 +3173,98 @@ Start with your implementation plan (no tool call), then proceed step by step.""
                     )
                     has_error = True
                 else:
-                    # [#4] Mypy check (non-blocking — just report)
-                    mypy_result = _run_mypy_check(all_affected, workspace_root)
-                    mypy_note = ""
-                    if not mypy_result.get("skipped") and not mypy_result.get("ok"):
-                        mypy_issues = mypy_result.get("issues", "")
-                        mypy_note = f"\nMypy warnings:\n{mypy_issues}"
-                        log.info(f"Step {step}: mypy issues (non-blocking): {mypy_issues[:200]}")
+                    # [v8 #6] Bandit security scan — BLOCKS on High/Medium
+                    bandit_result = _run_bandit_check(all_affected, workspace_root)
+                    if not bandit_result.get("ok") and not bandit_result.get("skipped"):
+                        bandit_issues = bandit_result.get("issues", "")
+                        log.info(f"Step {step}: bandit security issues, blocking task_done")
+                        tool_result = (
+                            f"SECURITY SCAN FAILED (bandit):\n{bandit_issues}\n\n"
+                            f"Fix all High/Medium severity security issues, then call task_done again."
+                        )
+                        has_error = True
+                    else:
+                        # [v8 #7] Vulture dead code — advisory only
+                        vulture_result = _run_vulture_check(all_affected, workspace_root)
 
-                    # [v7 #4] TypeScript check (non-blocking — just report)
-                    tsc_result = _run_tsc_check(all_affected, workspace_root)
-                    tsc_note = ""
-                    if not tsc_result.get("skipped") and not tsc_result.get("ok"):
-                        tsc_issues = tsc_result.get("issues", "")
-                        tsc_note = f"\nTypeScript warnings:\n{tsc_issues}"
-                        log.info(f"Step {step}: tsc issues (non-blocking): {tsc_issues[:200]}")
+                        # [#4] Mypy check (non-blocking — just report)
+                        mypy_result = _run_mypy_check(all_affected, workspace_root)
+                        mypy_note = ""
+                        if not mypy_result.get("skipped") and not mypy_result.get("ok"):
+                            mypy_issues = mypy_result.get("issues", "")
+                            mypy_note = f"\nMypy warnings:\n{mypy_issues}"
+                            log.info(f"Step {step}: mypy issues (non-blocking): {mypy_issues[:200]}")
 
-                    log.info(f"task_done after {step} steps. Files: {all_affected}")
-                    messages.append({
-                        "role": "tool",
-                        "tool_call_id": tc.id,
-                        "content": "Task marked as done.",
-                    })
+                        # [v7 #4] TypeScript check (non-blocking — just report)
+                        tsc_result = _run_tsc_check(all_affected, workspace_root)
+                        tsc_note = ""
+                        if not tsc_result.get("skipped") and not tsc_result.get("ok"):
+                            tsc_issues = tsc_result.get("issues", "")
+                            tsc_note = f"\nTypeScript warnings:\n{tsc_issues}"
+                            log.info(f"Step {step}: tsc issues (non-blocking): {tsc_issues[:200]}")
 
-                    # [#7] Update CHANGELOG
-                    _update_changelog(
-                        workspace_root=workspace_root,
-                        task_id=task_id,
-                        task_title=task_title,
-                        affected_files=all_affected,
-                        summary=summary,
-                    )
+                            log.info(f"task_done after {step} steps. Files: {all_affected}")
+                        messages.append({
+                            "role": "tool",
+                            "tool_call_id": tc.id,
+                            "content": "Task marked as done.",
+                        })
 
-                    # [#6] Publish completed event
-                    _publish_stream(task_id, "completed", {
-                        "summary": summary,
-                        "files": all_affected,
-                    })
+                        # [#7] Update CHANGELOG
+                        _update_changelog(
+                            workspace_root=workspace_root,
+                            task_id=task_id,
+                            task_title=task_title,
+                            affected_files=all_affected,
+                            summary=summary,
+                        )
 
-                    # [#1] Dry-run response
-                    if dry_run:
+                        # [#6] Publish completed event
+                        _publish_stream(task_id, "completed", {
+                            "summary": summary,
+                            "files": all_affected,
+                        })
+
+                        # [#1] Dry-run response
+                        if dry_run:
+                            return {
+                                "ok": True,
+                                "proposal": {
+                                    "dry_run": True,
+                                    "applied_directly": False,
+                                    "affected_files": all_affected,
+                                    "deleted_files": deleted_files,
+                                    "plan": steps_log,
+                                    "summary": summary,
+                                    "wrote_tests": wrote_tests,
+                                    "steps": step + 1,
+                                    "steps_log": steps_log,
+                                    "lint": lint_result,
+                                    "mypy": mypy_result,
+                                    "tsc": tsc_result,
+                                    "security_scan": bandit_result,
+                                    "dead_code": vulture_result,
+                                },
+                            }
+
                         return {
                             "ok": True,
                             "proposal": {
-                                "dry_run": True,
-                                "applied_directly": False,
+                                "patch_unified_diff": "",
                                 "affected_files": all_affected,
                                 "deleted_files": deleted_files,
-                                "plan": steps_log,
-                                "summary": summary,
+                                "applied_directly": True,
+                                "summary": summary + mypy_note + tsc_note,
                                 "wrote_tests": wrote_tests,
                                 "steps": step + 1,
                                 "steps_log": steps_log,
                                 "lint": lint_result,
                                 "mypy": mypy_result,
                                 "tsc": tsc_result,
+                                "security_scan": bandit_result,
+                                "dead_code": vulture_result,
                             },
                         }
-
-                    return {
-                        "ok": True,
-                        "proposal": {
-                            "patch_unified_diff": "",
-                            "affected_files": all_affected,
-                            "deleted_files": deleted_files,
-                            "applied_directly": True,
-                            "summary": summary + mypy_note + tsc_note,
-                            "wrote_tests": wrote_tests,
-                            "steps": step + 1,
-                            "steps_log": steps_log,
-                            "lint": lint_result,
-                            "mypy": mypy_result,
-                            "tsc": tsc_result,
-                        },
-                    }
                 task_done_called = True
             else:
                 tool_result = f"ERROR: unknown tool '{tool_name}'"
@@ -2477,6 +3466,13 @@ async def generate_code_patch_proposal(
     # Single agent path — with retry + reflection [v7 #7]
     current_description = description
     retry_count = 0
+
+    # [v8 #15] Auto workspace snapshot before risky agent loop
+    try:
+        _tool_workspace_snapshot("save", task_id, workspace_root)
+        log.info(f"Workspace snapshot saved for task {task_id}")
+    except Exception:
+        pass
 
     while True:
         result = await _react_agent_loop(

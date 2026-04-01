@@ -1174,30 +1174,6 @@ async def agent_task_stream(task_id: str):
             if r:
                 r.close()
     
-    return EventSourceResponse(event_generator())        history = r.lrange(log_key, 0, -1) or []
-            for msg in history:
-                yield {"data": msg}
-            pubsub = r.pubsub()
-            pubsub.subscribe(f"agent:stream:{task_id}")
-            for message in pubsub.listen():
-                if message["type"] == "message":
-                    yield {"data": message["data"]}
-                    try:
-                        data = json.loads(message["data"])
-                        if data.get("type") in ("completed", "error"):
-                            break
-                    except Exception:
-                        pass
-                await asyncio.sleep(0)
-        except Exception as e:
-            yield {"data": json.dumps({"type": "error", "data": str(e)})}
-        finally:
-            if r:
-                try:
-                    r.close()
-                except Exception:
-                    pass
-
     return EventSourceResponse(event_generator())
 
 
