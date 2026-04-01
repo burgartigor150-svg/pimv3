@@ -227,7 +227,8 @@ async def get_version():
 async def get_uptime():
     """Возвращает время работы сервера в секундах с момента запуска."""
     import time
-    from backend.services.telemetry import get_server_start_time
+    from backend.services.telemetry import get_task_events
+    from backend.services.kpi_guard import compute_task_kpis, should_auto_stop_self_rewritervices.telemetry import get_server_start_time
     start_time = get_server_start_time()
     if start_time is None:
         return {"uptime_seconds": 0, "message": "Start time not recorded"}
@@ -381,18 +382,21 @@ async def upload_file(file: UploadFile = File(...), current_user: models.User = 
     return {"url": f"/api/v1/uploads/{filename}"}
 
 async def get_deepseek_key(db: AsyncSession = Depends(get_db)) -> str:
-    res = await db.execute(select(models.SystemSettings).where(models.SystemSettings.id.in_(["deepseek_api_key", "ai_provider"])))
+    res = await db.execute(select(models.SystemSettings).where(models.SystemSettings.id.in_(["deepseek_api_key", "gemini_api_key", "ai_provider", "gemini_model"])))
     settings = {s.id: s.value for s in res.scalars().all()}
     provider = settings.get("ai_provider", "deepseek")
-    api_key = settings.get("deepseek_api_key", "")
-    
-    if provider == "deepseek" and not api_key:
-        raise HTTPException(status_code=400, detail="DeepSeek API Key не настроен. Зайдите в Настройки ИИ.")
-        
-    return json.dumps({
-        "provider": provider,
-        "api_key": api_key
-    })
+
+    if provider == "gemini":
+        api_key = settings.get("gemini_api_key", "")
+        model = settings.get("gemini_model", "gemini-2.0-flash")
+        if not api_key:
+            raise HTTPException(status_code=400, detail="Gemini API Key не настроен. Зайдите в Настройки ИИ.")
+        return json.dumps({"provider": "gemini", "api_key": api_key, "model": model})
+    else:
+        api_key = settings.get("deepseek_api_key", "")
+        if not api_key:
+            raise HTTPException(status_code=400, detail="DeepSeek API Key не настроен. Зайдите в Настройки ИИ.")
+        return json.dumps({"provider": "deepseek", "api_key": api_key})
 
 @app.get("/api/v1/settings", response_model=List[schemas.SystemSettingResponse])
 async def get_settings(db: AsyncSession = Depends(get_db), current_user: models.User = Depends(get_current_user)):
@@ -543,10 +547,7 @@ async def generate_product_promo(
     req: schemas.AIGenerateRequest,
     db: AsyncSession = Depends(get_db),
     ai_key: str = Depends(get_deepseek_key),
-    current_user: models.User = Depends(get_current_user)
-s.User = Depends(get_current_user),
-):
-    return set_task_control_state(task_id, "resumed")
+    current_user: models.User = Depends(get_current_user),
 ):
     product_res = await db.execute(select(models.Product).where(models.Product.id == req.product_id))
     product = product_res.scalars().first()
@@ -990,6 +991,7 @@ async def knowledge_bootstrap_qwen(
     current_user: models.User = Depends(get_current_user),
 ):
     _require_admin(current_user)
+    await bootstrap_project_knowledge()
     return await bootstrap_qwen_commands_knowledge()
 
 
@@ -1038,9 +1040,6 @@ async def agent_task_create(
         task_id = (created.get("task", {})).get("task_id")
         if task_id:
             _queue_task_for_dispatch(task_id)
-    return createdr "")
-        if task_id:
-            _queue_task_for_dispatch(task_id)d)
     return created
 
 
@@ -1049,7 +1048,7 @@ async def agent_tasks_list(
     limit: int = 100,
     current_user: models.User = Depends(get_current_user),
 ):
-    return list_agent_tasks(limit=limit)it=limit)
+    return list_agent_tasks(limit=limit)
 
 
 @app.get("/api/v1/agent-tasks/{task_id}")
@@ -1094,15 +1093,6 @@ async def agent_task_metrics(
         "kpis": kpis,
         "logs": logs,
         "events": events
-    }
-        "kpis": kpis,
-        "events_count": len(events),
-        "recent_events": events[-10:],  # Последние 10 событий
-        "logs": logs,
-        "redis_info": {
-            "queue_length": _task_launch_redis.llen(f"agent_task:{task_id}:logs"),
-            "lock_status": _task_launch_redis.get(f"agent_task:launcher:{task_id}")
-        }
     }
 
 
@@ -1367,6 +1357,38 @@ async def agent_task_stream_log(task_id: str):
                 pass
 
 
+
+@app.get("/api/v1/agent-tasks/{task_id}/diff")
+async def agent_task_diff(
+    task_id: str,
+    current_user: models.User = Depends(get_current_user),
+):
+    from backend.services.agent_task_console import get_agent_task
+    got = get_agent_task(task_id)
+    task = got.get("task", {}) if isinstance(got, dict) else {}
+    diff = str(task.get("diff") or task.get("patch") or "")
+    return {"ok": True, "diff": diff}
+
+
+@app.get("/api/v1/agent-tasks/{task_id}/logs")
+async def agent_task_logs(
+    task_id: str,
+    current_user: models.User = Depends(get_current_user),
+):
+    from backend.services.agent_task_console import get_agent_task
+    got = get_agent_task(task_id)
+    task = got.get("task", {}) if isinstance(got, dict) else {}
+    logs_raw = task.get("logs", "") or ""
+    if isinstance(logs_raw, list):
+        logs = logs_raw
+    else:
+        try:
+            import json as _j; logs = _j.loads(logs_raw) if logs_raw else []
+        except Exception:
+            logs = [logs_raw] if logs_raw else []
+    return {"ok": True, "logs": logs}
+
+
 @app.get("/api/v1/agent/tasks/{task_id}/checkpoint")
 async def agent_task_checkpoint(task_id: str):
     """Получить сохранённый checkpoint задачи (для resume)."""
@@ -1621,6 +1643,57 @@ async def agent_chat_state(
         "active_task_id": active_task_id,
         "task": task,
     }
+
+
+
+# ── Agent Assistant conversations (alias over single-user chat state) ──────────
+
+@app.get("/api/v1/agent/assistant/conversations")
+async def assistant_get_conversations(
+    current_user: models.User = Depends(get_current_user),
+):
+    """Return list of conversations for the sidebar (one per user for now)."""
+    user_id = str(getattr(current_user, "email", "") or "anonymous")
+    state = load_chat_state(user_id)
+    history = state.get("history", []) or []
+    if not history:
+        return []
+    first_user = next((m["content"] for m in history if m.get("role") == "user"), "Conversation")
+    title = (first_user[:60] + "…") if len(first_user) > 60 else first_user
+    import time
+    return [{"id": "default", "title": title, "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}]
+
+
+@app.delete("/api/v1/agent/assistant/conversations/{conv_id}")
+async def assistant_delete_conversation(
+    conv_id: str,
+    current_user: models.User = Depends(get_current_user),
+):
+    user_id = str(getattr(current_user, "email", "") or "anonymous")
+    save_chat_state(user_id, history=[], active_task_id="")
+    return {"ok": True}
+
+
+@app.post("/api/v1/agent/assistant/chat")
+async def assistant_chat(
+    body: dict,
+    ai_key: str = Depends(get_deepseek_key),
+    current_user: models.User = Depends(get_current_user),
+):
+    """Thin wrapper: forward to agent-chat/message logic."""
+    from backend.schemas import AgentChatMessageRequest
+    msg = str(body.get("message") or "").strip()
+    if not msg:
+        return {"ok": False, "error": "empty message"}
+    req = AgentChatMessageRequest(message=msg, history=[])
+    # reuse existing handler
+    result = await agent_chat_message(req, ai_key=ai_key, current_user=current_user)
+    if hasattr(result, "body"):
+        import json as _json
+        result = _json.loads(result.body)
+    reply = result.get("assistant_reply", "") if isinstance(result, dict) else ""
+    return {"ok": True, "reply": reply, "conversation_id": "default"}
+
 
 
 @app.get("/api/v1/agent-tasks-capabilities")
@@ -3642,3 +3715,233 @@ async def login_for_access_token(request: Request, form_data: OAuth2PasswordRequ
         data={"sub": user.email}, expires_delta=access_token_expires
     )
     return {"access_token": access_token, "token_type": "bearer", "role": user.role}
+
+# ─── Google OAuth ──────────────────────────────────────────────────────────────
+
+@app.post("/api/v1/auth/google")
+async def google_oauth_login(request: Request, db: AsyncSession = Depends(get_db)):
+    """Verify Google ID token, create or find user, return JWT."""
+    body = await request.json()
+    credential = body.get("credential", "")
+    if not credential:
+        raise HTTPException(status_code=400, detail="Missing credential")
+
+    # Get Google Client ID from settings
+    cid_res = await db.execute(select(models.SystemSettings).where(models.SystemSettings.id == "google_client_id"))
+    cid_row = cid_res.scalars().first()
+    google_client_id = (cid_row.value if cid_row else "") or os.getenv("GOOGLE_CLIENT_ID", "")
+    if not google_client_id:
+        raise HTTPException(status_code=503, detail="Google OAuth не настроен. Добавьте google_client_id в Настройки.")
+
+    # Verify ID token with Google
+    try:
+        from google.oauth2 import id_token
+        from google.auth.transport import requests as google_requests
+        idinfo = id_token.verify_oauth2_token(credential, google_requests.Request(), google_client_id)
+    except Exception as e:
+        raise HTTPException(status_code=401, detail=f"Неверный Google токен: {e}")
+
+    email = idinfo.get("email", "")
+    google_id = idinfo.get("sub", "")
+    avatar_url = idinfo.get("picture", "")
+    display_name = idinfo.get("name", "")
+
+    if not email or not google_id:
+        raise HTTPException(status_code=400, detail="Не удалось получить email из Google токена")
+
+    # Find or create user
+    result = await db.execute(select(models.User).filter(models.User.email == email))
+    user = result.scalars().first()
+
+    if user:
+        # Update google_id if not set
+        if not user.google_id:
+            user.google_id = google_id
+        if avatar_url:
+            user.avatar_url = avatar_url
+        if display_name:
+            user.display_name = display_name
+        await db.commit()
+    else:
+        # Auto-create user on first Google login
+        from backend.services.auth import get_password_hash
+        user = models.User(
+            email=email,
+            hashed_password=get_password_hash(os.urandom(32).hex()),
+            role="admin",
+            google_id=google_id,
+            avatar_url=avatar_url,
+            display_name=display_name,
+        )
+        db.add(user)
+        await db.commit()
+        await db.refresh(user)
+
+    from backend.services.auth import create_access_token, ACCESS_TOKEN_EXPIRE_MINUTES
+    from datetime import timedelta
+    access_token = create_access_token(
+        data={"sub": user.email},
+        expires_delta=timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES),
+    )
+    return {
+        "access_token": access_token,
+        "token_type": "bearer",
+        "role": user.role,
+        "email": user.email,
+        "display_name": user.display_name or display_name,
+        "avatar_url": user.avatar_url or avatar_url,
+    }
+
+
+@app.get("/api/v1/auth/me")
+async def get_me(current_user: models.User = Depends(get_current_user)):
+    return {
+        "email": current_user.email,
+        "role": current_user.role,
+        "display_name": getattr(current_user, "display_name", None),
+        "avatar_url": getattr(current_user, "avatar_url", None),
+    }
+
+# ─── Google OAuth PKCE (browser redirect flow) ────────────────────────────────
+import hashlib, base64, secrets as _secrets
+
+def _pkce_pair() -> tuple[str, str]:
+    verifier = _secrets.token_urlsafe(64)
+    digest = hashlib.sha256(verifier.encode()).digest()
+    challenge = base64.urlsafe_b64encode(digest).rstrip(b"=").decode()
+    return verifier, challenge
+
+# In-memory store for PKCE verifiers (keyed by state, TTL ~10 min)
+_oauth_state_store: dict = {}
+
+@app.get("/api/v1/auth/google/login")
+async def google_oauth_start(db: AsyncSession = Depends(get_db)):
+    """Generate PKCE pair, store verifier, redirect browser to Google."""
+    cid_res = await db.execute(select(models.SystemSettings).where(models.SystemSettings.id == "google_client_id"))
+    cid_row = cid_res.scalars().first()
+    client_id = (cid_row.value if cid_row else "") or os.getenv("GOOGLE_CLIENT_ID", "")
+    if not client_id:
+        raise HTTPException(503, "Google Client ID не настроен. Зайдите в Настройки.")
+
+    verifier, challenge = _pkce_pair()
+    state = _secrets.token_hex(32)
+    _oauth_state_store[state] = {"verifier": verifier, "ts": time.time()}
+
+    # Purge old states (>10 min)
+    old = [k for k, v in _oauth_state_store.items() if time.time() - v["ts"] > 600]
+    for k in old:
+        _oauth_state_store.pop(k, None)
+
+    redirect_uri = os.getenv("GOOGLE_REDIRECT_URI", "https://pim.giper.fm.postobot.online/api/v1/auth/google/callback")
+
+    from urllib.parse import urlencode
+    params = urlencode({
+        "client_id": client_id,
+        "response_type": "code",
+        "redirect_uri": redirect_uri,
+        "scope": "openid email profile",
+        "code_challenge": challenge,
+        "code_challenge_method": "S256",
+        "state": state,
+        "access_type": "offline",
+        "prompt": "select_account",
+    })
+    from fastapi.responses import RedirectResponse
+    return RedirectResponse(f"https://accounts.google.com/o/oauth2/v2/auth?{params}")
+
+
+@app.get("/api/v1/auth/google/callback")
+async def google_oauth_callback(code: str, state: str, db: AsyncSession = Depends(get_db)):
+    """Exchange code for tokens, find/create user, redirect to frontend with JWT."""
+    entry = _oauth_state_store.pop(state, None)
+    if not entry or time.time() - entry["ts"] > 600:
+        from fastapi.responses import RedirectResponse
+        return RedirectResponse("/login?error=oauth_state_invalid")
+
+    # Load credentials from settings
+    res = await db.execute(select(models.SystemSettings).where(
+        models.SystemSettings.id.in_(["google_client_id", "google_client_secret"])
+    ))
+    settings = {s.id: s.value for s in res.scalars().all()}
+    client_id = settings.get("google_client_id") or os.getenv("GOOGLE_CLIENT_ID", "")
+    client_secret = settings.get("google_client_secret") or os.getenv("GOOGLE_CLIENT_SECRET", "")
+    redirect_uri = os.getenv("GOOGLE_REDIRECT_URI", "https://pim.giper.fm.postobot.online/api/v1/auth/google/callback")
+
+    if not client_id or not client_secret:
+        from fastapi.responses import RedirectResponse
+        return RedirectResponse("/login?error=oauth_not_configured")
+
+    # Exchange code → tokens
+    import httpx as _httpx
+    async with _httpx.AsyncClient() as hc:
+        token_res = await hc.post("https://oauth2.googleapis.com/token", data={
+            "code": code,
+            "client_id": client_id,
+            "client_secret": client_secret,
+            "redirect_uri": redirect_uri,
+            "grant_type": "authorization_code",
+            "code_verifier": entry["verifier"],
+        })
+    if token_res.status_code != 200:
+        from fastapi.responses import RedirectResponse
+        return RedirectResponse(f"/login?error=token_exchange_failed")
+
+    id_token_str = token_res.json().get("id_token", "")
+
+    # Decode id_token (verify with Google)
+    try:
+        from google.oauth2 import id_token as _id_token
+        from google.auth.transport import requests as _greq
+        idinfo = _id_token.verify_oauth2_token(id_token_str, _greq.Request(), client_id)
+    except Exception as e:
+        from fastapi.responses import RedirectResponse
+        return RedirectResponse(f"/login?error=token_invalid")
+
+    email = idinfo.get("email", "")
+    google_id = idinfo.get("sub", "")
+    avatar_url = idinfo.get("picture", "")
+    display_name = idinfo.get("name", "")
+
+    # Find or create user
+    result = await db.execute(select(models.User).filter(models.User.email == email))
+    user = result.scalars().first()
+    if user:
+        if not user.google_id:
+            user.google_id = google_id
+        user.avatar_url = avatar_url or user.avatar_url
+        user.display_name = display_name or user.display_name
+        await db.commit()
+    else:
+        from backend.services.auth import get_password_hash as _gph
+        user = models.User(
+            email=email,
+            hashed_password=_gph(os.urandom(32).hex()),
+            role="admin",
+            google_id=google_id,
+            avatar_url=avatar_url,
+            display_name=display_name,
+        )
+        db.add(user)
+        await db.commit()
+        await db.refresh(user)
+
+    from backend.services.auth import create_access_token, ACCESS_TOKEN_EXPIRE_MINUTES
+    from datetime import timedelta
+    jwt_token = create_access_token(
+        data={"sub": user.email},
+        expires_delta=timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES),
+    )
+
+    # Redirect to frontend with token in URL fragment
+    from fastapi.responses import RedirectResponse
+    return RedirectResponse(f"/oauth-callback?token={jwt_token}&role={user.role}&email={email}&display_name={display_name or ''}&avatar_url={avatar_url or ''}") 
+
+@app.get("/api/v1/auth/config")
+async def auth_config(db: AsyncSession = Depends(get_db)):
+    """Public endpoint — returns which OAuth providers are configured."""
+    res = await db.execute(select(models.SystemSettings).where(
+        models.SystemSettings.id.in_(["google_client_id", "google_client_secret"])
+    ))
+    settings = {s.id: s.value for s in res.scalars().all()}
+    google_enabled = bool(settings.get("google_client_id") and settings.get("google_client_secret"))
+    return {"google_enabled": google_enabled}

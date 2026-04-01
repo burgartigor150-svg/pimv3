@@ -318,10 +318,61 @@ async def _async_process_single_sku(sku: str, connection_id: str, ai_key: str, t
 
 
 @celery_app.task(name="build_attribute_star_map_task")
-def build_attribute_star_map_task(conn_a_id: str, conn_b_id: str, ai_key: str = "") -> dict:
+def build_attribute_star_map_task(
+    task_id: str,
+    ozon_api_key: str,
+    ozon_client_id: str | None,
+    mm_api_key: str,
+    max_ozon_categories: int | None = None,
+    max_mm_categories: int | None = None,
+    edge_threshold: float = 0.58,
+) -> dict:
     """Celery task: построить семантическую карту атрибутов."""
-    from backend.services.attribute_star_map import build_attribute_star_map
-    return asyncio.run(build_attribute_star_map(conn_a_id, conn_b_id, ai_key))
+    from backend.services.attribute_star_map import build_ozon_mm_attribute_star_map
+
+    def _progress_cb(info: dict) -> None:
+        try:
+            key = f"task:star_map_build:{task_id}"
+            redis_client.hset(key, mapping={
+                "status": "running",
+                "stage": info.get("stage", ""),
+                "progress_percent": info.get("progress_percent", 0),
+                "message": info.get("message", ""),
+                "updated_at_ts": int(info.get("updated_at_ts", 0)),
+            })
+        except Exception:
+            pass
+
+    try:
+        result = asyncio.run(build_ozon_mm_attribute_star_map(
+            ozon_api_key=ozon_api_key,
+            ozon_client_id=ozon_client_id,
+            mm_api_key=mm_api_key,
+            max_ozon_categories=max_ozon_categories,
+            max_mm_categories=max_mm_categories,
+            edge_threshold=edge_threshold,
+            progress_cb=_progress_cb,
+        ))
+        key = f"task:star_map_build:{task_id}"
+        redis_client.hset(key, mapping={
+            "status": "done",
+            "stage": "done",
+            "progress_percent": 100,
+            "message": "Карта атрибутов успешно построена",
+            "finished_at_ts": int(__import__("time").time()),
+        })
+        return result
+    except Exception as exc:
+        key = f"task:star_map_build:{task_id}"
+        redis_client.hset(key, mapping={
+            "status": "error",
+            "stage": "error",
+            "progress_percent": 0,
+            "message": str(exc),
+            "error": str(exc),
+            "finished_at_ts": int(__import__("time").time()),
+        })
+        raise
 
 
 @celery_app.task(name="run_self_improve_incident_task")

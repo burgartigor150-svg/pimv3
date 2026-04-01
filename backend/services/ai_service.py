@@ -12,8 +12,14 @@ def get_client_and_model(config_str: str, role: str = "runtime"):
     except json.JSONDecodeError:
         provider = "deepseek"
         api_key = config_str
-        
-    if provider == "local":
+
+    if provider == "gemini":
+        model = config.get("model", "gemini-2.0-flash") if isinstance(config, dict) else "gemini-2.0-flash"
+        return AsyncOpenAI(
+            api_key=api_key,
+            base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
+        ), model
+    elif provider == "local":
         if role == "code":
             local_model = os.getenv("LOCAL_CODE_LLM_MODEL", os.getenv("LOCAL_LLM_MODEL", "qwen3:14b"))
         else:

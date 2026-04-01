@@ -20,15 +20,21 @@ import { useToast } from '../components/Toast';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
+type CategoryVal = { name: string; id: string; parent_id?: string } | string | null | undefined;
 interface Product {
   id: string;
   sku: string;
   name: string;
   brand: string;
-  category: string;
+  category: CategoryVal;
   completeness: number;
   status: string;
   image_url?: string;
+}
+function getCatName(cat: CategoryVal): string {
+  if (!cat) return '';
+  if (typeof cat === 'object') return (cat as any).name ?? '';
+  return String(cat);
 }
 
 interface ProductsResponse {
@@ -766,7 +772,7 @@ export default function ProductsPage() {
                       </td>
                       {/* Category */}
                       <td style={{ padding: '12px 16px', color: 'rgba(255,255,255,0.45)', fontSize: 13 }}>
-                        {product.category}
+                        {getCatName(product.category)}
                       </td>
                       {/* Completeness */}
                       <td style={{ padding: '12px 16px' }}>

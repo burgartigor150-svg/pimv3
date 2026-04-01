@@ -28,8 +28,8 @@ interface Conversation {
 
 const MODELS = [
   { value: 'deepseek-chat', label: 'DeepSeek Chat' },
-  { value: 'gpt-4', label: 'GPT-4' },
-  { value: 'claude-3-opus', label: 'Claude 3 Opus' },
+  { value: 'gemini-2.0-flash', label: 'Gemini 2.0 Flash' },
+  { value: 'qwen3:14b', label: 'Qwen3 14B (Local)' },
 ];
 
 // ─── Sub-components ───────────────────────────────────────────────────────────
@@ -230,7 +230,8 @@ const AgentAssistantPage: React.FC = () => {
   // ── API helpers ──────────────────────────────────────────────────────────────
   const fetchConversations = async () => {
     try {
-      const data = await api.get('/agent/assistant/conversations');
+      const res = await api.get('/agent/assistant/conversations');
+      const data = res.data;
       setConversations(Array.isArray(data) ? data : []);
     } catch {
       toast('Failed to load conversations', 'error');

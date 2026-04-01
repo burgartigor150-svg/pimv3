@@ -2,6 +2,7 @@ import React, { useEffect, useState, useCallback, useRef } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import { api } from "../lib/api";
 import { useToast } from "../components/Toast";
+import ContentStudio from "../components/ContentStudio";
 import {
   ArrowLeft,
   Save,
@@ -53,18 +54,30 @@ interface HistoryEntry {
   details: string;
 }
 
+type CategoryVal = { name: string; id: string; parent_id?: string } | string | null | undefined;
+function getCatName(cat: CategoryVal): string {
+  if (!cat) return '';
+  if (typeof cat === 'object') return (cat as any).name ?? '';
+  return String(cat);
+}
+
 interface Product {
   id: string;
   name: string;
   sku: string;
   description: string;
-  brand: string;
-  category: string;
+  description_html?: string;
+  brand?: string;
+  category: CategoryVal;
+  category_id?: string;
   status: "active" | "draft" | "archived";
   attributes: ProductAttribute[];
+  attributes_data?: any;
+  images?: any[];
   media: ProductMedia[];
   syndication: SyndicationStatus[];
   history: HistoryEntry[];
+  completeness_score?: number;
 }
 
 interface Connection {
@@ -167,6 +180,7 @@ const TABS = [
   { key: "main", label: "Основное", Icon: Package },
   { key: "attributes", label: "Атрибуты", Icon: Tag },
   { key: "media", label: "Медиа", Icon: ImageIcon },
+  { key: "studio", label: "Студия", Icon: Sparkles },
   { key: "syndication", label: "Синдикация", Icon: Send },
   { key: "history", label: "История", Icon: History },
 ];
@@ -202,18 +216,42 @@ export default function ProductDetailsPage() {
     try {
       const [prodRes, connRes] = await Promise.all([
         api.get(`/products/${id}`),
-        api.get("/api/v1/connections"),
+        api.get("/connections"),
       ]);
-      const p: Product = prodRes.data;
+      const raw = prodRes.data;
+      // API returns `images` array and `attributes_data` object — map to expected shape
+      const p: Product = {
+        ...raw,
+        media: raw.media?.length
+          ? raw.media
+          : (raw.images ?? []).map((img: any, i: number) => ({
+              id: img.id ?? String(i),
+              url: img.url ?? img,
+              type: "image" as const,
+            })),
+        attributes: Array.isArray(raw.attributes) ? raw.attributes : [],
+        syndication: raw.syndication ?? [],
+        history: raw.history ?? [],
+      };
       setProduct(p);
       setFields({
         name: p.name ?? "",
         sku: p.sku ?? "",
-        description: p.description ?? "",
+        description: p.description_html ?? p.description ?? "",
         brand: p.brand ?? "",
-        category: p.category ?? "",
+        category: getCatName(p.category),
       });
-      setAttributes(p.attributes ?? []);
+      // attributes_data is an object {key: {value, type}}, attributes is array
+      const attrs = Array.isArray(p.attributes) && p.attributes.length > 0
+        ? p.attributes
+        : p.attributes_data
+          ? Object.entries(p.attributes_data).map(([key, v]: [string, any]) => ({
+              key,
+              value: v?.value ?? String(v ?? ""),
+              type: v?.type ?? "string",
+            }))
+          : [];
+      setAttributes(attrs);
       setConnections(connRes.data ?? []);
     } catch {
       toast("Ошибка загрузки продукта", "error");
@@ -1096,6 +1134,11 @@ export default function ProductDetailsPage() {
               })
             )}
           </div>
+        )}
+
+        {/* ──────────── Студия ──────────── */}
+        {activeTab === "studio" && product && (
+          <ContentStudio product={product} />
         )}
 
         {/* ──────────── История ──────────── */}

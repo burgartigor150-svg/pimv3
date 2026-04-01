@@ -11,6 +11,7 @@ import { ToastProvider } from './components/Toast';
 
 // ─── Pages ───────────────────────────────────────────────────────────────────
 import LoginPage from './pages/LoginPage';
+import OAuthCallbackPage from './pages/OAuthCallbackPage';
 import DashboardPage from './pages/DashboardPage';
 import ProductsPage from './pages/ProductsPage';
 import ProductDetailsPage from './pages/ProductDetailsPage';
@@ -299,6 +300,7 @@ const App: React.FC = () => {
         {!user ? (
           <>
             <Route path="/login" element={<LoginPage />} />
+            <Route path="/oauth-callback" element={<OAuthCallbackPage />} />
             <Route path="*" element={<Navigate to="/login" replace />} />
           </>
         ) : (

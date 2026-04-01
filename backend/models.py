@@ -60,8 +60,11 @@ class User(Base):
     __tablename__ = "users"
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     email = Column(String, unique=True, nullable=False, index=True)
-    hashed_password = Column(String, nullable=False)
-    role = Column(String, default="admin") # For now everyone is admin unless specifically restricted
+    hashed_password = Column(String, nullable=True)
+    role = Column(String, default="admin")
+    google_id = Column(String, nullable=True, unique=True, index=True)
+    avatar_url = Column(String, nullable=True)
+    display_name = Column(String, nullable=True)
 
 class CategoryMapping(Base):
     __tablename__ = "category_mappings"

@@ -3,8 +3,22 @@ import React, {
   useEffect,
   useRef,
   useState,
+  lazy,
+  Suspense,
+  Component,
 } from 'react'
 import { useToast } from '../components/Toast'
+
+const AgentOffice3D = lazy(() => import('./AgentOffice3D'))
+
+class ErrorBoundary extends Component<{children: React.ReactNode; fallback?: React.ReactNode}, {hasError: boolean}> {
+  constructor(props: any) { super(props); this.state = { hasError: false } }
+  static getDerivedStateFromError() { return { hasError: true } }
+  render() {
+    if (this.state.hasError) return this.props.fallback ?? <div style={{padding:24,color:'rgba(255,255,255,0.3)'}}>Ошибка загрузки</div>
+    return this.props.children
+  }
+}
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -67,18 +81,22 @@ interface TaskMetrics {
 
 // ─── API helpers ──────────────────────────────────────────────────────────────
 
-const API = '/api/v1/agent'
+import { api } from '../lib/api'
+
+const API_AGENT = '/agent'
+const API_AGENT_TASKS = '/agent-tasks'
 
 async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(`${API}${path}`, {
-    headers: { 'Content-Type': 'application/json' },
-    ...init,
-  })
-  if (!res.ok) {
-    const text = await res.text().catch(() => res.statusText)
-    throw new Error(text || `HTTP ${res.status}`)
+  // Use axios instance which handles auth tokens automatically
+  const method = (init?.method ?? 'GET').toUpperCase()
+  const body = init?.body ? JSON.parse(init.body as string) : undefined
+  let res
+  if (method === 'GET' || method === 'DELETE') {
+    res = await api.request<T>({ method, url: `${API_AGENT}${path}` })
+  } else {
+    res = await api.request<T>({ method, url: `${API_AGENT}${path}`, data: body })
   }
-  return res.json() as Promise<T>
+  return res.data
 }
 
 // ─── Utility helpers ──────────────────────────────────────────────────────────
@@ -107,29 +125,34 @@ function StatusDot({ status }: { status: TaskStatus }) {
   )
 }
 
-const STATUS_LABEL: Record<TaskStatus, string> = {
+const STATUS_LABEL: Record<string, string> = {
   pending: 'Ожидание',
+  queued: 'В очереди',
   running: 'Выполняется',
   completed: 'Завершено',
+  done: 'Завершено',
   failed: 'Ошибка',
   cancelled: 'Отменено',
 }
 
-const STATUS_BADGE_CLS: Record<TaskStatus, string> = {
+const STATUS_BADGE_CLS: Record<string, string> = {
   pending: 'badge badge-neutral',
+  queued: 'badge badge-neutral',
   running: 'badge badge-info',
   completed: 'badge badge-success',
+  done: 'badge badge-success',
   failed: 'badge badge-error',
   cancelled: 'badge badge-neutral',
 }
 
-const TYPE_COLOR: Record<TaskType, string> = {
+const TYPE_COLOR: Record<string, string> = {
   design: 'badge badge-purple',
   backend: 'badge badge-info',
   'api-integration': 'badge badge-info',
   'docs-ingest': 'badge badge-warning',
   frontend: 'badge badge-purple',
   qa: 'badge badge-success',
+  generic: 'badge badge-neutral',
 }
 
 const PRIORITY_CONFIG: Record<
@@ -250,8 +273,18 @@ function CreateTaskForm({ onCreated }: CreateTaskFormProps) {
   const [templates, setTemplates] = useState<TaskTemplate[]>([])
 
   useEffect(() => {
-    apiFetch<TaskTemplate[]>('/templates')
-      .then(setTemplates)
+    api.get<{templates: TaskTemplate[]}>('/agent/templates')
+      .then((res: {data: {templates?: any[]}}) => {
+        const data = res.data
+        const tpls: any[] = Array.isArray(data) ? (data as any) : (data?.templates ?? [])
+        setTemplates(tpls.map((t: any) => ({
+          id: t.id,
+          name: t.name,
+          title: t.title_tpl ?? t.title ?? '',
+          description: t.description_tpl ?? t.description ?? '',
+          type: (t.task_type ?? t.type ?? 'backend') as TaskType,
+        })))
+      })
       .catch(() => {})
   }, [])
 
@@ -281,10 +314,26 @@ function CreateTaskForm({ onCreated }: CreateTaskFormProps) {
     }
     setSubmitting(true)
     try {
-      const task = await apiFetch<AgentTask>('/tasks', {
-        method: 'POST',
-        body: JSON.stringify({ title, description, type, priority, dependsOn }),
+      const res = await api.post('/agent-tasks/create', {
+        title,
+        description,
+        task_type: type,
+        priority,
+        depends_on: dependsOn,
       })
+      const serverTask = res.data?.task
+      const task: AgentTask = {
+        id: serverTask?.task_id ?? `local-${Date.now()}`,
+        title: serverTask?.title ?? title,
+        description: serverTask?.description ?? description,
+        type: (serverTask?.task_type ?? type) as TaskType,
+        priority: serverTask?.priority ?? priority,
+        dependsOn: dependsOn,
+        status: serverTask?.status ?? 'queued',
+        createdAt: serverTask?.created_at_ts
+          ? new Date(serverTask.created_at_ts * 1000).toISOString()
+          : new Date().toISOString(),
+      }
       success(`Задача "${task.title}" создана`)
       onCreated(task)
       setTitle('')
@@ -447,7 +496,7 @@ function CreateTaskForm({ onCreated }: CreateTaskFormProps) {
 
 // ─── Task Details ─────────────────────────────────────────────────────────────
 
-type DetailTab = 'details' | 'logs' | 'diff' | 'metrics'
+type DetailTab = 'details' | 'logs' | 'diff' | 'metrics' | 'office'
 
 interface TaskDetailsProps {
   task: AgentTask
@@ -472,24 +521,26 @@ function TaskDetails({ task, onRefresh }: TaskDetailsProps) {
   useEffect(() => {
     if (activeTab !== 'diff') return
     setDiffLoading(true)
-    apiFetch<{ diff: string }>(`/tasks/${task.id}/diff`)
-      .then((res) => setDiff(res.diff))
-      .catch((err) => toastError(`Не удалось загрузить diff: ${err.message}`))
+    setDiff(null)
+    api.get<{ diff: string }>(`/agent-tasks/${task.id}/diff`).then((r: any) => r.data)
+      .then((res) => setDiff(res?.diff ?? null))
+      .catch(() => setDiff(null))
       .finally(() => setDiffLoading(false))
-  }, [activeTab, task.id, toastError])
+  }, [activeTab, task.id])
 
   useEffect(() => {
     if (activeTab !== 'metrics') return
     setMetricsLoading(true)
-    apiFetch<TaskMetrics>(`/metrics/${task.id}`)
+    setMetrics(null)
+    api.get<TaskMetrics>(`/agent-tasks/${task.id}/metrics`).then((r: any) => r.data)
       .then(setMetrics)
-      .catch((err) => toastError(`Не удалось загрузить метрики: ${err.message}`))
+      .catch(() => setMetrics(null))
       .finally(() => setMetricsLoading(false))
-  }, [activeTab, task.id, toastError])
+  }, [activeTab, task.id])
 
   async function handleRerun() {
     try {
-      await apiFetch(`/tasks/${task.id}/rerun`, { method: 'POST' })
+      await api.post(`/agent-tasks/${task.id}/run`)
       success('Задача запущена повторно')
       onRefresh()
     } catch (err) {
@@ -499,7 +550,8 @@ function TaskDetails({ task, onRefresh }: TaskDetailsProps) {
 
   async function handlePRDescription() {
     try {
-      const res = await apiFetch<{ description: string }>(`/tasks/${task.id}/pr-description`)
+      const prRes = await api.post<{ description: string }>(`/agent/tasks/${task.id}/pr-description`)
+      const res = prRes.data
       await navigator.clipboard.writeText(res.description)
       success('Описание PR скопировано в буфер')
     } catch (err) {
@@ -510,7 +562,7 @@ function TaskDetails({ task, onRefresh }: TaskDetailsProps) {
   async function handleRollback() {
     if (!window.confirm('Откатить изменения этой задачи?')) return
     try {
-      await apiFetch(`/tasks/${task.id}/rollback`, { method: 'POST' })
+      await api.post(`/agent/tasks/${task.id}/rollback`)
       info('Откат выполнен')
       onRefresh()
     } catch (err) {
@@ -519,6 +571,7 @@ function TaskDetails({ task, onRefresh }: TaskDetailsProps) {
   }
 
   const tabs: { id: DetailTab; label: string }[] = [
+    { id: 'office', label: '🏢 Офис' },
     { id: 'details', label: 'Детали' },
     { id: 'logs', label: 'Логи' },
     { id: 'diff', label: 'Diff' },
@@ -534,8 +587,8 @@ function TaskDetails({ task, onRefresh }: TaskDetailsProps) {
             {task.title}
           </h2>
           <div style={{ display: 'flex', gap: 6, flexShrink: 0 }}>
-            <span className={TYPE_COLOR[task.type]}>{task.type}</span>
-            <span className={STATUS_BADGE_CLS[task.status]}>{STATUS_LABEL[task.status]}</span>
+            <span className={TYPE_COLOR[task.type] ?? 'badge badge-neutral'}>{task.type ?? 'generic'}</span>
+            <span className={STATUS_BADGE_CLS[task.status] ?? 'badge badge-neutral'}>{STATUS_LABEL[task.status] ?? task.status ?? 'queued'}</span>
           </div>
         </div>
         <p style={{ fontSize: 12, color: 'rgba(255,255,255,0.35)', margin: 0 }}>{timeAgo(task.createdAt)}</p>
@@ -582,7 +635,7 @@ function TaskDetails({ task, onRefresh }: TaskDetailsProps) {
       </div>
 
       {/* Tab content */}
-      <div style={{ flex: 1, overflowY: 'auto' }}>
+      <div style={{ flex: 1, overflowY: activeTab === 'office' ? 'hidden' : 'auto', display: 'flex', flexDirection: 'column' }}>
         {/* Details tab */}
         {activeTab === 'details' && (
           <div style={{ padding: 24, display: 'flex', flexDirection: 'column', gap: 20 }}>
@@ -622,7 +675,7 @@ function TaskDetails({ task, onRefresh }: TaskDetailsProps) {
                 </div>
               )}
             </div>
-            {task.result && (
+            {task.result && task.result !== '{}' && (
               <div>
                 <p style={{ fontSize: 11, color: 'rgba(255,255,255,0.35)', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 6, marginTop: 0 }}>
                   Результат
@@ -633,7 +686,7 @@ function TaskDetails({ task, onRefresh }: TaskDetailsProps) {
                   padding: 16, overflowX: 'auto', whiteSpace: 'pre-wrap',
                   fontFamily: 'monospace', lineHeight: 1.6, margin: 0,
                 }}>
-                  {task.result}
+                  {typeof task.result === 'string' ? task.result : JSON.stringify(task.result, null, 2)}
                 </pre>
               </div>
             )}
@@ -762,6 +815,22 @@ function TaskDetails({ task, onRefresh }: TaskDetailsProps) {
             )}
           </div>
         )}
+
+        {/* Office 3D tab */}
+        {activeTab === 'office' && (
+          <div style={{ flex: 1, minHeight: 0 }}>
+            <ErrorBoundary fallback={<div style={{display:'flex',alignItems:'center',justifyContent:'center',height:'100%',color:'rgba(255,255,255,0.3)',fontSize:14}}>3D офис недоступен в этом браузере</div>}>
+              <Suspense fallback={
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%', color: 'rgba(255,255,255,0.3)', fontSize: 14, flexDirection: 'column', gap: 12 }}>
+                  <div style={{ width: 32, height: 32, borderRadius: '50%', border: '3px solid rgba(99,102,241,0.3)', borderTopColor: '#6366f1', animation: 'spin-slow 0.8s linear infinite' }} />
+                  Загрузка 3D офиса...
+                </div>
+              }>
+                <AgentOffice3D task={task} />
+              </Suspense>
+            </ErrorBoundary>
+          </div>
+        )}
       </div>
     </div>
   )
@@ -780,8 +849,27 @@ function RightSidebar({ tasks }: { tasks: AgentTask[] }) {
   const fetchSidebarData = useCallback(async () => {
     try {
       const [cronData, queueData] = await Promise.all([
-        apiFetch<CronJob[]>('/cron'),
-        apiFetch<QueueItem[]>('/queue'),
+        api.get<{jobs: any[]; status: any}>('/agent/cron').then((r: any) => {
+          const data = r.data
+          const jobs = Array.isArray(data) ? data : (data?.jobs ?? [])
+          return jobs.map((j: any) => ({
+            id: j.job_id ?? j.id,
+            name: j.name,
+            schedule: j.cron_expr ?? j.schedule,
+            nextFireTime: j.next_run_iso ?? j.next_run_ts ?? '',
+          }))
+        }),
+        api.get<{queue: any[]; stats: any}>('/agent/queue').then((r: any) => {
+          const data = r.data
+          const items = Array.isArray(data) ? data : (data?.queue ?? [])
+          return items.map((q: any) => ({
+            id: q.id ?? q.task_id,
+            title: q.title,
+            type: (q.task_type ?? q.type ?? 'backend') as TaskType,
+            priority: q.priority,
+            queuedAt: q.queued_at ?? q.queuedAt ?? new Date().toISOString(),
+          }))
+        }),
       ])
       setCronJobs(cronData)
       setQueue(queueData)
@@ -860,7 +948,7 @@ function RightSidebar({ tasks }: { tasks: AgentTask[] }) {
                 <span style={{ fontSize: 12, color: 'rgba(255,255,255,0.65)', flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                   {item.title}
                 </span>
-                <span className={TYPE_COLOR[item.type]} style={{ fontSize: 10 }}>{item.type.slice(0, 3)}</span>
+                <span className={TYPE_COLOR[item.type] ?? 'badge badge-neutral'} style={{ fontSize: 10 }}>{(item.type ?? 'gen').slice(0, 3)}</span>
               </div>
             ))}
           </div>
@@ -882,8 +970,28 @@ export default function AgentTaskConsolePage() {
 
   const fetchTasks = useCallback(async () => {
     try {
-      const data = await apiFetch<AgentTask[]>('/tasks')
-      setTasks(data)
+      const res = await api.get<{ok: boolean; tasks: any[]}>('/agent-tasks')
+      const raw = Array.isArray(res.data) ? res.data : (res.data?.tasks ?? [])
+      setTasks(raw.map((t: any) => {
+        let dependsOn: string[] = []
+        try { dependsOn = t.depends_on ? (Array.isArray(t.depends_on) ? t.depends_on : JSON.parse(t.depends_on)) : [] } catch { dependsOn = [] }
+        let result: string | undefined
+        try { result = t.result ? (typeof t.result === 'string' ? t.result : JSON.stringify(t.result, null, 2)) : undefined } catch { result = undefined }
+        return {
+          id: t.id ?? t.task_id,
+          title: t.title ?? '(без названия)',
+          description: t.description ?? '',
+          type: t.type ?? t.task_type ?? 'generic',
+          status: t.status ?? 'queued',
+          priority: t.priority,
+          dependsOn,
+          createdAt: t.createdAt ?? (t.created_at_ts ? new Date(Number(t.created_at_ts) * 1000).toISOString() : new Date().toISOString()),
+          updatedAt: t.updatedAt ?? (t.updated_at_ts ? new Date(Number(t.updated_at_ts) * 1000).toISOString() : undefined),
+          logs: Array.isArray(t.logs) ? t.logs : undefined,
+          result,
+          error: t.error,
+        }
+      }))
     } catch (err) {
       toastError(`Ошибка загрузки задач: ${(err as Error).message}`)
     } finally {
@@ -970,7 +1078,7 @@ export default function AgentTaskConsolePage() {
                     </span>
                   </div>
                   <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 6, paddingLeft: 16 }}>
-                    <span className={TYPE_COLOR[task.type]} style={{ fontSize: 10 }}>{task.type}</span>
+                    <span className={TYPE_COLOR[task.type] ?? 'badge badge-neutral'} style={{ fontSize: 10 }}>{task.type ?? 'generic'}</span>
                     <span style={{ fontSize: 11, color: 'rgba(255,255,255,0.25)', marginLeft: 'auto' }}>{timeAgo(task.createdAt)}</span>
                   </div>
                 </button>
@@ -985,7 +1093,9 @@ export default function AgentTaskConsolePage() {
         {showCreateForm ? (
           <CreateTaskForm onCreated={handleTaskCreated} />
         ) : selectedTask ? (
-          <TaskDetails task={selectedTask} onRefresh={fetchTasks} />
+          <ErrorBoundary fallback={<div style={{padding:24,color:'rgba(255,255,255,0.3)',fontSize:14}}>Ошибка отображения задачи</div>}>
+            <TaskDetails task={selectedTask} onRefresh={fetchTasks} />
+          </ErrorBoundary>
         ) : (
           <div style={{ display: 'flex', flex: 1, flexDirection: 'column', alignItems: 'center', justifyContent: 'center', height: '100%', textAlign: 'center', padding: '0 24px' }}>
             <div className="glass" style={{ padding: 32, borderRadius: 16, maxWidth: 320 }}>

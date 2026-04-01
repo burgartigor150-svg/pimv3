@@ -9,6 +9,9 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@react-oauth/google": "^0.13.4",
+    "@react-three/drei": "^9.122.0",
+    "@react-three/fiber": "^8.18.0",
     "axios": "^1.7.2",
     "html2canvas": "^1.4.1",
     "lucide-react": "^0.400.0",
@@ -18,7 +21,8 @@
     "react-rnd": "^10.5.3",
     "react-router-dom": "^6.24.1",
     "recharts": "^3.8.0",
-    "remark-gfm": "^4.0.1"
+    "remark-gfm": "^4.0.1",
+    "three": "^0.183.2"
   },
   "devDependencies": {
     "@types/node": "^20.14.9",

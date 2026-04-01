@@ -1,0 +1,12 @@
+{
+  "name": "pimv3-e2e",
+  "version": "1.0.0",
+  "scripts": {
+    "test": "npx playwright test test_e2e_pimv3.spec.ts --reporter=list",
+    "test:headed": "npx playwright test test_e2e_pimv3.spec.ts --headed",
+    "test:report": "npx playwright show-report playwright-report"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.59.0"
+  }
+}
