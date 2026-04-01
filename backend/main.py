@@ -1045,6 +1045,15 @@ async def agent_task_create(
 
 
 @app.get("/api/v1/agent-tasks")
+async def get_agent_tasks(
+    skip: int = 0,
+    limit: int = 100,
+    db: AsyncSession = Depends(get_db),
+    current_user: models.User = Depends(get_current_user)
+):
+    """Возвращает список агентских задач с пагинацией."""
+    result = list_agent_tasks(skip=skip, limit=limit)
+    return result
 async def list_agent_tasks_endpoint(limit: int = 100, offset: int = 0, current_user: models.User = Depends(get_current_user)):
     from backend.services.agent_task_console import list_agent_tasks
     result = list_agent_tasks(limit=limit, offset=offset)
