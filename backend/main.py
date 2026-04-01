@@ -973,6 +973,42 @@ async def agent_context7_connected(current_user: models.User = Depends(get_curre
     return {"connected": context7_is_connected()}
 
 
+@app.get("/api/v1/agent-tasks/{task_id}/metrics")
+async def agent_task_metrics(
+    task_id: str,
+    current_user: models.User = Depends(get_current_user),
+):
+    """Возвращает детальные метрики выполнения агентской задачи, включая KPI, логи и события."""
+    from backend.services.telemetry import get_task_events
+    from backend.services.kpi_guard import compute_task_kpis
+    
+    # Получить базовую информацию о задаче
+    task_info = get_agent_task(task_id)
+    if not task_info or "task" not in task_info:
+        raise HTTPException(status_code=404, detail="Task not found")
+    
+    # Получить события и вычислить KPI
+    events = get_task_events(task_id, tail=500)
+    kpis = compute_task_kpis(events)
+    
+    # Получить логи из Redis
+    logs = _task_launch_redis.lrange(f"agent_task:{task_id}:logs", -200, -1) or []
+    
+    return {
+        "task_id": task_id,
+        "status": task_info["task"].get("status", "unknown"),
+        "title": task_info["task"].get("title", ""),
+        "kpis": kpis,
+        "events_count": len(events),
+        "recent_events": events[-10:],  # Последние 10 событий
+        "logs": logs,
+        "redis_info": {
+            "queue_length": _task_launch_redis.llen(f"agent_task:{task_id}:logs"),
+            "lock_status": _task_launch_redis.get(f"agent_task:launcher:{task_id}")
+        }
+    }
+
+
 @app.post("/api/v1/agent-tasks/{task_id}/run")
 async def agent_task_run(
     task_id: str,
