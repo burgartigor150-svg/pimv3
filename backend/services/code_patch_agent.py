@@ -1,10 +1,22 @@
 """
-code_patch_agent.py — ReAct Tool Loop агент для генерации кода. v6
+code_patch_agent.py — ReAct Tool Loop агент для генерации кода. v7
 
-Архитектура: LLM получает 15 инструментов и работает в цикле до 40 шагов.
+Архитектура: LLM получает инструменты и работает в цикле до 40 шагов.
 Полное соответствие возможностям Claude Code внутри проекта.
 
-v6 новое (поверх v5):
+v7 новое (поверх v6):
+  - [#1]  Extended shell whitelist — alembic, pip install, npm install, git log/blame/show/stash/diff
+  - [#2]  install_package tool — pip/npm установка с обновлением requirements.txt / package.json
+  - [#3]  run_migration tool — создание и применение Alembic миграций
+  - [#4]  TypeScript check (tsc --noEmit) в task_done рядом с mypy
+  - [#5]  git_log и git_blame tools — история и аннотации коммитов
+  - [#6]  read_image tool — описание изображений через vision API
+  - [#7]  Retry with reflection — при неудаче LLM рефлексирует и повторяет (max 2 retry)
+  - [#8]  Resume from checkpoint — resume_from_checkpoint() + resume_task_id параметр
+  - [#9]  Task templates — шаблоны планов для типовых задач (adapter/endpoint/celery/schema)
+  - [#10] Reviewer agent — асинхронное код-ревью после успешного task_done
+
+v6 (сохранено):
   - [#1]  Dry-run mode — dry_run=True не пишет на диск, возвращает preview
   - [#2]  Scope enforcement — allowlist проверяет пути всех write-операций
   - [#3]  find_dependents — найти все файлы, импортирующие данный модуль
@@ -34,6 +46,7 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import base64
 import datetime
 import difflib
 import fnmatch
@@ -55,6 +68,7 @@ _MAX_FILE_READ_CHARS = 12_000
 _MAX_SHELL_OUTPUT_CHARS = 6_000
 _MAX_REACT_STEPS = 40
 
+# [v7 #1] Extended shell whitelist
 _ALLOWED_SHELL_PREFIXES = (
     "python3 -m pytest",
     "python3 -c",
@@ -69,6 +83,21 @@ _ALLOWED_SHELL_PREFIXES = (
     "cat ",
     "head ",
     "tail ",
+    "alembic upgrade",
+    "alembic revision",
+    "alembic downgrade",
+    "alembic history",
+    "alembic current",
+    "pip install",
+    "pip show",
+    "npm install",
+    "npm ci",
+    "git log",
+    "git blame",
+    "git show",
+    "git stash",
+    "git stash pop",
+    "git diff ",
 )
 
 _MAX_MESSAGES_BEFORE_COMPRESS = 40
@@ -312,7 +341,7 @@ TOOLS_SCHEMA = [
         "type": "function",
         "function": {
             "name": "run_shell",
-            "description": "Run a shell command. Allowed: pytest, python3 -c, npm run build/lint, ruff, grep, find, ls.",
+            "description": "Run a shell command. Allowed: pytest, python3 -c, npm run build/lint, ruff, grep, find, ls, alembic, pip install, npm install, git log/blame/show/stash/diff.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -356,7 +385,89 @@ TOOLS_SCHEMA = [
                 "required": ["summary", "affected_files"]
             }
         }
-    }
+    },
+    # [v7 #2] install_package tool
+    {
+        "type": "function",
+        "function": {
+            "name": "install_package",
+            "description": "Install a Python or Node.js package and update requirements.txt or package.json. Use when you need a dependency that doesn't exist yet.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "package": {"type": "string", "description": "package name (e.g. httpx, celery[redis])"},
+                    "package_type": {"type": "string", "description": "python or nodejs (default: python)"},
+                    "dev": {"type": "boolean", "description": "install as dev dependency for nodejs (default: false)"}
+                },
+                "required": ["package"]
+            }
+        }
+    },
+    # [v7 #3] run_migration tool
+    {
+        "type": "function",
+        "function": {
+            "name": "run_migration",
+            "description": "Create or apply Alembic database migration. Use after changing SQLAlchemy models.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "action": {"type": "string", "description": "one of: autogenerate, upgrade, downgrade, history, current"},
+                    "message": {"type": "string", "description": "migration message for autogenerate (required when action=autogenerate)"},
+                    "revision": {"type": "string", "description": "revision for upgrade/downgrade (default: head for upgrade, -1 for downgrade)"}
+                },
+                "required": ["action"]
+            }
+        }
+    },
+    # [v7 #5] git_log tool
+    {
+        "type": "function",
+        "function": {
+            "name": "git_log",
+            "description": "Show recent git commit history for the repo or a specific file. Use to understand why code was written a certain way.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "optional file path to see history for"},
+                    "limit": {"type": "integer", "description": "number of commits to show (default 15)"}
+                }
+            }
+        }
+    },
+    # [v7 #5] git_blame tool
+    {
+        "type": "function",
+        "function": {
+            "name": "git_blame",
+            "description": "Show git blame for a file — who changed each line and when. Use to understand the origin of specific code.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "file path (required)"},
+                    "start_line": {"type": "integer", "description": "optional start line number"},
+                    "end_line": {"type": "integer", "description": "optional end line number"}
+                },
+                "required": ["path"]
+            }
+        }
+    },
+    # [v7 #6] read_image tool
+    {
+        "type": "function",
+        "function": {
+            "name": "read_image",
+            "description": "Read and describe an image file (screenshot, diagram, mockup). Use when the task references a visual resource.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "image file path relative to project root"},
+                    "question": {"type": "string", "description": "what to look for in the image (optional)"}
+                },
+                "required": ["path"]
+            }
+        }
+    },
 ]
 
 
@@ -875,6 +986,234 @@ def _tool_run_shell(command: str, workspace_root: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# [v7 #2] install_package tool implementation
+# ---------------------------------------------------------------------------
+
+def _tool_install_package(
+    package: str,
+    package_type: str,
+    dev: bool,
+    workspace_root: str,
+) -> str:
+    """[v7 #2] Установить Python или Node.js пакет."""
+    package_type = (package_type or "python").lower().strip()
+
+    if package_type == "nodejs":
+        flag = "--save-dev" if dev else "--save"
+        cmd = ["npm", "install", flag, package]
+        try:
+            result = subprocess.run(
+                cmd, cwd=workspace_root,
+                capture_output=True, text=True, timeout=120
+            )
+            if result.returncode != 0:
+                return f"ERROR: {result.stderr or result.stdout}"
+            return f"OK: installed {package} (nodejs, dev={dev})"
+        except subprocess.TimeoutExpired:
+            return "ERROR: npm install timed out after 120s"
+        except Exception as e:
+            return f"ERROR: {e}"
+    else:
+        # Python
+        venv_python = str(Path(workspace_root) / "backend" / "venv" / "bin" / "python3")
+        if not Path(venv_python).exists():
+            venv_python = "python3"
+        cmd_str = f"{venv_python} -m pip install {package}"
+        try:
+            result = subprocess.run(
+                cmd_str, shell=True, cwd=workspace_root,
+                capture_output=True, text=True, timeout=120
+            )
+            if result.returncode != 0:
+                return f"ERROR: {result.stderr or result.stdout}"
+            # Update requirements.txt if not already there
+            req_path = Path(workspace_root) / "requirements.txt"
+            if req_path.exists():
+                req_content = req_path.read_text(encoding="utf-8")
+                pkg_base = package.split("[")[0].split("==")[0].split(">=")[0].strip()
+                if pkg_base.lower() not in req_content.lower():
+                    req_path.write_text(req_content.rstrip() + f"\n{package}\n", encoding="utf-8")
+            return f"OK: installed {package}"
+        except subprocess.TimeoutExpired:
+            return "ERROR: pip install timed out after 120s"
+        except Exception as e:
+            return f"ERROR: {e}"
+
+
+# ---------------------------------------------------------------------------
+# [v7 #3] run_migration tool implementation
+# ---------------------------------------------------------------------------
+
+def _tool_run_migration(
+    action: str,
+    message: Optional[str],
+    revision: Optional[str],
+    workspace_root: str,
+) -> str:
+    """[v7 #3] Создать или применить Alembic миграцию."""
+    venv_alembic = str(Path(workspace_root) / "backend" / "venv" / "bin" / "alembic")
+    if not Path(venv_alembic).exists():
+        venv_alembic = "alembic"
+
+    action = (action or "").strip().lower()
+
+    if action == "autogenerate":
+        msg = message or "auto"
+        cmd = [venv_alembic, "revision", "--autogenerate", "-m", msg]
+    elif action == "upgrade":
+        rev = revision or "head"
+        cmd = [venv_alembic, "upgrade", rev]
+    elif action == "downgrade":
+        rev = revision or "-1"
+        cmd = [venv_alembic, "downgrade", rev]
+    elif action == "history":
+        cmd = [venv_alembic, "history"]
+    elif action == "current":
+        cmd = [venv_alembic, "current"]
+    else:
+        return f"ERROR: unknown action '{action}'. Use: autogenerate, upgrade, downgrade, history, current"
+
+    try:
+        result = subprocess.run(
+            cmd, cwd=workspace_root,
+            capture_output=True, text=True, timeout=60
+        )
+        stdout = (result.stdout or "").strip()
+        stderr = (result.stderr or "").strip()
+        combined = (stdout + "\n" + stderr).strip()
+        status = "OK" if result.returncode == 0 else f"FAILED (exit {result.returncode})"
+
+        if action == "autogenerate" and result.returncode == 0:
+            if "Generating" in combined:
+                return f"Status: {status}\nMigration created successfully.\n{combined}"
+            else:
+                return f"Status: {status}\nNote: No changes detected or migration created.\n{combined}"
+
+        return f"Status: {status}\n{combined}"
+    except subprocess.TimeoutExpired:
+        return "ERROR: alembic command timed out after 60s"
+    except Exception as e:
+        return f"ERROR: {e}"
+
+
+# ---------------------------------------------------------------------------
+# [v7 #5] git_log and git_blame tool implementations
+# ---------------------------------------------------------------------------
+
+def _tool_git_log(path: Optional[str], limit: int, workspace_root: str) -> str:
+    """[v7 #5] Показать историю коммитов."""
+    limit = limit or 15
+    cmd = ["git", "log", "--oneline", "--no-merges", f"-{limit}"]
+    if path:
+        abs_path = _safe_resolve(path, workspace_root)
+        if abs_path is None:
+            return f"ERROR: path traversal: {path}"
+        cmd += ["--", str(abs_path)]
+    try:
+        result = subprocess.run(
+            cmd, cwd=workspace_root,
+            capture_output=True, text=True, timeout=15
+        )
+        output = (result.stdout or "").strip()
+        if not output:
+            return "No commits found."
+        header = f"Git log (last {limit} commits)"
+        if path:
+            header += f" for {path}"
+        return f"{header}:\n{output}"
+    except Exception as e:
+        return f"ERROR git log: {e}"
+
+
+def _tool_git_blame(
+    path: str,
+    start_line: Optional[int],
+    end_line: Optional[int],
+    workspace_root: str,
+) -> str:
+    """[v7 #5] Показать git blame для файла."""
+    abs_path = _safe_resolve(path, workspace_root)
+    if abs_path is None:
+        return f"ERROR: path traversal: {path}"
+    if not abs_path.exists():
+        return f"ERROR: file not found: {path}"
+
+    cmd = ["git", "blame"]
+    if start_line is not None and end_line is not None:
+        cmd += ["-L", f"{start_line},{end_line}"]
+    elif start_line is not None:
+        cmd += ["-L", f"{start_line},{start_line}"]
+    cmd.append(str(abs_path))
+
+    try:
+        result = subprocess.run(
+            cmd, cwd=workspace_root,
+            capture_output=True, text=True, timeout=15
+        )
+        output = (result.stdout or result.stderr or "").strip()
+        return output[:4000]
+    except Exception as e:
+        return f"ERROR git blame: {e}"
+
+
+# ---------------------------------------------------------------------------
+# [v7 #6] read_image tool implementation
+# ---------------------------------------------------------------------------
+
+def _tool_read_image(
+    path: str,
+    question: Optional[str],
+    workspace_root: str,
+    client: Any,
+    model: str,
+) -> str:
+    """[v7 #6] Прочитать и описать изображение через vision API."""
+    abs_path = _safe_resolve(path, workspace_root)
+    if abs_path is None:
+        return f"ERROR: path traversal: {path}"
+    if not abs_path.exists():
+        return f"ERROR: file not found: {path}"
+
+    ext = abs_path.suffix.lower().lstrip(".")
+    allowed_exts = {"jpg", "jpeg", "png", "gif", "webp", "bmp"}
+    if ext not in allowed_exts:
+        return f"ERROR: not an image file (supported: {', '.join(allowed_exts)})"
+
+    # Check file size
+    size = abs_path.stat().st_size
+    if size > 5 * 1024 * 1024:
+        return f"ERROR: image too large ({size // 1024}KB > 5MB limit)"
+
+    try:
+        image_bytes = abs_path.read_bytes()
+        b64 = base64.b64encode(image_bytes).decode("utf-8")
+    except Exception as e:
+        return f"ERROR reading image: {e}"
+
+    mime_ext = "jpeg" if ext == "jpg" else ext
+    text_prompt = question or "Describe this image in detail. If it shows code, UI, or error messages, transcribe them exactly."
+
+    try:
+        response = client.chat.completions.create(
+            model=model,
+            messages=[{
+                "role": "user",
+                "content": [
+                    {"type": "image_url", "image_url": {"url": f"data:image/{mime_ext};base64,{b64}"}},
+                    {"type": "text", "text": text_prompt},
+                ]
+            }],
+            max_tokens=1000,
+        )
+        return response.choices[0].message.content or "(no description)"
+    except Exception as e:
+        err_str = str(e)
+        if "vision" in err_str.lower() or "image" in err_str.lower() or "multimodal" in err_str.lower():
+            return f"ERROR: model does not support vision/images: {e}"
+        return f"ERROR calling vision API: {e}"
+
+
+# ---------------------------------------------------------------------------
 # Вспомогательные функции
 # ---------------------------------------------------------------------------
 
@@ -1038,6 +1377,28 @@ def _run_mypy_check(affected_files: List[str], workspace_root: str) -> Dict[str,
         return {"ok": True, "skipped": True, "reason": "mypy not installed"}
     except subprocess.TimeoutExpired:
         return {"ok": True, "skipped": True, "reason": "mypy timed out"}
+    except Exception as e:
+        return {"ok": True, "skipped": True, "reason": str(e)}
+
+
+# ---------------------------------------------------------------------------
+# [v7 #4] TypeScript check
+# ---------------------------------------------------------------------------
+
+def _run_tsc_check(affected_files: List[str], workspace_root: str) -> Dict[str, Any]:
+    """[v7 #4] Запускаем tsc --noEmit для TypeScript файлов."""
+    ts_files = [f for f in affected_files if f.endswith((".ts", ".tsx"))]
+    if not ts_files:
+        return {"ok": True, "skipped": True}
+    try:
+        result = subprocess.run(
+            ["npx", "tsc", "--noEmit", "--pretty", "false"],
+            cwd=workspace_root, capture_output=True, text=True, timeout=60
+        )
+        issues = (result.stdout or result.stderr or "").strip()
+        return {"ok": result.returncode == 0, "issues": issues[:2000], "files_checked": ts_files}
+    except FileNotFoundError:
+        return {"ok": True, "skipped": True, "reason": "npx not found"}
     except Exception as e:
         return {"ok": True, "skipped": True, "reason": str(e)}
 
@@ -1238,6 +1599,154 @@ async def _decompose_task(
 
 
 # ---------------------------------------------------------------------------
+# [v7 #7] Reflect on failure
+# ---------------------------------------------------------------------------
+
+async def _reflect_on_failure(
+    client: Any,
+    model: str,
+    task_title: str,
+    task_description: str,
+    error: str,
+    steps_log: List[str],
+    workspace_root: str,
+) -> str:
+    """[v7 #7] LLM рефлексирует над неудачей и предлагает другой подход."""
+    steps_summary = "\n".join(steps_log[-20:]) if steps_log else "(no steps)"
+    prompt = (
+        f"A coding agent just failed this task: {task_title}\n"
+        f"Error: {error}\n"
+        f"Steps taken:\n{steps_summary}\n\n"
+        f"What went wrong and what should the agent do differently to succeed?"
+    )
+    try:
+        response = await client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": "You are an expert software engineering mentor."},
+                {"role": "user", "content": prompt},
+            ],
+            temperature=0.3,
+            max_tokens=500,
+        )
+        reflection = (response.choices[0].message.content or "").strip()
+        return reflection[:1000]
+    except Exception as e:
+        log.info(f"Reflection call failed: {e}")
+        return ""
+
+
+# ---------------------------------------------------------------------------
+# [v7 #9] Task templates
+# ---------------------------------------------------------------------------
+
+_TASK_TEMPLATES = {
+    "new_adapter": """## TASK TEMPLATE: New Marketplace Adapter
+1. Read backend/services/adapters.py to understand MarketplaceAdapter base class
+2. Create backend/services/adapters/{name}_adapter.py implementing all required methods
+3. Register adapter in backend/services/adapter_registry.py
+4. Add connection config to backend/models.py if needed
+5. Create tests in backend/tests/test_{name}_adapter.py
+6. Update frontend connection form if UI needed""",
+
+    "new_endpoint": """## TASK TEMPLATE: New API Endpoint
+1. Add Pydantic schema to backend/schemas.py
+2. Add route to backend/main.py with proper auth via Depends(get_current_user)
+3. Implement business logic in appropriate service file
+4. Write test in backend/tests/
+5. Update frontend API client in frontend/src/lib/api.ts if needed""",
+
+    "new_celery_task": """## TASK TEMPLATE: New Celery Task
+1. Add async helper function _async_{name}()
+2. Wrap in sync @celery_app.task calling asyncio.run(_async_{name}())
+3. Add to backend/celery_worker.py before if __name__ == "__main__"
+4. Add API endpoint to trigger task if needed
+5. Write test verifying task is registered""",
+
+    "schema_change": """## TASK TEMPLATE: Database Schema Change
+1. Modify backend/models.py with the new field/table
+2. Run: run_migration(action="autogenerate", message="describe change")
+3. Run: run_migration(action="upgrade")
+4. Update related Pydantic schemas in backend/schemas.py
+5. Update any affected service code
+6. Write migration rollback test""",
+}
+
+
+def _get_task_template(task_type: str, title: str) -> str:
+    """[v7 #9] Вернуть шаблон плана по типу задачи или ключевым словам в заголовке."""
+    # If explicit task_type matches
+    if task_type in _TASK_TEMPLATES:
+        return _TASK_TEMPLATES[task_type]
+
+    title_lower = title.lower()
+    if "adapter" in title_lower:
+        return _TASK_TEMPLATES["new_adapter"]
+    if any(kw in title_lower for kw in ("endpoint", "route", "api")):
+        return _TASK_TEMPLATES["new_endpoint"]
+    if any(kw in title_lower for kw in ("celery", "task", "worker")):
+        return _TASK_TEMPLATES["new_celery_task"]
+    if any(kw in title_lower for kw in ("model", "migration", "schema", "column", "table")):
+        return _TASK_TEMPLATES["schema_change"]
+    return ""
+
+
+# ---------------------------------------------------------------------------
+# [v7 #10] Reviewer agent
+# ---------------------------------------------------------------------------
+
+async def _run_reviewer_agent(
+    client: Any,
+    model: str,
+    affected_files: List[str],
+    workspace_root: str,
+    task_summary: str,
+) -> Dict[str, Any]:
+    """[v7 #10] Асинхронное код-ревью изменённых файлов после task_done."""
+    file_contents_parts = []
+    for path in affected_files[:5]:
+        abs_path = _safe_resolve(path, workspace_root)
+        if abs_path is None or not abs_path.exists():
+            continue
+        try:
+            content = abs_path.read_text(encoding="utf-8", errors="replace")
+            if len(content) > 8000:
+                content = content[:8000] + "\n... [truncated]"
+            file_contents_parts.append(f"### {path}\n```\n{content}\n```")
+        except Exception:
+            continue
+
+    if not file_contents_parts:
+        return {"ok": True, "review": "No files to review.", "has_issues": False}
+
+    file_contents = "\n\n".join(file_contents_parts)
+    user_prompt = f"Review these changes for task: {task_summary}\n\n{file_contents}"
+
+    try:
+        response = await client.chat.completions.create(
+            model=model,
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "You are a strict code reviewer. Find bugs, missing edge cases, "
+                        "security issues, and convention violations. Be specific."
+                    ),
+                },
+                {"role": "user", "content": user_prompt},
+            ],
+            temperature=0.2,
+            max_tokens=1500,
+        )
+        review_text = (response.choices[0].message.content or "").strip()
+        issue_keywords = ("bug", "error", "missing", "vulnerable", "issue", "problem", "should", "must")
+        has_issues = any(kw in review_text.lower() for kw in issue_keywords)
+        return {"ok": True, "review": review_text, "has_issues": has_issues}
+    except Exception as e:
+        return {"ok": False, "review": f"Reviewer error: {e}", "has_issues": False}
+
+
+# ---------------------------------------------------------------------------
 # Субагенты для параллельных подзадач  [#10]
 # ---------------------------------------------------------------------------
 
@@ -1310,9 +1819,15 @@ async def _react_agent_loop(
     Шаги 1+: tool_choice=required — агент действует
 
     v6: dry_run, allowlist, streaming, token budget awareness
+    v7: tsc check, install_package, run_migration, git_log, git_blame,
+        read_image, task templates injected into user_message
     """
     allowlist = allowlist or []
     subagent_note = "\nYou are a subagent. Focus only on your specific subtask." if is_subagent else ""
+
+    # [v7 #9] Inject task template if available
+    task_template = _get_task_template(task_type, task_title)
+    template_section = f"\n\n{task_template}" if task_template else ""
 
     system_prompt = f"""You are an expert software engineer working on PIMv3 — a Python/FastAPI + React/TypeScript PIM system for Russian e-commerce marketplaces (Ozon, Wildberries, Yandex Market, Megamarket).{subagent_note}
 
@@ -1330,8 +1845,13 @@ async def _react_agent_loop(
 - move_file: rename/move file + auto-update imports
 - delete_file: delete a file (use carefully)
 - git_status: see accumulated changes so far
-- run_shell: pytest, ruff, npm build
+- git_log: show commit history for repo or file
+- git_blame: show who changed each line
+- run_shell: pytest, ruff, npm build, alembic, pip install, npm install
 - ask_user: pause and ask a clarifying question
+- install_package: install Python/Node.js package + update requirements.txt/package.json
+- run_migration: create/apply Alembic migrations
+- read_image: describe an image file (screenshot, diagram, mockup)
 - task_done: finish (only after tests pass + lint clean)
 
 ## WORKFLOW
@@ -1362,7 +1882,7 @@ async def _react_agent_loop(
 
     user_message = f"""Task: {task_title}
 
-{task_description}
+{task_description}{template_section}
 
 Start with your implementation plan (no tool call), then proceed step by step."""
 
@@ -1604,8 +2124,53 @@ Start with your implementation plan (no tool call), then proceed step by step.""
                     tool_args.get("show_diff", True), workspace_root
                 )
 
+            elif tool_name == "git_log":
+                # [v7 #5]
+                tool_result = _tool_git_log(
+                    tool_args.get("path"),
+                    tool_args.get("limit", 15),
+                    workspace_root,
+                )
+
+            elif tool_name == "git_blame":
+                # [v7 #5]
+                tool_result = _tool_git_blame(
+                    tool_args.get("path", ""),
+                    tool_args.get("start_line"),
+                    tool_args.get("end_line"),
+                    workspace_root,
+                )
+
             elif tool_name == "run_shell":
                 tool_result = _tool_run_shell(tool_args.get("command", ""), workspace_root)
+
+            elif tool_name == "install_package":
+                # [v7 #2]
+                tool_result = _tool_install_package(
+                    tool_args.get("package", ""),
+                    tool_args.get("package_type", "python"),
+                    bool(tool_args.get("dev", False)),
+                    workspace_root,
+                )
+
+            elif tool_name == "run_migration":
+                # [v7 #3]
+                tool_result = _tool_run_migration(
+                    tool_args.get("action", ""),
+                    tool_args.get("message"),
+                    tool_args.get("revision"),
+                    workspace_root,
+                )
+
+            elif tool_name == "read_image":
+                # [v7 #6]
+                tool_result = _tool_read_image(
+                    tool_args.get("path", ""),
+                    tool_args.get("question"),
+                    workspace_root,
+                    client,
+                    model,
+                )
 
             elif tool_name == "ask_user":
                 question = tool_args.get("question", "")
@@ -1645,6 +2210,14 @@ Start with your implementation plan (no tool call), then proceed step by step.""
                         mypy_note = f"\nMypy warnings:\n{mypy_issues}"
                         log.info(f"Step {step}: mypy issues (non-blocking): {mypy_issues[:200]}")
 
+                    # [v7 #4] TypeScript check (non-blocking — just report)
+                    tsc_result = _run_tsc_check(all_affected, workspace_root)
+                    tsc_note = ""
+                    if not tsc_result.get("skipped") and not tsc_result.get("ok"):
+                        tsc_issues = tsc_result.get("issues", "")
+                        tsc_note = f"\nTypeScript warnings:\n{tsc_issues}"
+                        log.info(f"Step {step}: tsc issues (non-blocking): {tsc_issues[:200]}")
+
                     log.info(f"task_done after {step} steps. Files: {all_affected}")
                     messages.append({
                         "role": "tool",
@@ -1683,6 +2256,7 @@ Start with your implementation plan (no tool call), then proceed step by step.""
                                 "steps_log": steps_log,
                                 "lint": lint_result,
                                 "mypy": mypy_result,
+                                "tsc": tsc_result,
                             },
                         }
 
@@ -1693,12 +2267,13 @@ Start with your implementation plan (no tool call), then proceed step by step.""
                             "affected_files": all_affected,
                             "deleted_files": deleted_files,
                             "applied_directly": True,
-                            "summary": summary + mypy_note,
+                            "summary": summary + mypy_note + tsc_note,
                             "wrote_tests": wrote_tests,
                             "steps": step + 1,
                             "steps_log": steps_log,
                             "lint": lint_result,
                             "mypy": mypy_result,
+                            "tsc": tsc_result,
                         },
                     }
                 task_done_called = True
@@ -1748,6 +2323,27 @@ Start with your implementation plan (no tool call), then proceed step by step.""
 
 
 # ---------------------------------------------------------------------------
+# [v7 #8] Resume from checkpoint — standalone function
+# ---------------------------------------------------------------------------
+
+def resume_from_checkpoint(task_id: str, workspace_root: str = _WORKSPACE_ROOT) -> Dict[str, Any]:
+    """[v7 #8] Читаем checkpoint из Redis и возвращаем состояние для продолжения."""
+    r = _get_redis()
+    if r is None:
+        return {"ok": False, "error": "redis not available"}
+    key = f"agent:checkpoint:{task_id}"
+    data = r.hgetall(key)
+    if not data:
+        return {"ok": False, "error": "no checkpoint found"}
+    return {
+        "ok": True,
+        "step": int(data.get("step", 0)),
+        "affected_files": json.loads(data.get("affected_files", "[]")),
+        "ts": float(data.get("ts", 0)),
+    }
+
+
+# ---------------------------------------------------------------------------
 # Основная точка входа
 # ---------------------------------------------------------------------------
 
@@ -1761,13 +2357,17 @@ async def generate_code_patch_proposal(
     progress_callback: Optional[Callable] = None,
     dry_run: bool = False,
     allowlist: Optional[List[str]] = None,
+    max_retries: int = 2,
+    resume_task_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
-    Главная функция агента. Запускает ReAct Tool Loop v6.
+    Главная функция агента. Запускает ReAct Tool Loop v7.
 
     Args:
         dry_run: если True, файлы не записываются на диск (preview mode)
         allowlist: список разрешённых путей для записи (пустой = без ограничений)
+        max_retries: максимальное число повторных попыток при неудаче (v7 #7)
+        resume_task_id: task_id для восстановления из checkpoint (v7 #8)
     """
     from backend.services.ai_service import get_client_and_model
 
@@ -1788,6 +2388,22 @@ async def generate_code_patch_proposal(
         return {"ok": False, "error": "empty_task_description"}
 
     effective_allowlist = allowlist or allowlist_files or []
+
+    # [v7 #8] Resume from checkpoint if requested
+    if resume_task_id:
+        checkpoint = resume_from_checkpoint(resume_task_id, workspace_root)
+        if checkpoint.get("ok"):
+            step = checkpoint["step"]
+            prev_files = checkpoint["affected_files"]
+            resume_note = (
+                f"\n\nRESUME: Previously completed {step} steps and modified {prev_files}. "
+                f"Continue from where you left off."
+            )
+            description = description + resume_note
+            log.info(f"Resuming task {resume_task_id} from step {step}, files: {prev_files}")
+        else:
+            log.info(f"Could not load checkpoint for {resume_task_id}: {checkpoint.get('error')}")
+            prev_files = []
 
     conventions = _load_conventions(workspace_root)
     knowledge_context = _build_knowledge_context(rewrite_plan)
@@ -1858,25 +2474,86 @@ async def generate_code_patch_proposal(
             "errors": errors if errors else None,
         }
 
-    # Single agent path
-    return await _react_agent_loop(
-        client=client,
-        model=model,
-        task_title=title,
-        task_description=description,
-        task_type=task_type,
-        workspace_root=workspace_root,
-        conventions=conventions,
-        knowledge_context=knowledge_context,
-        file_tree=file_tree,
-        tests_list=tests_list,
-        baseline_tests=baseline_tests,
-        memory_context=memory_context,
-        task_id=task_id,
-        progress_callback=progress_callback,
-        dry_run=dry_run,
-        allowlist=effective_allowlist,
-    )
+    # Single agent path — with retry + reflection [v7 #7]
+    current_description = description
+    retry_count = 0
+
+    while True:
+        result = await _react_agent_loop(
+            client=client,
+            model=model,
+            task_title=title,
+            task_description=current_description,
+            task_type=task_type,
+            workspace_root=workspace_root,
+            conventions=conventions,
+            knowledge_context=knowledge_context,
+            file_tree=file_tree,
+            tests_list=tests_list,
+            baseline_tests=baseline_tests,
+            memory_context=memory_context,
+            task_id=task_id,
+            progress_callback=progress_callback,
+            dry_run=dry_run,
+            allowlist=effective_allowlist,
+        )
+
+        if result.get("ok"):
+            # [v7 #10] Run reviewer agent after successful task
+            proposal = result.get("proposal", {})
+            all_affected = proposal.get("affected_files", [])
+            task_summary = proposal.get("summary", title)
+            try:
+                review_result = await _run_reviewer_agent(
+                    client=client,
+                    model=model,
+                    affected_files=all_affected,
+                    workspace_root=workspace_root,
+                    task_summary=task_summary,
+                )
+                result["code_review"] = review_result
+                if review_result.get("has_issues"):
+                    log.warning(
+                        f"Reviewer found potential issues: "
+                        f"{review_result.get('review', '')[:200]}"
+                    )
+            except Exception as e:
+                log.info(f"Reviewer agent error (non-fatal): {e}")
+                result["code_review"] = {"ok": False, "review": str(e), "has_issues": False}
+            return result
+
+        # Task failed
+        error = result.get("error", "unknown error")
+        partial = result.get("partial", {})
+        steps_log = partial.get("steps_log", [])
+
+        if retry_count >= max_retries:
+            log.warning(f"Task failed after {retry_count} retries: {error}")
+            return result
+
+        # [v7 #7] Reflect on failure and retry
+        log.info(f"Task failed (attempt {retry_count + 1}/{max_retries}): {error}. Reflecting...")
+        reflection = await _reflect_on_failure(
+            client=client,
+            model=model,
+            task_title=title,
+            task_description=current_description,
+            error=error,
+            steps_log=steps_log,
+            workspace_root=workspace_root,
+        )
+
+        if reflection:
+            current_description = (
+                current_description
+                + f"\n\n## REFLECTION FROM PREVIOUS ATTEMPT (attempt {retry_count + 1})\n"
+                + reflection
+            )
+            log.info(f"Retrying with reflection: {reflection[:200]}")
+        else:
+            log.info("No reflection obtained, retrying without modification")
+
+        retry_count += 1
 
 
 def _build_knowledge_context(rewrite_plan: Dict[str, Any]) -> str:
