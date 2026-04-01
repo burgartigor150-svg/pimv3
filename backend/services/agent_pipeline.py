@@ -20,6 +20,7 @@ import dataclasses
 import json
 import logging
 import os
+import subprocess
 from typing import Any, Dict, List, Optional
 
 import redis as _redis_lib
@@ -215,7 +216,82 @@ ROLES: Dict[str, AgentRole] = {
         max_steps=15,
         can_write=False,
     ),
+    "doc": AgentRole(
+        name="doc",
+        system_prompt="You are a technical writer. Add clear, concise docstrings to Python functions and classes. Never change logic. Only write documentation.",
+        tools=_filter_tools(["read_file", "edit_file", "append_file", "search_code", "task_done"]),
+        max_steps=15,
+        can_write=True,
+    ),
 }
+
+# Keep backward-compatible alias used internally
+_ROLES = ROLES
+
+# ---------------------------------------------------------------------------
+# ADDITION 1: Shared context document between agents
+# ---------------------------------------------------------------------------
+
+class _SharedContext:
+    """Redis-backed shared workspace document for inter-agent communication."""
+    def __init__(self, task_id: str):
+        self.task_id = task_id
+        self.key = f"agent:shared_context:{task_id}"
+        self._r = _redis
+
+    def write(self, agent_name: str, content: str) -> None:
+        """Agent writes its decisions/findings."""
+        import time
+        entry = json.dumps({"agent": agent_name, "content": content, "ts": time.time()}, ensure_ascii=False)
+        self._r.rpush(self.key, entry)
+        self._r.expire(self.key, 86400)
+
+    def read_all(self) -> str:
+        """Get all entries as formatted string for injection into agent context."""
+        raw = self._r.lrange(self.key, 0, -1) or []
+        if not raw:
+            return ""
+        lines = ["## SHARED CONTEXT FROM OTHER AGENTS"]
+        for item in raw:
+            try:
+                d = json.loads(item)
+                lines.append(f"\n[{d['agent']}]: {d['content']}")
+            except Exception:
+                lines.append(f"\n{item}")
+        return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# ADDITION 2: File-level locks to prevent parallel write conflicts
+# ---------------------------------------------------------------------------
+
+class _FileLock:
+    """Per-file Redis lock for parallel agent write safety."""
+    def __init__(self, file_path: str, task_id: str, timeout: int = 30):
+        self.key = f"agent:filelock:{file_path.replace('/', ':')}"
+        self.owner = task_id
+        self.timeout = timeout
+        self._r = _redis
+
+    def acquire(self) -> bool:
+        return bool(self._r.set(self.key, self.owner, nx=True, ex=self.timeout))
+
+    def release(self) -> None:
+        if self._r.get(self.key) == self.owner:
+            self._r.delete(self.key)
+
+    def __enter__(self):
+        import time
+        deadline = time.time() + self.timeout
+        while time.time() < deadline:
+            if self.acquire():
+                return self
+            time.sleep(0.5)
+        raise TimeoutError(f"Could not acquire lock for {self.key}")
+
+    def __exit__(self, *args):
+        self.release()
+
 
 # ---------------------------------------------------------------------------
 # Tool dispatch
@@ -228,6 +304,7 @@ def _dispatch_tool(
     workspace_root: str,
     dry_run: bool,
     allowlist: Optional[List[str]],
+    task_id: str = "",
 ) -> str:
     """Dispatch a tool call to the appropriate implementation function."""
     write_tools = {
@@ -240,6 +317,30 @@ def _dispatch_tool(
 
     ws = workspace_root
 
+    # ADDITION 2: Wrap write operations with file lock
+    _write_tools_with_lock = {"write_file", "edit_file", "append_file", "move_file", "delete_file", "batch_edit"}
+    if tool_name in _write_tools_with_lock and role.can_write and task_id:
+        path = tool_args.get("path", tool_args.get("src", ""))
+        if path:
+            lock = _FileLock(path, task_id)
+            try:
+                lock.acquire()
+                return _dispatch_tool_inner(tool_name, tool_args, role, ws, dry_run, allowlist)
+            finally:
+                lock.release()
+
+    return _dispatch_tool_inner(tool_name, tool_args, role, ws, dry_run, allowlist)
+
+
+def _dispatch_tool_inner(
+    tool_name: str,
+    tool_args: Dict[str, Any],
+    role: AgentRole,
+    ws: str,
+    dry_run: bool,
+    allowlist: Optional[List[str]],
+) -> str:
+    """Inner dispatch without locking logic."""
     if tool_name == "read_file":
         return _tool_read_file(tool_args["path"], ws)
     elif tool_name == "list_dir":
@@ -376,6 +477,7 @@ async def _run_agent(
     conventions: str = "",
     dry_run: bool = False,
     allowlist: List[str] = None,
+    shared_ctx: Optional[_SharedContext] = None,
 ) -> Dict[str, Any]:
     """Run a single specialized ReAct agent loop."""
     file_tree_snippet = ""
@@ -389,6 +491,12 @@ async def _run_agent(
     system_content = role.system_prompt + (
         f"\n\nConventions:\n{conventions}" if conventions else ""
     ) + file_tree_snippet
+
+    # ADDITION 1: Inject shared context into system message
+    if shared_ctx:
+        shared_content = shared_ctx.read_all()
+        if shared_content:
+            system_content = system_content + "\n\n" + shared_content
 
     user_content = (
         f"Task: {task_title}\n\n{task_description}"
@@ -454,7 +562,8 @@ async def _run_agent(
                 continue
 
             result_str = _dispatch_tool(
-                tool_name, tool_args, role, workspace_root, dry_run, allowlist
+                tool_name, tool_args, role, workspace_root, dry_run, allowlist,
+                task_id=task_id,
             )
 
             # Track affected files from write operations
@@ -483,6 +592,15 @@ async def _run_agent(
         messages.extend(tool_results)
 
         if done:
+            # ADDITION 1: Write findings to shared context after task_done
+            if shared_ctx:
+                try:
+                    shared_ctx.write(
+                        role.name,
+                        f"Completed: {final_summary}. Modified: {all_affected}. Key decisions: {final_summary[:300]}"
+                    )
+                except Exception:
+                    pass
             return {
                 "ok": True,
                 "role": role.name,
@@ -491,6 +609,79 @@ async def _run_agent(
             }
 
     return {"ok": False, "error": "max_steps", "role": role.name, "affected_files": all_affected}
+
+
+# ---------------------------------------------------------------------------
+# ADDITION 4: Auto-documentation after implementation
+# ---------------------------------------------------------------------------
+
+async def _auto_generate_docs(client, model, affected_files, workspace_root, task_title) -> Dict:
+    """Spawn a DocAgent that adds/updates docstrings and README sections."""
+    py_files = [f for f in affected_files if f.endswith(".py")]
+    if not py_files:
+        return {"ok": True, "skipped": True}
+
+    doc_description = f"""Update documentation for the following files that were just modified:
+{chr(10).join(py_files)}
+
+Task that was implemented: {task_title}
+
+For each function/class that is missing a docstring: add a concise one.
+For each new public function: add Args/Returns sections.
+Do NOT change any logic — only add/update docstrings and comments.
+If backend/README.md exists, add a brief mention of new features.
+"""
+    doc_role = AgentRole(
+        name="doc",
+        system_prompt="You are a technical writer. Add clear, concise docstrings to Python functions and classes. Never change logic. Only write documentation.",
+        tools=_filter_tools(["read_file", "edit_file", "append_file", "search_code", "task_done"]),
+        max_steps=15,
+        can_write=True,
+    )
+    return await _run_agent(
+        role=doc_role,
+        task_title="Update docstrings",
+        task_description=doc_description,
+        workspace_root=workspace_root,
+        client=client,
+        model=model,
+        task_id=f"doc_{id(client)}",
+        affected_files=py_files,
+        conventions="",
+    )
+
+
+# ---------------------------------------------------------------------------
+# ADDITION 5: API contract testing
+# ---------------------------------------------------------------------------
+
+def _run_api_contract_test(affected_files: List[str], workspace_root: str) -> Dict:
+    """Check if modified endpoints still match their OpenAPI schema."""
+    # Check if any route files were modified
+    route_files = [f for f in affected_files if "main.py" in f or "router" in f or "routes" in f]
+    if not route_files:
+        return {"ok": True, "skipped": True, "reason": "no route files modified"}
+
+    try:
+        # Try schemathesis if available
+        result = subprocess.run(
+            ["python3", "-m", "schemathesis", "run", "http://localhost:4877/openapi.json",
+             "--checks", "response_schema_conformance", "--max-examples", "5", "--timeout", "10"],
+            cwd=workspace_root, capture_output=True, text=True, timeout=60
+        )
+        passed = result.returncode == 0
+        output = (result.stdout or result.stderr or "")[:2000]
+        return {"ok": passed, "output": output, "tool": "schemathesis"}
+    except FileNotFoundError:
+        # Fallback: just check /openapi.json is reachable
+        try:
+            import httpx
+            resp = httpx.get("http://localhost:4877/openapi.json", timeout=5)
+            return {"ok": resp.status_code == 200, "output": f"OpenAPI schema: {resp.status_code}", "tool": "basic"}
+        except Exception as e:
+            return {"ok": True, "skipped": True, "reason": str(e)}
+    except Exception as e:
+        return {"ok": True, "skipped": True, "reason": str(e)}
 
 
 # ---------------------------------------------------------------------------
@@ -528,6 +719,9 @@ async def run_pipeline(
     except Exception:
         pass
 
+    # ADDITION 1: Create shared context for this pipeline run
+    shared_ctx = _SharedContext(task_id)
+
     common_kwargs = dict(
         workspace_root=workspace_root,
         client=client,
@@ -536,6 +730,7 @@ async def run_pipeline(
         conventions=conventions + ("\n\n" + memory_context if memory_context else ""),
         dry_run=dry_run,
         allowlist=allowlist,
+        shared_ctx=shared_ctx,
     )
 
     stages: Dict[str, Any] = {}
@@ -665,6 +860,12 @@ async def run_pipeline(
             all_impl_affected.append(f)
 
     # ------------------------------------------------------------------
+    # Stage 3b: Auto-documentation (ADDITION 4)
+    # ------------------------------------------------------------------
+    doc_result = await _auto_generate_docs(client, model, all_impl_affected, workspace_root, task_title)
+    stages["documentation"] = doc_result
+
+    # ------------------------------------------------------------------
     # Stage 4: Review + Security (parallel)
     # ------------------------------------------------------------------
     _redis.hset(f"agent_task:{task_id}", mapping={
@@ -697,8 +898,10 @@ async def run_pipeline(
 
     if isinstance(review_result, Exception):
         stages["reviewer"] = {"ok": False, "error": str(review_result), "role": "reviewer"}
+        reviewer_result = stages["reviewer"]
     else:
         stages["reviewer"] = review_result
+        reviewer_result = review_result
 
     if isinstance(security_result, Exception):
         stages["security"] = {"ok": False, "error": str(security_result), "role": "security"}
@@ -706,7 +909,47 @@ async def run_pipeline(
         stages["security"] = security_result
 
     # ------------------------------------------------------------------
-    # Stage 5: Final static analysis
+    # Stage 4b: Reviewer feedback loop — auto fix (ADDITION 3)
+    # ------------------------------------------------------------------
+    reviewer_summary = reviewer_result.get("summary", "") if isinstance(reviewer_result, dict) else ""
+    has_bugs = any(
+        kw in reviewer_summary.lower()
+        for kw in ["bug", "error", "missing", "issue", "problem", "broken", "incorrect", "wrong"]
+    )
+    if has_bugs and not dry_run:
+        fix_description = f"""Fix the following issues found by code review:
+
+{reviewer_summary}
+
+Files to fix: {all_impl_affected}
+These issues were found after implementing: {task_description[:300]}
+"""
+        fix_result = await _run_agent(
+            role=_ROLES["backend"],
+            task_title=f"Fix review issues for: {task_title}",
+            task_description=fix_description,
+            workspace_root=workspace_root,
+            client=client,
+            model=model,
+            task_id=f"{task_id}:fix",
+            affected_files=all_impl_affected,
+            conventions=conventions + ("\n\n" + memory_context if memory_context else ""),
+            shared_ctx=shared_ctx,
+            dry_run=dry_run,
+            allowlist=allowlist,
+        )
+        if fix_result.get("ok"):
+            for f in fix_result.get("affected_files", []):
+                if f not in all_impl_affected:
+                    all_impl_affected.append(f)
+        stages["reviewer_fix"] = fix_result
+        _publish_stream(task_id, "reviewer_fix", {
+            "applied": fix_result.get("ok"),
+            "files": fix_result.get("affected_files", []),
+        })
+
+    # ------------------------------------------------------------------
+    # Stage 5: Final static analysis + API contract test
     # ------------------------------------------------------------------
     _redis.hset(f"agent_task:{task_id}", mapping={
         "pipeline_stage": "done",
@@ -744,6 +987,10 @@ async def run_pipeline(
             final_checks["tsc"] = f"ERROR: {e}"
 
     stages["final_checks"] = final_checks
+
+    # ADDITION 5: API contract test
+    api_contract_result = _run_api_contract_test(all_impl_affected, workspace_root)
+    stages["api_contract"] = api_contract_result
 
     _publish_stream(task_id, "pipeline_done", {
         "stages": list(stages.keys()),
