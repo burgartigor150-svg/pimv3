@@ -1049,7 +1049,7 @@ async def agent_tasks_list(
     limit: int = 100,
     current_user: models.User = Depends(get_current_user),
 ):
-    return list_agent_tasks(limit=limit)
+    return list_agent_tasks(limit=limit)it=limit)
 
 
 @app.get("/api/v1/agent-tasks/{task_id}")
