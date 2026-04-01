@@ -1059,6 +1059,37 @@ async def agent_task_rollback(
     return rollback_task(task_id)
 
 
+@app.get("/api/v1/agent/tasks/{task_id}/stream/log")
+async def agent_task_stream_log(task_id: str):
+    """Получить накопленный лог стриминга (без SSE подписки)."""
+    r = None
+    try:
+        import redis as _rl
+        r = _rl.Redis.from_url(os.getenv("REDIS_URL", "redis://localhost:6379/0"), decode_responses=True)
+        raw = r.lrange(f"agent:stream_log:{task_id}", 0, -1) or []
+        events = []
+        for line in raw:
+            try:
+                events.append(json.loads(line))
+            except Exception:
+                events.append({"raw": line})
+        return {"ok": True, "events": events}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+    finally:
+        if r:
+            try:
+                r.close()
+            except Exception:
+                pass
+
+
+@app.get("/api/v1/agent/tasks/{task_id}/checkpoint")
+async def agent_task_checkpoint(task_id: str):
+    """Получить сохранённый checkpoint задачи (для resume)."""
+    return resume_from_checkpoint(task_id)
+
+
 @app.get("/api/v1/agent/tasks/{task_id}/stream")
 async def agent_task_stream(task_id: str):
     """SSE stream событий ReAct-агента для задачи."""
@@ -1482,7 +1513,7 @@ async def run_self_rewrite(
     from pathlib import Path
     from backend.services.telemetry import get_task_events, append_task_event
     from backend.services.self_rewrite_planner import build_self_rewrite_plan
-    from backend.services.code_patch_agent import generate_code_patch_proposal
+    from backend.services.code_patch_agent import generate_code_patch_proposal, resume_from_checkpoint
     from backend.services.quality_gate import run_quality_gate
     from backend.services.rollback_guard import backup_files
     from backend.services.kpi_guard import compute_task_kpis, should_auto_stop_self_rewrite

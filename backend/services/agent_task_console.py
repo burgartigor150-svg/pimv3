@@ -25,7 +25,7 @@ from backend.services.team_orchestrator import (
     init_state_machine,
     request_admin_approval,
 )
-from backend.services.code_patch_agent import generate_code_patch_proposal
+from backend.services.code_patch_agent import generate_code_patch_proposal, resume_from_checkpoint
 from backend.services.git_branch_manager import create_incident_branch, commit_all_changes, push_branch
 from backend.services.github_automation import create_pull_request
 from backend.services.quality_gate import run_quality_gate
@@ -669,11 +669,18 @@ async def run_agent_task(task_id: str, ai_key: str = "") -> Dict[str, Any]:
         _set_task(task_id, {"stage": "execution_patch_proposal", "progress_percent": 40, "eta_seconds": 210, "updated_at_ts": int(time.time())})
         await _wait_if_paused(task_id)
         _append_team_message(task_id, "backend_dev", "Генерирую патч кода по задаче.")
+        # Проверяем есть ли checkpoint для resume
+        checkpoint = resume_from_checkpoint(task_id)
+        resume_task_id = task_id if checkpoint.get("ok") and checkpoint.get("step", 0) > 0 else None
+        if resume_task_id:
+            _append_log(task_id, f"Resuming from checkpoint: step={checkpoint.get('step')}, files={checkpoint.get('affected_files')}")
+
         proposal = await generate_code_patch_proposal(
             ai_config=ai_key,
             rewrite_plan=rewrite_plan,
             allowlist_files=allowlist,
             task_id=task_id,
+            resume_task_id=resume_task_id,
         )
         result["proposal"] = proposal
         if not proposal.get("ok"):
