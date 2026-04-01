@@ -121,6 +121,11 @@ app = FastAPI(title="PIM V3 API")
 
 @app.get("/api/v1/health")
 async def health_check():
+
+@app.get("/api/v1/version")
+async def get_version():
+    """Возвращает текущую версию бэкенда для мониторинга."""
+    return {"version": "1.0.0", "service": "pimv3-backend", "timestamp": time.time()}
     """Проверка работоспособности backend."""
     return {"status": "ok", "service": "pimv3-backend", "timestamp": time.time()}
 
@@ -1021,9 +1026,6 @@ async def agent_chat_message(
         return {
             "ok": True,
             "assistant_reply": llm or str(inferred.get("clarification_question") or "Уточни, пожалуйста, цель задачи."),
-            "task": {},
-            "active_task_id": str(state.get("active_task_id") or ""),
-        }d.get("clarification_question") or "Уточни, пожалуйста, цель задачи."),
             "task": {},
             "active_task_id": str(state.get("active_task_id") or ""),
         }
