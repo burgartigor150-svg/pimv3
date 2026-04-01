@@ -71,7 +71,7 @@ export default function ProductsPage() {
   async function fetchProducts() {
     setIsLoading(true);
     try {
-      const res = await fetch('/api/products');
+      const res = await fetch('/api/v1/products');
       const data = await res.json();
       const list: Product[] = Array.isArray(data) ? data : data.products ?? [];
       setProducts(list);
@@ -89,7 +89,7 @@ export default function ProductsPage() {
     if (!bulkTaskId) return;
     pollRef.current = setInterval(async () => {
       try {
-        const res = await fetch(`/api/bulk-tasks/${bulkTaskId}`);
+        const res = await fetch(`/api/v1/import/tasks/${bulkTaskId}`);
         const task: BulkTask = await res.json();
         setBulkTask(task);
         if (task.status === 'completed' || task.status === 'failed') {
@@ -112,7 +112,7 @@ export default function ProductsPage() {
   async function handleImport() {
     if (!importSku.trim()) return;
     try {
-      const res = await fetch('/api/products/import', {
+      const res = await fetch('/api/v1/import/product', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ sku: importSku }),
@@ -131,7 +131,7 @@ export default function ProductsPage() {
     if (!bulkQueries.trim()) return;
     try {
       const queries = bulkQueries.split('\n').map((q) => q.trim()).filter(Boolean);
-      const res = await fetch('/api/products/bulk-import', {
+      const res = await fetch('/api/v1/import/bulk', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ queries }),
@@ -149,7 +149,7 @@ export default function ProductsPage() {
     const ids = Array.from(selectedIds);
     if (!ids.length) return;
     try {
-      const res = await fetch('/api/products/bulk-generate', {
+      const res = await fetch('/api/v1/ai/generate-bulk', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ ids }),
@@ -164,7 +164,7 @@ export default function ProductsPage() {
 
   async function handleDelete(id: string | number) {
     try {
-      await fetch(`/api/products/${id}`, { method: 'DELETE' });
+      await fetch(`/api/v1/products/${id}`, { method: 'DELETE' });
       setProducts((prev) => prev.filter((p) => p.id !== id));
       setSelectedIds((prev) => {
         const next = new Set(prev);
@@ -178,7 +178,7 @@ export default function ProductsPage() {
 
   async function handleCreate() {
     try {
-      const res = await fetch('/api/products', {
+      const res = await fetch('/api/v1/products', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(newProduct),
@@ -196,7 +196,7 @@ export default function ProductsPage() {
   async function handleExportSelected() {
     const ids = Array.from(selectedIds);
     try {
-      const res = await fetch('/api/products/export', {
+      const res = await fetch('/api/v1/products/export', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ ids }),

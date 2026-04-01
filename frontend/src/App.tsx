@@ -26,6 +26,19 @@ import LoginPage from './pages/LoginPage';
 import DashboardPage from './pages/DashboardPage';
 import ProductsPage from './pages/ProductsPage';
 import AgentDashboard from './pages/AgentDashboard';
+import AttributesPage from './pages/AttributesPage';
+import IntegrationsPage from './pages/IntegrationsPage';
+import SyndicationPage from './pages/SyndicationPage';
+import AttributeStarMapPage from './pages/AttributeStarMapPage';
+import AgentTaskConsolePage from './pages/AgentTaskConsolePage';
+import AgentAssistantPage from './pages/AgentAssistantPage';
+import SelfImproveConsolePage from './pages/SelfImproveConsolePage';
+import AdminDialogConsolePage from './pages/AdminDialogConsolePage';
+import SettingsPage from './pages/SettingsPage';
+import UsersPage from './pages/UsersPage';
+import ProductDetailsPage from './pages/ProductDetailsPage';
+import { ToastProvider } from './components/Toast';
+
 
 // ─── Placeholder ──────────────────────────────────────────────────────────────
 
@@ -292,18 +305,19 @@ const AppShell: React.FC = () => {
             <Route index element={<Navigate to="/dashboard" replace />} />
             <Route path="/dashboard"       element={<DashboardPage />} />
             <Route path="/products"        element={<ProductsPage />} />
-            <Route path="/attributes"      element={<PlaceholderPage title="Attributes" />} />
-            <Route path="/syndication"     element={<PlaceholderPage title="Syndication" />} />
-            <Route path="/integrations"    element={<PlaceholderPage title="Integrations" />} />
-            <Route path="/star-map"        element={<PlaceholderPage title="Star Map" />} />
+            <Route path="/products/:id"     element={<ProductDetailsPage />} />
+            <Route path="/attributes"      element={<AttributesPage />} />
+            <Route path="/syndication"     element={<SyndicationPage />} />
+            <Route path="/integrations"    element={<IntegrationsPage />} />
+            <Route path="/star-map"        element={<AttributeStarMapPage />} />
             <Route path="/agent-dashboard" element={<AgentDashboard />} />
-            <Route path="/agent-console"   element={<PlaceholderPage title="Agent Console" />} />
-            <Route path="/agent-assistant" element={<PlaceholderPage title="Agent Assistant" />} />
-            <Route path="/self-improve"    element={<PlaceholderPage title="Self-Improve" />} />
+            <Route path="/agent-console"   element={<AgentTaskConsolePage />} />
+            <Route path="/agent-assistant" element={<AgentAssistantPage />} />
+            <Route path="/self-improve"    element={<SelfImproveConsolePage />} />
             <Route path="/agent-cron"      element={<PlaceholderPage title="Cron" />} />
-            <Route path="/users"           element={<PlaceholderPage title="Users" />} />
-            <Route path="/settings"        element={<PlaceholderPage title="Settings" />} />
-            <Route path="/admin-console"   element={<PlaceholderPage title="Admin Console" />} />
+            <Route path="/users"           element={<UsersPage />} />
+            <Route path="/settings"        element={<SettingsPage />} />
+            <Route path="/admin-console"   element={<AdminDialogConsolePage />} />
             <Route path="*"               element={<Navigate to="/dashboard" replace />} />
           </Routes>
         </main>
@@ -336,4 +350,9 @@ const App: React.FC = () => {
   );
 };
 
-export default App;
+const AppWithToast: React.FC = () => (
+  <ToastProvider>
+    <App />
+  </ToastProvider>
+);
+export default AppWithToast;
