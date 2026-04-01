@@ -510,6 +510,20 @@ async def get_connections(db: AsyncSession = Depends(get_db), current_user: mode
     return result.scalars().all()
 
 @app.post("/api/v1/connections", response_model=schemas.MarketplaceConnection)
+
+
+@app.post("/api/v1/connections/test")
+async def test_connection(conn: schemas.MarketplaceConnectionCreate, db: AsyncSession = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+    """Тестирует подключение к маркетплейсу с предоставленными данными интеграции."""
+    from backend.services.adapters import get_adapter
+    try:
+        adapter = get_adapter(conn.type, conn.api_key, conn.client_id, conn.store_id, getattr(conn, "warehouse_id", None))
+        # Вызываем простой метод для проверки подключения, например, получение списка категорий или статуса
+        test_result = await adapter.test_connection()
+        return {"status": "success", "message": "Подключение успешно", "details": test_result}
+    except Exception as e:
+        log.error(f"Connection test failed for {conn.type}: {e}")
+        raise HTTPException(status_code=400, detail=f"Ошибка подключения: {str(e)}")
 async def create_connection(conn: schemas.MarketplaceConnectionCreate, db: AsyncSession = Depends(get_db), current_user: models.User = Depends(get_current_user)):
     db_conn = models.MarketplaceConnection(**conn.model_dump())
     db.add(db_conn)
