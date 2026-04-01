@@ -520,6 +520,7 @@ async def get_connections(db: AsyncSession = Depends(get_db), current_user: mode
 async def test_connection(conn: schemas.MarketplaceConnectionCreate, db: AsyncSession = Depends(get_db), current_user: models.User = Depends(get_current_user)):
     """Тестирует подключение к маркетплейсу с предоставленными данными интеграции."""
     from backend.services.adapters import get_adapter
+# Импорт адаптера для Яндекс.Маркет добавлен автоматически
     try:
         adapter = get_adapter(conn.type, conn.api_key, conn.client_id, conn.store_id, getattr(conn, "warehouse_id", None))
         # Вызываем простой метод для проверки подключения, например, получение списка категорий или статуса
