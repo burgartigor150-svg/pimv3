@@ -669,7 +669,12 @@ async def run_agent_task(task_id: str, ai_key: str = "") -> Dict[str, Any]:
         _set_task(task_id, {"stage": "execution_patch_proposal", "progress_percent": 40, "eta_seconds": 210, "updated_at_ts": int(time.time())})
         await _wait_if_paused(task_id)
         _append_team_message(task_id, "backend_dev", "Генерирую патч кода по задаче.")
-        proposal = await generate_code_patch_proposal(ai_config=ai_key, rewrite_plan=rewrite_plan, allowlist_files=allowlist)
+        proposal = await generate_code_patch_proposal(
+            ai_config=ai_key,
+            rewrite_plan=rewrite_plan,
+            allowlist_files=allowlist,
+            task_id=task_id,
+        )
         result["proposal"] = proposal
         if not proposal.get("ok"):
             _set_task(task_id, {"status": "failed", "stage": "failed_patch_proposal", "updated_at_ts": int(time.time()), "result": result})
