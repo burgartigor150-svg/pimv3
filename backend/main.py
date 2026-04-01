@@ -80,6 +80,16 @@ from backend.services.agent_task_console import (
     answer_agent_clarification,
     rollback_task,
 )
+try:
+    from backend.services.agent_metrics import get_task_metrics, get_agent_dashboard, estimate_task_cost as _estimate_cost
+    from backend.services.agent_conventions import run_conventions_update
+    _AGENT_EXTRAS = True
+except Exception:
+    _AGENT_EXTRAS = False
+    def get_task_metrics(tid): return {}
+    def get_agent_dashboard(): return {}
+    def _estimate_cost(tt, desc): return {}
+    async def run_conventions_update(*a, **kw): return {}
 from backend.services.agent_chat import (
     route_message_with_llm,
     compose_assistant_reply_with_llm,
@@ -1112,6 +1122,100 @@ async def agent_task_rollback(
 ):
     """Откатить изменения задачи через git revert."""
     return rollback_task(task_id)
+
+
+
+@app.get("/api/v1/agent/tasks/{task_id}/diff")
+async def agent_task_diff(task_id: str):
+    """Показать git diff изменений задачи."""
+    import subprocess as _sp
+    task = get_agent_task(task_id)
+    if not task.get("ok"):
+        raise HTTPException(status_code=404, detail="task not found")
+    t = task.get("task", {})
+    commit_hash = str(t.get("commit_hash") or "").strip()
+    if not commit_hash:
+        return {"ok": False, "error": "no commit hash yet"}
+    try:
+        result = _sp.run(
+            ["git", "show", "--stat", commit_hash],
+            cwd="/mnt/data/Pimv3", capture_output=True, text=True, timeout=15
+        )
+        diff = _sp.run(
+            ["git", "show", commit_hash],
+            cwd="/mnt/data/Pimv3", capture_output=True, text=True, timeout=30
+        )
+        return {"ok": True, "stat": result.stdout, "diff": diff.stdout[:50000]}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@app.post("/api/v1/agent/tasks/{task_id}/explain")
+async def agent_task_explain(task_id: str):
+    """Объяснить изменения задачи на русском через LLM."""
+    import httpx as _hx
+    task = get_agent_task(task_id)
+    if not task.get("ok"):
+        raise HTTPException(status_code=404, detail="task not found")
+    t = task.get("task", {})
+    ai_key = str(os.getenv("DEEPSEEK_API_KEY") or os.getenv("OPENAI_API_KEY") or "")
+    if not ai_key:
+        return {"ok": False, "error": "no ai key"}
+    result_summary = str(t.get("result", ""))[:2000]
+    prompt = (
+        f"Задача: {t.get('title')}\n"
+        f"Тип: {t.get('task_type')}\n"
+        f"Результат: {result_summary}\n\n"
+        "Объясни на русском языке, что было сделано, какие файлы изменены и зачем. "
+        "Ответ в 3-5 предложениях."
+    )
+    try:
+        async with _hx.AsyncClient(timeout=30) as client:
+            resp = await client.post(
+                "https://api.deepseek.com/v1/chat/completions",
+                headers={"Authorization": f"Bearer {ai_key}"},
+                json={"model": "deepseek-chat", "messages": [{"role": "user", "content": prompt}], "max_tokens": 400},
+            )
+            data = resp.json()
+            explanation = data["choices"][0]["message"]["content"]
+            return {"ok": True, "explanation": explanation}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@app.get("/api/v1/agent/metrics")
+async def agent_metrics_dashboard():
+    """Dashboard агента: сводная статистика."""
+    return get_agent_dashboard()
+
+
+@app.get("/api/v1/agent/metrics/{task_id}")
+async def agent_task_metrics(task_id: str):
+    """Метрики конкретной задачи."""
+    return get_task_metrics(task_id)
+
+
+@app.post("/api/v1/agent/estimate")
+async def agent_estimate_cost(body: dict):
+    """Оценить стоимость задачи до запуска."""
+    task_type = str(body.get("task_type", "backend"))
+    description = str(body.get("description", ""))
+    return _estimate_cost(task_type, description)
+
+
+@app.get("/api/v1/agent/tasks/{task_id}/dependencies")
+async def agent_task_dependencies(task_id: str):
+    """Проверить DAG-зависимости задачи."""
+    from backend.services.agent_task_console import check_task_dependencies
+    return check_task_dependencies(task_id)
+
+
+@app.post("/api/v1/agent/conventions/update")
+async def agent_conventions_update():
+    """Принудительно обновить CONVENTIONS.md на основе истории задач."""
+    ai_key = str(os.getenv("DEEPSEEK_API_KEY") or os.getenv("OPENAI_API_KEY") or "")
+    ai_config = {"api_key": ai_key, "base_url": "https://api.deepseek.com/v1", "model": "deepseek-chat"}
+    return await run_conventions_update("/mnt/data/Pimv3", ai_config, force=True)
 
 
 @app.get("/api/v1/agent/tasks/{task_id}/stream/log")

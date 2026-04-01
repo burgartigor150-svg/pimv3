@@ -32,12 +32,56 @@ from backend.services.github_automation import create_pull_request
 from backend.services.quality_gate import run_quality_gate
 from backend.services.test_orchestrator import run_tests
 from backend.services.helper_agents import auto_spawn_helpers_for_task
+try:
+    from backend.services.agent_metrics import record_task_metrics, estimate_task_cost
+    _METRICS_AVAILABLE = True
+except Exception:
+    _METRICS_AVAILABLE = False
+    def record_task_metrics(*a, **kw): pass
+    def estimate_task_cost(*a, **kw): return {}
 
 _redis = redis.Redis.from_url(os.getenv("REDIS_URL", "redis://localhost:6379/0"), decode_responses=True)
 
 _GIT_LOCK_KEY = "agent:git_execution_lock"
 _GIT_LOCK_TTL = 900  # 15 минут — максимальное время одной задачи
 _GIT_BIN = shutil.which("git") or "/usr/bin/git"
+
+_TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
+_TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
+
+
+def _send_telegram(message: str) -> None:
+    """Отправить уведомление в Telegram (если настроены токен и chat_id)."""
+    if not _TELEGRAM_TOKEN or not _TELEGRAM_CHAT_ID:
+        return
+    import urllib.request, urllib.parse
+    try:
+        url = f"https://api.telegram.org/bot{_TELEGRAM_TOKEN}/sendMessage"
+        data = urllib.parse.urlencode({"chat_id": _TELEGRAM_CHAT_ID, "text": message[:4000], "parse_mode": "HTML"}).encode()
+        urllib.request.urlopen(url, data=data, timeout=5)
+    except Exception:
+        pass
+
+
+def check_task_dependencies(task_id: str) -> Dict[str, Any]:
+    """Проверить, можно ли запустить задачу (все depends_on завершены)."""
+    raw = _redis.hgetall(_task_key(task_id)) or {}
+    if not raw:
+        return {"ok": False, "error": "task not found"}
+    deps_raw = raw.get("depends_on", "")
+    if not deps_raw:
+        return {"ok": True, "blocked_by": []}
+    try:
+        dep_ids = json.loads(deps_raw) if deps_raw.startswith("[") else [d.strip() for d in deps_raw.split(",") if d.strip()]
+    except Exception:
+        dep_ids = []
+    blocked = []
+    for dep_id in dep_ids:
+        dep = _redis.hgetall(_task_key(dep_id)) or {}
+        if str(dep.get("status", "")) != "completed":
+            blocked.append({"task_id": dep_id, "status": dep.get("status", "not_found")})
+    return {"ok": len(blocked) == 0, "blocked_by": blocked}
+
 
 
 def context7_is_connected() -> bool:
@@ -146,6 +190,7 @@ def create_agent_task(
     validation_query: str | None = None,
     web_query: str | None = None,
     max_web_results: int = 5,
+    depends_on: List[str] | None = None,
 ) -> Dict[str, Any]:
     task_id = str(uuid.uuid4())
     now = int(time.time())
@@ -167,6 +212,7 @@ def create_agent_task(
         "updated_at_ts": now,
         "result": {},
         "plan_id": "",
+        "depends_on": json.dumps(depends_on or []),
     }
     _set_task(task_id, obj)
     _redis.lpush("agent_task:items", task_id)
@@ -824,6 +870,22 @@ async def run_agent_task(task_id: str, ai_key: str = "") -> Dict[str, Any]:
     _release_git_lock(task_id)  # [FIX-4] освобождаем лок при успехе
     _append_log(task_id, "Task completed")
     _append_team_message(task_id, "project_manager", "Задача завершена. Отчёт и логи готовы.", kind="done")
+    # Метрики и Telegram
+    try:
+        _task_end_ts = int(time.time())
+        _task_start_ts = int((proposal or {}).get("start_ts") or (_task_end_ts - 60))
+        record_task_metrics(
+            task_id=task_id,
+            task_type=tt,
+            status="completed",
+            steps=int((proposal or {}).get("steps", 0)),
+            total_tokens=int((proposal or {}).get("total_tokens", 0)),
+            duration_seconds=_task_end_ts - _task_start_ts,
+            tools_used=(proposal or {}).get("tools_used", []),
+        )
+    except Exception as _me:
+        _append_log(task_id, f"Metrics record skipped: {_me}")
+    _send_telegram(f"<b>Task completed</b>\n{task.get('title', task_id)}\nType: {tt}")
 
     # Сохраняем успешный кейс в память агента для будущих задач
     try:
@@ -860,6 +922,7 @@ def run_agent_task_in_background(task_id: str, ai_key: str = "") -> None:
             },
         )
         _append_log(task_id, f"Task failed: {e}")
+        _send_telegram(f"<b>Task FAILED</b>\n{task_id}\n{str(e)[:500]}")
 
 
 def rollback_task(task_id: str, workspace_root: str = "/mnt/data/Pimv3") -> Dict[str, Any]:
