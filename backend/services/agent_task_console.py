@@ -749,6 +749,19 @@ async def run_agent_task(task_id: str, ai_key: str = "") -> Dict[str, Any]:
             _set_task(task_id, {"status": "failed", "stage": "failed_git_commit", "updated_at_ts": int(time.time()), "result": result})
             return {"ok": False, "error": "git_commit_failed", "detail": cm}
 
+        # Сохраняем commit hash для возможного rollback
+        try:
+            _rev = subprocess.run(
+                [_GIT_BIN, "rev-parse", "HEAD"],
+                cwd=workspace_root, capture_output=True, text=True, timeout=10
+            )
+            commit_hash = (_rev.stdout or "").strip()
+            if commit_hash:
+                _set_task(task_id, {"commit_hash": commit_hash})
+                _append_log(task_id, f"Commit hash saved: {commit_hash[:12]}")
+        except Exception:
+            pass
+
         branch = str(br.get("branch") or "")
         ps = push_branch(workspace_root, branch)
         result["git_push"] = ps
@@ -822,6 +835,47 @@ def run_agent_task_in_background(task_id: str, ai_key: str = "") -> None:
             },
         )
         _append_log(task_id, f"Task failed: {e}")
+
+
+def rollback_task(task_id: str, workspace_root: str = "/mnt/data/Pimv3") -> Dict[str, Any]:
+    """[ROLLBACK] Откатить изменения задачи через git revert."""
+    raw = _redis.hgetall(_task_key(task_id)) or {}
+    if not raw:
+        return {"ok": False, "error": "task not found"}
+    status = str(raw.get("status") or "")
+    if status != "completed":
+        return {"ok": False, "error": f"task is not completed (status={status}), cannot rollback"}
+    commit_hash = str(raw.get("commit_hash") or "").strip()
+    if not commit_hash:
+        return {"ok": False, "error": "no commit_hash saved for this task, cannot rollback"}
+
+    try:
+        # git revert --no-edit <hash>
+        res = subprocess.run(
+            [_GIT_BIN, "revert", "--no-edit", commit_hash],
+            cwd=workspace_root, capture_output=True, text=True, timeout=60
+        )
+        if res.returncode != 0:
+            return {"ok": False, "error": f"git revert failed: {res.stderr[:500]}"}
+
+        # Получаем новый revert-коммит
+        rev = subprocess.run(
+            [_GIT_BIN, "rev-parse", "HEAD"],
+            cwd=workspace_root, capture_output=True, text=True, timeout=10
+        )
+        revert_hash = (rev.stdout or "").strip()
+
+        _set_task(task_id, {
+            "status": "rolled_back",
+            "stage": "rolled_back",
+            "revert_commit_hash": revert_hash,
+            "updated_at_ts": int(time.time()),
+        })
+        _append_log(task_id, f"Rolled back commit {commit_hash[:12]} → revert {revert_hash[:12]}")
+        _append_team_message(task_id, "project_manager", f"Задача откатана (revert {revert_hash[:12]}).", kind="rollback")
+        return {"ok": True, "reverted_commit": commit_hash, "revert_commit": revert_hash}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
 
 
 def answer_agent_clarification(task_id: str, answer: str) -> Dict[str, Any]:
