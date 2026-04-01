@@ -419,6 +419,16 @@ def _git_reset_hard(workspace_root: str) -> Dict[str, Any]:
 
 def _acquire_git_lock(task_id: str) -> bool:
     """[FIX-4] Захватываем Redis-лок — только один агент работает с git одновременно."""
+    current = _redis.get(_GIT_LOCK_KEY)
+    if current == task_id:
+        # Reentrant: this task already holds the lock — refresh TTL and continue
+        _redis.expire(_GIT_LOCK_KEY, _GIT_LOCK_TTL)
+        return True
+    # If lock is held by a dead/failed task — steal it
+    if current:
+        holder_status = (_redis.hget(f"agent_task:{current}", "status") or "")
+        if holder_status in ("failed", "completed", "cancelled"):
+            _redis.delete(_GIT_LOCK_KEY)
     return bool(_redis.set(_GIT_LOCK_KEY, task_id, nx=True, ex=_GIT_LOCK_TTL))
 
 
@@ -671,12 +681,17 @@ async def run_agent_task(task_id: str, ai_key: str = "") -> Dict[str, Any]:
             return {"ok": False, "error": "dirty_worktree", "task_id": task_id}
 
         # [FIX-4] Захватываем Redis-лок — один агент работает с git одновременно
-        if not _acquire_git_lock(task_id):
+        _lock_wait = 0
+        while not _acquire_git_lock(task_id):
             owner = _redis.get(_GIT_LOCK_KEY) or "unknown"
-            _set_task(task_id, {"status": "failed", "stage": "failed_git_lock", "updated_at_ts": int(time.time())})
-            _append_log(task_id, f"Git lock busy, held by task {owner}")
-            _append_team_message(task_id, "project_manager", f"Другая задача ({owner}) сейчас работает с репозиторием. Попробуй позже.", kind="error")
-            return {"ok": False, "error": "git_lock_busy", "lock_owner": owner}
+            _append_log(task_id, f"Git lock busy (held by {owner}), waiting 10s...")
+            _set_task(task_id, {"stage": "waiting_git_lock", "updated_at_ts": int(time.time())})
+            await asyncio.sleep(10)
+            _lock_wait += 10
+            if _lock_wait >= 120:
+                _set_task(task_id, {"status": "failed", "stage": "failed_git_lock", "updated_at_ts": int(time.time())})
+                _append_log(task_id, "Git lock wait timeout (120s)")
+                return {"ok": False, "error": "git_lock_timeout"}
 
         _append_log(task_id, f"Git lock acquired by {task_id}")
 

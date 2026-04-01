@@ -1,4 +1,4 @@
-import { useRef, useMemo, useState, useEffect } from 'react'
+import { useRef, useMemo, useState, useEffect, useCallback } from 'react'
 import { Canvas, useFrame, useThree } from '@react-three/fiber'
 import * as THREE from 'three'
 
@@ -17,479 +17,788 @@ interface AgentDef {
   role: string
   color: string
   pos: [number, number, number]
+  deskPos: [number, number, number]
   activity: 'working' | 'meeting' | 'idle' | 'running'
+  facing: number // rotation Y
 }
 
 const AGENTS: AgentDef[] = [
-  { id: 'planner',  name: 'Планировщик', role: 'Task Planner',   color: '#6366f1', pos: [-4,   0, -2],  activity: 'working'  },
-  { id: 'coder',    name: 'Кодер',       role: 'Code Writer',    color: '#22d3ee', pos: [-1.5, 0, -2],  activity: 'working'  },
-  { id: 'reviewer', name: 'Ревьюер',     role: 'Code Reviewer',  color: '#a855f7', pos: [1,    0, -2],  activity: 'working'  },
-  { id: 'qa',       name: 'QA',          role: 'Quality Gate',   color: '#34d399', pos: [3.5,  0, -2],  activity: 'idle'     },
-  { id: 'devops',   name: 'DevOps',      role: 'CI/CD Agent',    color: '#f59e0b', pos: [-4,   0, 1.5], activity: 'running'  },
-  { id: 'analyst',  name: 'Аналитик',    role: 'Data Analyst',   color: '#f87171', pos: [-1.5, 0, 1.5], activity: 'meeting'  },
-  { id: 'designer', name: 'Дизайнер',    role: 'UI Designer',    color: '#e879f9', pos: [1,    0, 1.5], activity: 'meeting'  },
-  { id: 'manager',  name: 'Менеджер',    role: 'Orchestrator',   color: '#fbbf24', pos: [3.5,  0, 1.5], activity: 'meeting'  },
+  { id: 'planner',  name: 'Планировщик', role: 'Task Planner',  color: '#6366f1', pos: [-5.5, 0, -3],   deskPos: [-5.5, 0, -3.8],  activity: 'working', facing: 0 },
+  { id: 'coder',    name: 'Кодер',       role: 'Code Writer',   color: '#22d3ee', pos: [-2.5, 0, -3],   deskPos: [-2.5, 0, -3.8],  activity: 'working', facing: 0 },
+  { id: 'reviewer', name: 'Ревьюер',     role: 'Code Reviewer', color: '#a855f7', pos: [0.5,  0, -3],   deskPos: [0.5,  0, -3.8],  activity: 'working', facing: 0 },
+  { id: 'qa',       name: 'QA',          role: 'Quality Gate',  color: '#34d399', pos: [3.5,  0, -3],   deskPos: [3.5,  0, -3.8],  activity: 'idle',    facing: 0 },
+  { id: 'devops',   name: 'DevOps',      role: 'CI/CD Agent',   color: '#f59e0b', pos: [-5.5, 0, 0.5],  deskPos: [-5.5, 0, 1.3],   activity: 'running', facing: Math.PI },
+  { id: 'analyst',  name: 'Аналитик',    role: 'Data Analyst',  color: '#f87171', pos: [-1,   0, 3.8],  deskPos: [-1,   0, 3.8],   activity: 'meeting', facing: 0 },
+  { id: 'designer', name: 'Дизайнер',    role: 'UI Designer',   color: '#e879f9', pos: [1,    0, 3.8],  deskPos: [1,    0, 3.8],   activity: 'meeting', facing: 0 },
+  { id: 'manager',  name: 'Менеджер',    role: 'Orchestrator',  color: '#fbbf24', pos: [0,    0, 2.5],  deskPos: [0,    0, 2.5],   activity: 'meeting', facing: 0 },
 ]
 
-// ─── OrbitControls вручную ─────────────────────────────────────────────────────
+// ─── Camera controls ──────────────────────────────────────────────────────────
 
-function OrbitControlsManual() {
+function CameraRig() {
   const { camera, gl } = useThree()
-  const state = useRef({ dragging: false, lastX: 0, lastY: 0, theta: 0.3, phi: 0.9, radius: 10 })
+  const s = useRef({
+    isDragging: false, lastX: 0, lastY: 0,
+    theta: -0.2, phi: 0.75, radius: 13,
+    targetTheta: -0.2, targetPhi: 0.75, targetRadius: 13
+  })
 
   useEffect(() => {
     const el = gl.domElement
-    const onDown = (e: MouseEvent) => { state.current.dragging = true; state.current.lastX = e.clientX; state.current.lastY = e.clientY }
-    const onUp = () => { state.current.dragging = false }
+    const onDown = (e: MouseEvent) => {
+      if (e.button !== 0) return
+      s.current.isDragging = true
+      s.current.lastX = e.clientX
+      s.current.lastY = e.clientY
+    }
+    const onUp = () => { s.current.isDragging = false }
     const onMove = (e: MouseEvent) => {
-      if (!state.current.dragging) return
-      const dx = (e.clientX - state.current.lastX) * 0.01
-      const dy = (e.clientY - state.current.lastY) * 0.01
-      state.current.theta -= dx
-      state.current.phi = Math.max(0.2, Math.min(1.4, state.current.phi + dy))
-      state.current.lastX = e.clientX; state.current.lastY = e.clientY
+      if (!s.current.isDragging) return
+      const dx = (e.clientX - s.current.lastX) * 0.008
+      const dy = (e.clientY - s.current.lastY) * 0.008
+      s.current.targetTheta -= dx
+      s.current.targetPhi = Math.max(0.25, Math.min(1.35, s.current.targetPhi + dy))
+      s.current.lastX = e.clientX
+      s.current.lastY = e.clientY
     }
     const onWheel = (e: WheelEvent) => {
-      state.current.radius = Math.max(4, Math.min(16, state.current.radius + e.deltaY * 0.01))
+      e.preventDefault()
+      s.current.targetRadius = Math.max(5, Math.min(20, s.current.targetRadius + e.deltaY * 0.015))
+    }
+    const onTouch = (e: TouchEvent) => {
+      if (e.touches.length === 1) {
+        s.current.isDragging = true
+        s.current.lastX = e.touches[0].clientX
+        s.current.lastY = e.touches[0].clientY
+      }
     }
     el.addEventListener('mousedown', onDown)
     window.addEventListener('mouseup', onUp)
     window.addEventListener('mousemove', onMove)
-    el.addEventListener('wheel', onWheel, { passive: true })
-    return () => { el.removeEventListener('mousedown', onDown); window.removeEventListener('mouseup', onUp); window.removeEventListener('mousemove', onMove); el.removeEventListener('wheel', onWheel) }
+    el.addEventListener('wheel', onWheel, { passive: false })
+    el.addEventListener('touchstart', onTouch, { passive: true })
+    return () => {
+      el.removeEventListener('mousedown', onDown)
+      window.removeEventListener('mouseup', onUp)
+      window.removeEventListener('mousemove', onMove)
+      el.removeEventListener('wheel', onWheel)
+      el.removeEventListener('touchstart', onTouch)
+    }
   }, [gl])
 
   useFrame(() => {
-    const { theta, phi, radius } = state.current
+    const d = s.current
+    d.theta += (d.targetTheta - d.theta) * 0.1
+    d.phi += (d.targetPhi - d.phi) * 0.1
+    d.radius += (d.targetRadius - d.radius) * 0.1
     camera.position.set(
-      radius * Math.sin(phi) * Math.sin(theta),
-      radius * Math.cos(phi) + 1,
-      radius * Math.sin(phi) * Math.cos(theta),
+      d.radius * Math.sin(d.phi) * Math.sin(d.theta),
+      d.radius * Math.cos(d.phi) + 0.5,
+      d.radius * Math.sin(d.phi) * Math.cos(d.theta),
     )
-    camera.lookAt(0, 0.5, 0)
+    camera.lookAt(0, 1, 0)
   })
   return null
 }
 
-// ─── Пол ──────────────────────────────────────────────────────────────────────
+// ─── Office room ──────────────────────────────────────────────────────────────
 
-function Floor() {
-  return (
-    <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, 0, 0]} receiveShadow>
-      <planeGeometry args={[20, 14]} />
-      <meshStandardMaterial color="#080818" roughness={0.9} metalness={0.2} />
-    </mesh>
-  )
-}
+function Room() {
+  const wallColor = '#d4c9bc'
+  const floorColor = '#8b7355'
+  const ceilColor = '#e8e0d5'
 
-// ─── Стены ────────────────────────────────────────────────────────────────────
-
-function Walls() {
   return (
     <group>
-      <mesh position={[0, 2, -5]} receiveShadow>
-        <planeGeometry args={[20, 6]} />
-        <meshStandardMaterial color="#0d0d20" roughness={0.9} />
+      {/* Floor */}
+      <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, 0, 0]} receiveShadow>
+        <planeGeometry args={[18, 14]} />
+        <meshStandardMaterial color={floorColor} roughness={0.8} />
       </mesh>
-      <mesh position={[-7.5, 2, 0]} rotation={[0, Math.PI / 2, 0]} receiveShadow>
-        <planeGeometry args={[12, 6]} />
-        <meshStandardMaterial color="#0b0b1c" roughness={0.9} />
+      {/* Floor tiles pattern */}
+      {Array.from({ length: 9 }, (_, xi) => Array.from({ length: 7 }, (_, zi) => (
+        <mesh key={`t${xi}${zi}`} rotation={[-Math.PI / 2, 0, 0]} position={[xi * 2 - 8, 0.001, zi * 2 - 6]}>
+          <planeGeometry args={[1.9, 1.9]} />
+          <meshStandardMaterial color={(xi + zi) % 2 === 0 ? '#9c8660' : '#7a6445'} roughness={0.9} />
+        </mesh>
+      )))}
+      {/* Ceiling */}
+      <mesh rotation={[Math.PI / 2, 0, 0]} position={[0, 4, 0]}>
+        <planeGeometry args={[18, 14]} />
+        <meshStandardMaterial color={ceilColor} roughness={1} />
       </mesh>
-      <mesh position={[7.5, 2, 0]} rotation={[0, -Math.PI / 2, 0]} receiveShadow>
-        <planeGeometry args={[12, 6]} />
-        <meshStandardMaterial color="#0b0b1c" roughness={0.9} />
+      {/* Back wall */}
+      <mesh position={[0, 2, -7]} receiveShadow>
+        <planeGeometry args={[18, 4]} />
+        <meshStandardMaterial color={wallColor} roughness={0.9} />
+      </mesh>
+      {/* Left wall */}
+      <mesh position={[-9, 2, 0]} rotation={[0, Math.PI / 2, 0]} receiveShadow>
+        <planeGeometry args={[14, 4]} />
+        <meshStandardMaterial color="#ccc3b5" roughness={0.9} />
+      </mesh>
+      {/* Right wall */}
+      <mesh position={[9, 2, 0]} rotation={[0, -Math.PI / 2, 0]} receiveShadow>
+        <planeGeometry args={[14, 4]} />
+        <meshStandardMaterial color="#ccc3b5" roughness={0.9} />
+      </mesh>
+      {/* Windows on back wall */}
+      {[-4, 4].map(x => (
+        <group key={x} position={[x, 2.2, -6.95]}>
+          <mesh>
+            <planeGeometry args={[2.2, 1.6]} />
+            <meshStandardMaterial color="#87ceeb" emissive="#87ceeb" emissiveIntensity={0.3} transparent opacity={0.7} />
+          </mesh>
+          {/* Window frame */}
+          <mesh position={[0, 0, 0.01]}>
+            <planeGeometry args={[2.3, 1.7]} />
+            <meshStandardMaterial color="#8b7355" roughness={0.5} />
+          </mesh>
+          <mesh position={[0, 0, 0.02]}>
+            <planeGeometry args={[2.2, 1.6]} />
+            <meshStandardMaterial color="#87ceeb" emissive="#87ceeb" emissiveIntensity={0.3} transparent opacity={0.7} />
+          </mesh>
+          <pointLight position={[0, 0, 0.5]} color="#fff8e1" intensity={1.5} distance={6} />
+        </group>
+      ))}
+      {/* Baseboard */}
+      <mesh position={[0, 0.05, -6.95]}>
+        <boxGeometry args={[18, 0.12, 0.05]} />
+        <meshStandardMaterial color="#6b5b45" roughness={0.5} />
       </mesh>
     </group>
   )
 }
 
-// ─── Стол ─────────────────────────────────────────────────────────────────────
+// ─── Office furniture ─────────────────────────────────────────────────────────
 
-function Desk({ pos, color }: { pos: [number, number, number]; color: string }) {
+function Desk({ pos, color, rotation = 0 }: { pos: [number, number, number]; color: string; rotation?: number }) {
   return (
-    <group position={pos}>
-      <mesh position={[0, 0.4, 0]} castShadow receiveShadow>
-        <boxGeometry args={[1.2, 0.05, 0.65]} />
-        <meshStandardMaterial color="#181830" roughness={0.5} metalness={0.3} />
+    <group position={pos} rotation={[0, rotation, 0]}>
+      {/* Desktop */}
+      <mesh position={[0, 0.74, 0]} castShadow receiveShadow>
+        <boxGeometry args={[1.4, 0.04, 0.75]} />
+        <meshStandardMaterial color="#c8b89a" roughness={0.4} metalness={0.1} />
       </mesh>
-      {([-0.55, 0.55] as number[]).flatMap(x =>
-        ([-0.28, 0.28] as number[]).map((z, j) => (
-          <mesh key={`${x}${z}`} position={[x, 0.2, z]} castShadow>
-            <boxGeometry args={[0.05, 0.4, 0.05]} />
-            <meshStandardMaterial color="#111122" />
+      {/* Legs */}
+      {([-0.64, 0.64] as number[]).flatMap(x =>
+        ([-0.32, 0.32] as number[]).map(z => (
+          <mesh key={`${x}${z}`} position={[x, 0.37, z]} castShadow>
+            <boxGeometry args={[0.05, 0.74, 0.05]} />
+            <meshStandardMaterial color="#8b7355" roughness={0.5} />
           </mesh>
         ))
       )}
-      {/* Монитор */}
-      <mesh position={[0, 0.72, -0.22]} castShadow>
-        <boxGeometry args={[0.5, 0.3, 0.02]} />
-        <meshStandardMaterial color={color} emissive={color} emissiveIntensity={0.5} roughness={0.2} />
+      {/* Monitor */}
+      <mesh position={[0, 1.12, -0.28]} castShadow>
+        <boxGeometry args={[0.62, 0.38, 0.03]} />
+        <meshStandardMaterial color="#1a1a2e" roughness={0.3} metalness={0.8} />
       </mesh>
-      <pointLight position={[0, 0.6, -0.1]} color={color} intensity={0.5} distance={1.5} />
+      {/* Screen glow */}
+      <mesh position={[0, 1.12, -0.26]}>
+        <planeGeometry args={[0.56, 0.32]} />
+        <meshStandardMaterial color={color} emissive={color} emissiveIntensity={0.6} transparent opacity={0.9} />
+      </mesh>
+      {/* Monitor stand */}
+      <mesh position={[0, 0.87, -0.24]} castShadow>
+        <boxGeometry args={[0.08, 0.26, 0.08]} />
+        <meshStandardMaterial color="#2a2a3e" roughness={0.5} metalness={0.6} />
+      </mesh>
+      {/* Keyboard */}
+      <mesh position={[0, 0.77, 0.1]}>
+        <boxGeometry args={[0.5, 0.02, 0.18]} />
+        <meshStandardMaterial color="#2a2a3e" roughness={0.6} />
+      </mesh>
+      <pointLight position={[0, 1, -0.1]} color={color} intensity={0.4} distance={2} />
     </group>
   )
 }
 
-// ─── Стул ─────────────────────────────────────────────────────────────────────
-
-function Chair({ pos }: { pos: [number, number, number] }) {
+function Chair({ pos, rotation = 0 }: { pos: [number, number, number]; rotation?: number }) {
   return (
-    <group position={pos}>
-      <mesh position={[0, 0.26, 0]} castShadow>
-        <boxGeometry args={[0.44, 0.05, 0.44]} />
-        <meshStandardMaterial color="#1a1a30" roughness={0.9} />
+    <group position={pos} rotation={[0, rotation, 0]}>
+      {/* Seat */}
+      <mesh position={[0, 0.44, 0]} castShadow>
+        <boxGeometry args={[0.46, 0.06, 0.46]} />
+        <meshStandardMaterial color="#3a3a5c" roughness={0.8} />
       </mesh>
-      <mesh position={[0, 0.62, -0.2]} castShadow>
-        <boxGeometry args={[0.44, 0.7, 0.05]} />
-        <meshStandardMaterial color="#1a1a30" roughness={0.9} />
+      {/* Back */}
+      <mesh position={[0, 0.82, -0.22]} castShadow>
+        <boxGeometry args={[0.46, 0.62, 0.06]} />
+        <meshStandardMaterial color="#3a3a5c" roughness={0.8} />
+      </mesh>
+      {/* Armrests */}
+      {([-0.25, 0.25] as number[]).map(x => (
+        <mesh key={x} position={[x, 0.6, 0]} castShadow>
+          <boxGeometry args={[0.04, 0.04, 0.42]} />
+          <meshStandardMaterial color="#2a2a4c" roughness={0.6} />
+        </mesh>
+      ))}
+      {/* Pedestal */}
+      <mesh position={[0, 0.22, 0]}>
+        <cylinderGeometry args={[0.04, 0.04, 0.44, 8]} />
+        <meshStandardMaterial color="#1a1a2e" metalness={0.8} roughness={0.3} />
+      </mesh>
+      {/* Wheels base */}
+      <mesh position={[0, 0.06, 0]}>
+        <cylinderGeometry args={[0.22, 0.22, 0.04, 5]} />
+        <meshStandardMaterial color="#1a1a2e" metalness={0.7} roughness={0.4} />
       </mesh>
     </group>
   )
 }
-
-// ─── Круглый стол для совещаний ────────────────────────────────────────────────
 
 function MeetingTable() {
   return (
-    <group position={[0, 0, 3.5]}>
-      <mesh position={[0, 0.4, 0]} castShadow receiveShadow>
-        <cylinderGeometry args={[1.1, 1.1, 0.06, 32]} />
-        <meshStandardMaterial color="#12122a" roughness={0.4} metalness={0.5} />
+    <group position={[0, 0, 3]}>
+      {/* Table top */}
+      <mesh position={[0, 0.74, 0]} castShadow receiveShadow>
+        <cylinderGeometry args={[1.4, 1.4, 0.06, 32]} />
+        <meshStandardMaterial color="#c8b89a" roughness={0.3} metalness={0.1} />
       </mesh>
-      <mesh position={[0, 0.2, 0]}>
-        <cylinderGeometry args={[0.05, 0.05, 0.4, 8]} />
-        <meshStandardMaterial color="#111122" />
+      {/* Pedestal */}
+      <mesh position={[0, 0.37, 0]}>
+        <cylinderGeometry args={[0.06, 0.08, 0.74, 8]} />
+        <meshStandardMaterial color="#8b7355" roughness={0.4} />
       </mesh>
-      {/* Голограмма */}
-      <mesh position={[0, 0.44, 0]} rotation={[-Math.PI / 2, 0, 0]}>
-        <circleGeometry args={[0.55, 32]} />
-        <meshStandardMaterial color="#6366f1" emissive="#6366f1" emissiveIntensity={0.4} transparent opacity={0.35} />
+      {/* Base plate */}
+      <mesh position={[0, 0.04, 0]}>
+        <cylinderGeometry args={[0.5, 0.5, 0.06, 16]} />
+        <meshStandardMaterial color="#6b5b45" roughness={0.5} />
       </mesh>
-      <pointLight position={[0, 1, 0]} color="#6366f1" intensity={1.5} distance={3} />
+      {/* Center lamp */}
+      <mesh position={[0, 2.8, 0]}>
+        <cylinderGeometry args={[0.18, 0.3, 0.12, 16]} />
+        <meshStandardMaterial color="#e8d5a0" emissive="#fff8e1" emissiveIntensity={1} />
+      </mesh>
+      <pointLight position={[0, 2.6, 0]} color="#fff8e1" intensity={3} distance={4} castShadow />
     </group>
   )
 }
 
-// ─── Неоновые полосы ──────────────────────────────────────────────────────────
-
-function NeonStrips() {
+function Bookshelf({ pos }: { pos: [number, number, number] }) {
   return (
-    <group>
-      {([-3, 0, 3] as number[]).map((x) => (
-        <group key={x} position={[x, 3.8, 0]}>
-          <mesh>
-            <boxGeometry args={[0.05, 0.03, 10]} />
-            <meshStandardMaterial color="#6366f1" emissive="#6366f1" emissiveIntensity={3} />
+    <group position={pos}>
+      <mesh position={[0, 1.5, 0]} castShadow>
+        <boxGeometry args={[1.2, 3, 0.3]} />
+        <meshStandardMaterial color="#8b7355" roughness={0.6} />
+      </mesh>
+      {[0.6, 1.2, 1.8, 2.4].map((y, i) => (
+        <mesh key={y} position={[0, y, 0.02]} castShadow>
+          <boxGeometry args={[1.1, 0.04, 0.28]} />
+          <meshStandardMaterial color="#6b5b45" roughness={0.7} />
+        </mesh>
+      ))}
+      {/* Books */}
+      {[0.6, 1.2, 1.8].map((y, si) =>
+        Array.from({ length: 6 }, (_, bi) => (
+          <mesh key={`${y}-${bi}`} position={[-0.42 + bi * 0.16, y + 0.18, 0]} castShadow>
+            <boxGeometry args={[0.12, 0.32, 0.22]} />
+            <meshStandardMaterial color={['#e74c3c','#3498db','#2ecc71','#f39c12','#9b59b6','#1abc9c'][bi]} roughness={0.8} />
           </mesh>
-          <pointLight color="#6366f1" intensity={0.6} distance={5} />
-        </group>
+        ))
+      )}
+    </group>
+  )
+}
+
+function PlantPot({ pos }: { pos: [number, number, number] }) {
+  return (
+    <group position={pos}>
+      <mesh position={[0, 0.18, 0]} castShadow>
+        <cylinderGeometry args={[0.14, 0.1, 0.28, 12]} />
+        <meshStandardMaterial color="#c1440e" roughness={0.8} />
+      </mesh>
+      <mesh position={[0, 0.42, 0]} castShadow>
+        <sphereGeometry args={[0.22, 10, 8]} />
+        <meshStandardMaterial color="#2d8a4e" roughness={1} />
+      </mesh>
+      {/* Leaves */}
+      {[0, 1, 2, 3].map(i => (
+        <mesh key={i} position={[Math.sin(i * Math.PI / 2) * 0.18, 0.48, Math.cos(i * Math.PI / 2) * 0.18]} rotation={[0.3, i * Math.PI / 2, 0]} castShadow>
+          <boxGeometry args={[0.04, 0.22, 0.08]} />
+          <meshStandardMaterial color="#1d6b35" roughness={1} />
+        </mesh>
       ))}
     </group>
   )
 }
 
-// ─── Частицы данных ───────────────────────────────────────────────────────────
-
-function Particles() {
-  const mesh = useRef<THREE.InstancedMesh>(null!)
-  const count = 50
-  const data = useMemo(() => Array.from({ length: count }, () => ({
-    x: (Math.random() - 0.5) * 14, y: Math.random() * 3 + 0.3, z: (Math.random() - 0.5) * 8,
-    s: Math.random() * 0.3 + 0.1, o: Math.random() * Math.PI * 2,
-  })), [])
-  const dummy = useMemo(() => new THREE.Object3D(), [])
-
-  useFrame(({ clock }) => {
-    const t = clock.getElapsedTime()
-    data.forEach((d, i) => {
-      dummy.position.set(d.x + Math.sin(t * d.s + d.o) * 0.4, d.y + Math.sin(t * d.s * 1.3 + d.o) * 0.25, d.z + Math.cos(t * d.s + d.o) * 0.3)
-      dummy.scale.setScalar(0.018 + Math.sin(t + d.o) * 0.006)
-      dummy.updateMatrix()
-      mesh.current?.setMatrixAt(i, dummy.matrix)
-    })
-    if (mesh.current) mesh.current.instanceMatrix.needsUpdate = true
-  })
-
+function CeilingLight({ pos }: { pos: [number, number, number] }) {
   return (
-    <instancedMesh ref={mesh} args={[undefined, undefined, count]}>
-      <octahedronGeometry args={[1, 0]} />
-      <meshStandardMaterial color="#6366f1" emissive="#6366f1" emissiveIntensity={2.5} transparent opacity={0.65} />
-    </instancedMesh>
+    <group position={pos}>
+      <mesh>
+        <boxGeometry args={[0.8, 0.04, 0.25]} />
+        <meshStandardMaterial color="#e8e0d5" emissive="#fff8e1" emissiveIntensity={0.8} />
+      </mesh>
+      <pointLight color="#fff8e1" intensity={1.2} distance={6} castShadow />
+    </group>
   )
 }
 
-// ─── Агент ────────────────────────────────────────────────────────────────────
+// ─── Human figure ─────────────────────────────────────────────────────────────
 
-function AgentFigure({ agent, isActive, onClick, taskStatus }: {
-  agent: AgentDef; isActive: boolean; onClick: () => void; taskStatus?: string
+function HumanFigure({ agent, isActive, onClick, taskStatus, chatMsg }: {
+  agent: AgentDef
+  isActive: boolean
+  onClick: () => void
+  taskStatus?: string
+  chatMsg?: string
 }) {
   const group = useRef<THREE.Group>(null!)
+  const leftArm = useRef<THREE.Mesh>(null!)
+  const rightArm = useRef<THREE.Mesh>(null!)
+  const leftLeg = useRef<THREE.Mesh>(null!)
+  const rightLeg = useRef<THREE.Mesh>(null!)
   const head = useRef<THREE.Mesh>(null!)
-  const t = useRef(Math.random() * Math.PI * 2)
   const hovered = useRef(false)
+  const t = useRef(Math.random() * Math.PI * 2)
 
   const activity = taskStatus === 'running' ? 'running' : agent.activity
 
   useFrame((_, dt) => {
     t.current += dt
     if (!group.current) return
-    if (activity === 'working') {
-      group.current.rotation.x = Math.sin(t.current * 2.5) * 0.05
-      if (head.current) head.current.rotation.x = -Math.sin(t.current * 2.5) * 0.04
-    } else if (activity === 'running') {
-      group.current.position.x = agent.pos[0] + Math.sin(t.current * 4) * 0.04
-      group.current.rotation.z = Math.sin(t.current * 4) * 0.05
-    } else if (activity === 'meeting') {
-      if (head.current) head.current.rotation.x = Math.sin(t.current * 1.2) * 0.1
-      group.current.rotation.y = Math.sin(t.current * 0.4) * 0.12
+
+    const tc = t.current
+    const speed = activity === 'running' ? 8 : activity === 'working' ? 3 : 1.5
+
+    // Arm swing
+    if (leftArm.current) leftArm.current.rotation.x = Math.sin(tc * speed) * (activity === 'running' ? 0.6 : activity === 'working' ? 0.25 : 0.12)
+    if (rightArm.current) rightArm.current.rotation.x = -Math.sin(tc * speed) * (activity === 'running' ? 0.6 : activity === 'working' ? 0.25 : 0.12)
+
+    // Leg movement (only for running/walking)
+    if (activity === 'running') {
+      if (leftLeg.current) leftLeg.current.rotation.x = Math.sin(tc * speed) * 0.4
+      if (rightLeg.current) rightLeg.current.rotation.x = -Math.sin(tc * speed) * 0.4
+      group.current.position.y = Math.abs(Math.sin(tc * speed)) * 0.04
     } else {
-      group.current.position.y = Math.sin(t.current * 0.7) * 0.008
+      if (leftLeg.current) leftLeg.current.rotation.x = 0
+      if (rightLeg.current) rightLeg.current.rotation.x = 0
+      group.current.position.y = 0
     }
-    const target = hovered.current || isActive ? 1.15 : 1
-    const s = group.current.scale.x
-    const ns = s + (target - s) * 0.1
+
+    // Head movement
+    if (head.current) {
+      if (activity === 'working') {
+        head.current.rotation.x = -0.25 + Math.sin(tc * 0.5) * 0.05  // looking at screen
+      } else if (activity === 'meeting') {
+        head.current.rotation.y = Math.sin(tc * 0.6) * 0.3  // looking around
+        head.current.rotation.x = Math.sin(tc * 0.4) * 0.08
+      } else {
+        head.current.rotation.x = 0
+        head.current.rotation.y = Math.sin(tc * 0.3) * 0.1
+      }
+    }
+
+    // Idle breathing
+    if (activity === 'idle') {
+      group.current.position.y = Math.sin(tc * 0.8) * 0.008
+    }
+
+    // Scale on hover/active
+    const target = hovered.current || isActive ? 1.08 : 1
+    const ns = group.current.scale.x + (target - group.current.scale.x) * 0.12
     group.current.scale.setScalar(ns)
   })
+
+  const skinColor = '#f5c5a3'
+  const shirtColor = agent.color
 
   return (
     <group
       ref={group}
       position={agent.pos}
-      onClick={(e) => { e.stopPropagation(); onClick() }}
+      rotation={[0, agent.facing, 0]}
+      onClick={e => { e.stopPropagation(); onClick() }}
       onPointerOver={() => { hovered.current = true; document.body.style.cursor = 'pointer' }}
       onPointerOut={() => { hovered.current = false; document.body.style.cursor = 'auto' }}
     >
-      {/* Аура */}
-      <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, 0.01, 0]}>
-        <circleGeometry args={[0.25, 20]} />
-        <meshStandardMaterial color={agent.color} emissive={agent.color} emissiveIntensity={isActive ? 1.2 : 0.4} transparent opacity={0.3} />
+      {/* Shadow under feet */}
+      <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, 0.002, 0]}>
+        <circleGeometry args={[0.22, 16]} />
+        <meshStandardMaterial color="#000" transparent opacity={0.15} />
       </mesh>
-      {/* Ноги */}
+
+      {/* Left leg */}
+      <mesh ref={leftLeg} position={[-0.09, 0.28, 0]} castShadow>
+        <boxGeometry args={[0.1, 0.56, 0.1]} />
+        <meshStandardMaterial color="#2c3e50" roughness={0.8} />
+      </mesh>
+      {/* Right leg */}
+      <mesh ref={rightLeg} position={[0.09, 0.28, 0]} castShadow>
+        <boxGeometry args={[0.1, 0.56, 0.1]} />
+        <meshStandardMaterial color="#2c3e50" roughness={0.8} />
+      </mesh>
+      {/* Shoes */}
+      {([-0.09, 0.09] as number[]).map(x => (
+        <mesh key={x} position={[x, 0.04, 0.04]} castShadow>
+          <boxGeometry args={[0.12, 0.08, 0.2]} />
+          <meshStandardMaterial color="#1a1a2e" roughness={0.5} />
+        </mesh>
+      ))}
+
+      {/* Torso / shirt */}
+      <mesh position={[0, 0.82, 0]} castShadow>
+        <boxGeometry args={[0.3, 0.4, 0.17]} />
+        <meshStandardMaterial color={shirtColor} roughness={0.6} />
+      </mesh>
+      {/* Collar */}
+      <mesh position={[0, 0.99, 0.06]}>
+        <boxGeometry args={[0.14, 0.06, 0.04]} />
+        <meshStandardMaterial color="#fff" roughness={0.5} />
+      </mesh>
+
+      {/* Left arm */}
+      <mesh ref={leftArm} position={[-0.2, 0.82, 0]} castShadow>
+        <boxGeometry args={[0.09, 0.38, 0.09]} />
+        <meshStandardMaterial color={shirtColor} roughness={0.6} />
+      </mesh>
+      {/* Right arm */}
+      <mesh ref={rightArm} position={[0.2, 0.82, 0]} castShadow>
+        <boxGeometry args={[0.09, 0.38, 0.09]} />
+        <meshStandardMaterial color={shirtColor} roughness={0.6} />
+      </mesh>
+      {/* Hands */}
+      {([-0.2, 0.2] as number[]).map(x => (
+        <mesh key={x} position={[x, 0.62, 0]}>
+          <boxGeometry args={[0.09, 0.1, 0.09]} />
+          <meshStandardMaterial color={skinColor} roughness={0.8} />
+        </mesh>
+      ))}
+
+      {/* Neck */}
+      <mesh position={[0, 1.05, 0]} castShadow>
+        <boxGeometry args={[0.1, 0.1, 0.1]} />
+        <meshStandardMaterial color={skinColor} roughness={0.8} />
+      </mesh>
+
+      {/* Head */}
+      <mesh ref={head} position={[0, 1.23, 0]} castShadow>
+        <boxGeometry args={[0.24, 0.26, 0.22]} />
+        <meshStandardMaterial color={skinColor} roughness={0.8} />
+      </mesh>
+      {/* Eyes */}
       {([-0.07, 0.07] as number[]).map(x => (
-        <mesh key={x} position={[x, 0.2, 0]} castShadow>
-          <boxGeometry args={[0.08, 0.4, 0.08]} />
-          <meshStandardMaterial color={agent.color} emissive={agent.color} emissiveIntensity={0.15} roughness={0.4} metalness={0.4} />
+        <mesh key={x} position={[x, 1.25, 0.113]}>
+          <sphereGeometry args={[0.028, 8, 8]} />
+          <meshStandardMaterial color="#1a1a2e" roughness={0.3} />
         </mesh>
       ))}
-      {/* Торс */}
-      <mesh position={[0, 0.62, 0]} castShadow>
-        <boxGeometry args={[0.26, 0.36, 0.14]} />
-        <meshStandardMaterial color={agent.color} emissive={agent.color} emissiveIntensity={0.2} roughness={0.3} metalness={0.6} />
-      </mesh>
-      {/* Руки */}
-      {([-0.19, 0.19] as number[]).map(x => (
-        <mesh key={x} position={[x, 0.62, 0]} castShadow>
-          <boxGeometry args={[0.08, 0.32, 0.08]} />
-          <meshStandardMaterial color={agent.color} emissive={agent.color} emissiveIntensity={0.1} roughness={0.4} />
+      {/* Pupils */}
+      {([-0.07, 0.07] as number[]).map(x => (
+        <mesh key={x} position={[x, 1.25, 0.138]}>
+          <sphereGeometry args={[0.014, 6, 6]} />
+          <meshStandardMaterial color={agent.color} emissive={agent.color} emissiveIntensity={0.8} />
         </mesh>
       ))}
-      {/* Голова */}
-      <mesh ref={head} position={[0, 0.93, 0]} castShadow>
-        <boxGeometry args={[0.22, 0.22, 0.18]} />
-        <meshStandardMaterial color={agent.color} emissive={agent.color} emissiveIntensity={0.4} roughness={0.2} metalness={0.7} />
+      {/* Hair */}
+      <mesh position={[0, 1.36, 0]}>
+        <boxGeometry args={[0.25, 0.08, 0.23]} />
+        <meshStandardMaterial color="#2c1810" roughness={1} />
       </mesh>
-      {/* Глаза */}
-      {([-0.06, 0.06] as number[]).map(x => (
-        <mesh key={x} position={[x, 0.95, 0.093]}>
-          <sphereGeometry args={[0.024, 8, 8]} />
-          <meshStandardMaterial color="#fff" emissive="#fff" emissiveIntensity={2.5} />
-        </mesh>
-      ))}
-      {/* Маркер имени */}
-      <mesh position={[0, 1.22, 0]}>
-        <boxGeometry args={[0.26, 0.035, 0.01]} />
-        <meshStandardMaterial color={agent.color} emissive={agent.color} emissiveIntensity={isActive ? 2 : 0.6} />
+
+      {/* Name badge (floating) */}
+      <mesh position={[0, 1.62, 0]}>
+        <planeGeometry args={[0.36, 0.1]} />
+        <meshStandardMaterial color={agent.color} emissive={agent.color} emissiveIntensity={isActive ? 1.5 : 0.5} transparent opacity={0.9} />
       </mesh>
-      {/* Пульс если running */}
-      {activity === 'running' && <RunningPulse color={agent.color} />}
-      {isActive && <pointLight color={agent.color} intensity={2} distance={1.5} position={[0, 0.5, 0]} />}
+
+      {/* Running pulse ring */}
+      {activity === 'running' && <PulseRing color={agent.color} />}
+      {isActive && <pointLight color={agent.color} intensity={1.5} distance={2} position={[0, 0.8, 0]} />}
     </group>
   )
 }
 
-function RunningPulse({ color }: { color: string }) {
+function PulseRing({ color }: { color: string }) {
   const m = useRef<THREE.Mesh>(null!)
   const t = useRef(0)
   useFrame((_, dt) => {
-    t.current += dt * 2.5
-    if (m.current) {
-      const s = 1 + Math.sin(t.current) * 0.5
-      m.current.scale.setScalar(s)
-      ;(m.current.material as THREE.MeshStandardMaterial).opacity = 0.7 - Math.sin(t.current) * 0.3
-    }
+    t.current += dt * 2
+    if (!m.current) return
+    const s = 1 + Math.sin(t.current) * 0.4
+    m.current.scale.setScalar(s)
+    ;(m.current.material as THREE.MeshStandardMaterial).opacity = 0.6 - Math.sin(t.current) * 0.25
   })
   return (
-    <mesh ref={m} position={[0.16, 0.96, 0]}>
-      <sphereGeometry args={[0.04, 8, 8]} />
-      <meshStandardMaterial color={color} emissive={color} emissiveIntensity={3} transparent opacity={0.7} />
+    <mesh ref={m} position={[0, 0.01, 0]} rotation={[-Math.PI / 2, 0, 0]}>
+      <ringGeometry args={[0.2, 0.28, 20]} />
+      <meshStandardMaterial color={color} emissive={color} emissiveIntensity={2} transparent opacity={0.6} />
     </mesh>
   )
 }
 
-// ─── Доска задачи ─────────────────────────────────────────────────────────────
+// ─── Floating chat bubble ─────────────────────────────────────────────────────
 
-function TaskBoard({ status }: { status?: string }) {
-  const col = status === 'running' ? '#22d3ee' : status === 'completed' ? '#34d399' : status === 'failed' ? '#f87171' : '#6366f1'
+function ChatBubble({ text, color, position }: { text: string; color: string; position: [number, number, number] }) {
+  const m = useRef<THREE.Mesh>(null!)
+  const t = useRef(0)
+  useFrame((_, dt) => {
+    t.current += dt
+    if (m.current) m.current.position.y = position[1] + Math.sin(t.current * 0.8) * 0.04
+  })
   return (
-    <group position={[-5.5, 2.5, -4.8]}>
+    <mesh ref={m} position={position}>
+      <planeGeometry args={[0.5, 0.15]} />
+      <meshStandardMaterial color={color} emissive={color} emissiveIntensity={0.4} transparent opacity={0.85} />
+    </mesh>
+  )
+}
+
+// ─── Task status board ────────────────────────────────────────────────────────
+
+function TaskBoard({ status, title }: { status?: string; title: string }) {
+  const col = status === 'running' ? '#22d3ee' : status === 'completed' ? '#34d399' : status === 'failed' ? '#e74c3c' : '#6366f1'
+  const t = useRef(0)
+  const light = useRef<THREE.PointLight>(null!)
+  useFrame((_, dt) => {
+    t.current += dt
+    if (light.current) light.current.intensity = 0.8 + Math.sin(t.current * 2) * 0.2
+  })
+  return (
+    <group position={[-8.7, 2.4, -4]}>
+      {/* Board frame */}
       <mesh castShadow>
-        <boxGeometry args={[3.5, 2, 0.06]} />
-        <meshStandardMaterial color="#0d0d1e" roughness={0.3} metalness={0.7} />
+        <boxGeometry args={[0.08, 2.2, 3.2]} />
+        <meshStandardMaterial color="#5a4a3a" roughness={0.6} />
       </mesh>
-      <mesh position={[0, 0, 0.04]}>
-        <planeGeometry args={[3.2, 1.75]} />
-        <meshStandardMaterial color="#060616" emissive="#06061a" emissiveIntensity={0.8} />
+      {/* Board surface */}
+      <mesh position={[0.07, 0, 0]}>
+        <planeGeometry args={[3.0, 2.0]} />
+        <meshStandardMaterial color="#1a1a2e" roughness={0.3} />
       </mesh>
-      {/* Полосы вместо текста */}
-      <mesh position={[0, 0.55, 0.07]}>
-        <boxGeometry args={[2.4, 0.14, 0.01]} />
-        <meshStandardMaterial color={col} emissive={col} emissiveIntensity={0.9} />
+      {/* Status bar */}
+      <mesh position={[0.09, 0.6, 0]}>
+        <planeGeometry args={[2.5, 0.22]} />
+        <meshStandardMaterial color={col} emissive={col} emissiveIntensity={0.7} />
       </mesh>
-      <mesh position={[-0.2, 0.25, 0.07]}>
-        <boxGeometry args={[2.0, 0.07, 0.01]} />
-        <meshStandardMaterial color="#ffffff" emissive="#ffffff" emissiveIntensity={0.2} transparent opacity={0.5} />
-      </mesh>
-      <mesh position={[-0.4, 0.05, 0.07]}>
-        <boxGeometry args={[1.6, 0.07, 0.01]} />
-        <meshStandardMaterial color="#ffffff" emissive="#ffffff" emissiveIntensity={0.15} transparent opacity={0.35} />
-      </mesh>
-      <mesh position={[0, -0.2, 0.07]}>
-        <boxGeometry args={[0.9, 0.1, 0.01]} />
-        <meshStandardMaterial color={col} emissive={col} emissiveIntensity={1.2} />
-      </mesh>
-      <pointLight position={[0, 0, 0.6]} color={col} intensity={0.9} distance={3} />
+      {/* Lines for text */}
+      {[-0.05, -0.35, -0.65].map((y, i) => (
+        <mesh key={y} position={[0.09, y, (i - 1) * 0.3]}>
+          <planeGeometry args={[i === 0 ? 2.2 : 1.6, 0.06]} />
+          <meshStandardMaterial color="#ffffff" transparent opacity={0.4 - i * 0.1} />
+        </mesh>
+      ))}
+      <pointLight ref={light} position={[0.5, 0, 0]} color={col} intensity={0.8} distance={3} />
     </group>
   )
 }
 
-// ─── Зона отдыха ─────────────────────────────────────────────────────────────
+// ─── Scene ────────────────────────────────────────────────────────────────────
 
-function BreakZone() {
-  return (
-    <group position={[5.5, 0, 3]}>
-      <mesh position={[0, 0.24, 0]} castShadow>
-        <boxGeometry args={[1.8, 0.24, 0.7]} />
-        <meshStandardMaterial color="#1a1a35" roughness={0.9} />
-      </mesh>
-      <mesh position={[0, 0.44, -0.32]} castShadow>
-        <boxGeometry args={[1.8, 0.38, 0.07]} />
-        <meshStandardMaterial color="#1a1a35" roughness={0.9} />
-      </mesh>
-      <mesh position={[1.2, 0.4, 0.9]} castShadow>
-        <cylinderGeometry args={[0.1, 0.13, 0.3, 8]} />
-        <meshStandardMaterial color="#0d1a0d" />
-      </mesh>
-      <mesh position={[1.2, 0.72, 0.9]}>
-        <sphereGeometry args={[0.2, 10, 8]} />
-        <meshStandardMaterial color="#1a4d1a" roughness={1} />
-      </mesh>
-      <pointLight position={[0, 1.2, 0]} color="#a855f7" intensity={0.5} distance={2.5} />
-    </group>
-  )
-}
-
-// ─── Главная сцена ────────────────────────────────────────────────────────────
-
-function Scene({ task, activeAgentId, onAgentClick }: {
-  task: AgentTask; activeAgentId: string | null; onAgentClick: (id: string) => void
+function Scene({ task, activeAgentId, onAgentClick, taskLogs }: {
+  task: AgentTask
+  activeAgentId: string | null
+  onAgentClick: (id: string) => void
+  taskLogs: string[]
 }) {
   const activeAgents = useMemo(() => {
-    const t = (task.type || '').toLowerCase()
-    if (t.includes('api') || t.includes('backend')) return ['planner', 'coder', 'reviewer', 'devops']
-    if (t.includes('front') || t.includes('ui')) return ['planner', 'designer', 'coder', 'qa']
+    const tt = (task.type || '').toLowerCase()
+    if (tt.includes('api') || tt.includes('backend') || tt.includes('integration')) return ['planner', 'coder', 'reviewer', 'devops']
+    if (tt.includes('front') || tt.includes('ui') || tt.includes('design')) return ['planner', 'designer', 'coder', 'qa']
     return ['planner', 'coder', 'reviewer']
   }, [task.type])
 
+  // Map log messages to agents
+  const agentMessages = useMemo(() => {
+    const map: Record<string, string> = {}
+    const keywordMap: Record<string, string> = {
+      'план': 'planner', 'task': 'planner', 'created': 'planner',
+      'код': 'coder', 'patch': 'coder', 'code': 'coder', 'pipeline': 'coder',
+      'review': 'reviewer', 'ревью': 'reviewer',
+      'qa': 'qa', 'test': 'qa', 'quality': 'qa',
+      'git': 'devops', 'branch': 'devops', 'push': 'devops', 'commit': 'devops',
+      'analyt': 'analyst', 'context': 'analyst', 'knowledge': 'analyst',
+      'design': 'designer', 'ui': 'designer',
+      'manager': 'manager', 'orchestr': 'manager', 'spawn': 'manager',
+    }
+    const recentLogs = taskLogs.slice(-12)
+    recentLogs.forEach(msg => {
+      const lower = msg.toLowerCase()
+      for (const [kw, agentId] of Object.entries(keywordMap)) {
+        if (lower.includes(kw) && !map[agentId]) {
+          map[agentId] = msg.replace(/^\[\d+:\d+:\d+\]\s*/, '').slice(0, 40)
+          break
+        }
+      }
+    })
+    return map
+  }, [taskLogs])
+
   return (
     <>
-      <OrbitControlsManual />
-      <ambientLight intensity={0.1} />
-      <directionalLight position={[5, 8, 3]} intensity={0.5} color="#9090ff" castShadow />
-      <pointLight position={[0, 3.5, 0]} color="#6366f1" intensity={0.7} distance={12} />
-      <NeonStrips />
-      <Floor />
-      <Walls />
-      <TaskBoard status={task.status} />
-      <MeetingTable />
-      <BreakZone />
+      <CameraRig />
+
+      {/* Lighting */}
+      <ambientLight intensity={0.5} color="#fff8f0" />
+      <directionalLight position={[5, 8, 3]} intensity={0.6} color="#fff8e1" castShadow
+        shadow-mapSize={[1024, 1024]}
+        shadow-camera-near={0.5} shadow-camera-far={30}
+        shadow-camera-left={-12} shadow-camera-right={12}
+        shadow-camera-top={10} shadow-camera-bottom={-8}
+      />
+      {/* Ceiling lights */}
+      <CeilingLight pos={[-4, 3.92, -2]} />
+      <CeilingLight pos={[0, 3.92, -2]} />
+      <CeilingLight pos={[4, 3.92, -2]} />
+      <CeilingLight pos={[-3, 3.92, 1.5]} />
+      <CeilingLight pos={[3, 3.92, 1.5]} />
+
+      {/* Room */}
+      <Room />
+
+      {/* Task board on left wall */}
+      <TaskBoard status={task.status} title={task.title} />
+
+      {/* Bookshelves */}
+      <Bookshelf pos={[8.5, 0, -4]} />
+      <Bookshelf pos={[8.5, 0, -1]} />
+
+      {/* Plants */}
+      <PlantPot pos={[-8.5, 0, 5.5]} />
+      <PlantPot pos={[8.5, 0, 5.5]} />
+
+      {/* Work desks — row 1 (back) */}
       {AGENTS.slice(0, 4).map(a => (
         <group key={a.id}>
-          <Desk pos={[a.pos[0], 0, a.pos[2] + 0.12]} color={a.color} />
-          <Chair pos={[a.pos[0], 0, a.pos[2] + 0.6]} />
+          <Desk pos={a.deskPos} color={a.color} />
+          <Chair pos={[a.deskPos[0], 0, a.deskPos[2] + 0.7]} />
         </group>
       ))}
-      {AGENTS.slice(4).map(a => (
-        <group key={a.id}>
-          <Desk pos={[a.pos[0], 0, a.pos[2] - 0.12]} color={a.color} />
-          <Chair pos={[a.pos[0], 0, a.pos[2] - 0.6]} />
-        </group>
-      ))}
+
+      {/* Work desk — row 2 (DevOps alone) */}
+      <Desk pos={AGENTS[4].deskPos} color={AGENTS[4].color} rotation={Math.PI} />
+      <Chair pos={[AGENTS[4].deskPos[0], 0, AGENTS[4].deskPos[2] - 0.7]} rotation={Math.PI} />
+
+      {/* Meeting area */}
+      <MeetingTable />
+
+      {/* Agents */}
       {AGENTS.map(a => (
-        <AgentFigure
+        <HumanFigure
           key={a.id}
           agent={a}
           isActive={a.id === activeAgentId}
           onClick={() => onAgentClick(a.id)}
           taskStatus={activeAgents.includes(a.id) ? task.status : undefined}
+          chatMsg={agentMessages[a.id]}
         />
       ))}
-      <Particles />
+
+      {/* Chat bubbles for agents with messages */}
+      {Object.entries(agentMessages).map(([agentId, msg]) => {
+        const agent = AGENTS.find(a => a.id === agentId)
+        if (!agent) return null
+        return (
+          <ChatBubble
+            key={agentId}
+            text={msg}
+            color={agent.color}
+            position={[agent.pos[0], agent.pos[1] + 1.9, agent.pos[2]]}
+          />
+        )
+      })}
     </>
   )
 }
 
-// ─── Главный компонент ────────────────────────────────────────────────────────
+// ─── Main component ───────────────────────────────────────────────────────────
 
 export default function AgentOffice3D({ task }: { task: AgentTask }) {
   const [activeAgentId, setActiveAgentId] = useState<string | null>(null)
+  const [taskLogs, setTaskLogs] = useState<string[]>([])
   const activeAgent = AGENTS.find(a => a.id === activeAgentId)
-  const statusColor = task.status === 'running' ? '#22d3ee' : task.status === 'completed' ? '#34d399' : task.status === 'failed' ? '#f87171' : '#6366f1'
 
-  const handleAgentClick = (id: string) => setActiveAgentId(prev => prev === id ? null : id)
+  // Poll task logs
+  useEffect(() => {
+    let cancelled = false
+    const fetchLogs = async () => {
+      try {
+        const token = localStorage.getItem('authToken') || sessionStorage.getItem('authToken') || ''
+        const res = await fetch(`/api/v1/agent-tasks/${task.id}/logs`, {
+          headers: token ? { Authorization: `Bearer ${token}` } : {}
+        })
+        if (!res.ok) return
+        const data = await res.json()
+        if (!cancelled && data.logs) {
+          setTaskLogs((data.logs as any[]).map((l: any) => typeof l === 'string' ? l : (l.msg || l.message || JSON.stringify(l))))
+        }
+      } catch { /* silent */ }
+    }
+    fetchLogs()
+    const iv = setInterval(fetchLogs, 3000)
+    return () => { cancelled = true; clearInterval(iv) }
+  }, [task.id])
+
+  const handleAgentClick = useCallback((id: string) => {
+    setActiveAgentId(prev => prev === id ? null : id)
+  }, [])
+
+  const statusColor = task.status === 'running' ? '#22d3ee' : task.status === 'completed' ? '#34d399' : task.status === 'failed' ? '#e74c3c' : '#6366f1'
+  const statusLabel = task.status === 'running' ? 'ВЫПОЛНЯЕТСЯ' : task.status === 'completed' ? 'ГОТОВО' : task.status === 'failed' ? 'ОШИБКА' : 'ОЖИДАНИЕ'
 
   return (
-    <div style={{ width: '100%', height: '100%', position: 'relative', background: '#02020d' }}>
+    <div style={{ width: '100%', height: '100%', position: 'relative', background: '#c8d4dc', fontFamily: 'system-ui, sans-serif' }}>
       <Canvas
         shadows
-        camera={{ position: [0, 4, 10], fov: 52 }}
-        gl={{ antialias: true }}
+        camera={{ position: [0, 7, 13], fov: 50 }}
+        gl={{ antialias: true, toneMapping: THREE.ACESFilmicToneMapping, toneMappingExposure: 1.2 }}
       >
-        <Scene task={task} activeAgentId={activeAgentId} onAgentClick={handleAgentClick} />
+        <Scene task={task} activeAgentId={activeAgentId} onAgentClick={handleAgentClick} taskLogs={taskLogs} />
       </Canvas>
 
-      {/* Инфо задачи */}
-      <div style={{ position: 'absolute', top: 12, left: 14, pointerEvents: 'none', background: 'rgba(4,4,18,0.85)', backdropFilter: 'blur(12px)', border: `1px solid ${statusColor}35`, borderRadius: 10, padding: '8px 14px', maxWidth: 260 }}>
-        <div style={{ fontSize: 12, fontWeight: 700, color: '#fff', marginBottom: 2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{task.title}</div>
-        <div style={{ fontSize: 10, color: statusColor }}>● {(task.status || 'queued').toUpperCase()}</div>
+      {/* Task info */}
+      <div style={{ position: 'absolute', top: 12, left: 12, background: 'rgba(255,255,255,0.92)', backdropFilter: 'blur(8px)', border: `2px solid ${statusColor}`, borderRadius: 10, padding: '8px 14px', maxWidth: 240, boxShadow: '0 2px 12px rgba(0,0,0,0.15)' }}>
+        <div style={{ fontSize: 13, fontWeight: 700, color: '#1a1a2e', marginBottom: 4, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{task.title}</div>
+        <div style={{ fontSize: 11, fontWeight: 600, color: statusColor, display: 'flex', alignItems: 'center', gap: 5 }}>
+          <span style={{ width: 7, height: 7, borderRadius: '50%', background: statusColor, display: 'inline-block', boxShadow: `0 0 6px ${statusColor}` }} />
+          {statusLabel}
+        </div>
       </div>
 
-      {/* Легенда агентов */}
-      <div style={{ position: 'absolute', top: 12, right: 14, pointerEvents: 'none', display: 'flex', flexDirection: 'column', gap: 3 }}>
+      {/* Agent legend */}
+      <div style={{ position: 'absolute', top: 12, right: 12, background: 'rgba(255,255,255,0.88)', backdropFilter: 'blur(8px)', borderRadius: 10, padding: '8px 12px', display: 'flex', flexDirection: 'column', gap: 4, boxShadow: '0 2px 12px rgba(0,0,0,0.12)' }}>
         {AGENTS.map(a => (
-          <div key={a.id} style={{ display: 'flex', alignItems: 'center', gap: 5, fontSize: 10, color: 'rgba(255,255,255,0.45)' }}>
-            <div style={{ width: 7, height: 7, borderRadius: '50%', background: a.color, flexShrink: 0, boxShadow: `0 0 5px ${a.color}` }} />
-            {a.name}
+          <div key={a.id} style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 11, color: '#1a1a2e', cursor: 'pointer' }}
+            onClick={() => handleAgentClick(a.id)}>
+            <div style={{ width: 8, height: 8, borderRadius: '50%', background: a.color, flexShrink: 0 }} />
+            <span style={{ fontWeight: activeAgentId === a.id ? 700 : 400 }}>{a.name}</span>
           </div>
         ))}
       </div>
 
-      {/* Подсказка */}
-      <div style={{ position: 'absolute', bottom: activeAgent ? 76 : 10, left: '50%', transform: 'translateX(-50%)', fontSize: 10, color: 'rgba(255,255,255,0.18)', pointerEvents: 'none', whiteSpace: 'nowrap' }}>
-        Тяни для вращения • Колесо для зума • Клик на агента
+      {/* Live log feed */}
+      {taskLogs.length > 0 && (
+        <div style={{ position: 'absolute', bottom: activeAgent ? 100 : 10, left: 12, right: 12, background: 'rgba(255,255,255,0.88)', backdropFilter: 'blur(8px)', borderRadius: 10, padding: '8px 12px', maxHeight: 80, overflow: 'hidden', boxShadow: '0 2px 12px rgba(0,0,0,0.12)' }}>
+          <div style={{ fontSize: 10, fontWeight: 700, color: '#6366f1', marginBottom: 4 }}>ЛОГИ ЗАДАЧИ</div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+            {taskLogs.slice(-3).map((log, i) => (
+              <div key={i} style={{ fontSize: 10, color: '#444', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{log}</div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Hint */}
+      <div style={{ position: 'absolute', bottom: activeAgent ? 98 : 8, left: '50%', transform: 'translateX(-50%)', fontSize: 10, color: 'rgba(0,0,0,0.35)', pointerEvents: 'none', whiteSpace: 'nowrap', background: 'rgba(255,255,255,0.6)', padding: '2px 8px', borderRadius: 6 }}>
+        Тяни для вращения · Колесо для зума · Клик на сотрудника
       </div>
 
-      {/* Панель активного агента */}
+      {/* Active agent panel */}
       {activeAgent && (
-        <div style={{ position: 'absolute', bottom: 14, left: '50%', transform: 'translateX(-50%)', background: 'rgba(4,4,18,0.92)', backdropFilter: 'blur(16px)', border: `1px solid ${activeAgent.color}40`, borderRadius: 14, padding: '12px 20px', display: 'flex', alignItems: 'center', gap: 14, minWidth: 260, boxShadow: `0 0 24px ${activeAgent.color}25` }}>
-          <div style={{ width: 38, height: 38, borderRadius: '50%', background: `linear-gradient(135deg,${activeAgent.color},${activeAgent.color}88)`, display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0, fontSize: 18 }}>🤖</div>
+        <div style={{ position: 'absolute', bottom: 10, left: '50%', transform: 'translateX(-50%)', background: 'rgba(255,255,255,0.95)', backdropFilter: 'blur(12px)', border: `2px solid ${activeAgent.color}`, borderRadius: 14, padding: '12px 20px', display: 'flex', alignItems: 'center', gap: 14, minWidth: 280, boxShadow: `0 4px 24px ${activeAgent.color}30` }}>
+          <div style={{ width: 44, height: 44, borderRadius: '50%', background: `linear-gradient(135deg, ${activeAgent.color}, ${activeAgent.color}88)`, display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0, fontSize: 22 }}>
+            {activeAgent.activity === 'working' ? '💻' : activeAgent.activity === 'running' ? '⚡' : activeAgent.activity === 'meeting' ? '💬' : '😴'}
+          </div>
           <div style={{ flex: 1 }}>
-            <div style={{ fontSize: 14, fontWeight: 700, color: '#fff', marginBottom: 2 }}>{activeAgent.name}</div>
-            <div style={{ fontSize: 11, color: activeAgent.color }}>{activeAgent.role}</div>
-            <div style={{ fontSize: 10, color: 'rgba(255,255,255,0.35)', marginTop: 3 }}>
-              {activeAgent.activity === 'running' ? '⚡ Выполняет задачу' : activeAgent.activity === 'working' ? '💻 Пишет код' : activeAgent.activity === 'meeting' ? '💬 На совещании' : '😴 Ожидает'}
+            <div style={{ fontSize: 15, fontWeight: 700, color: '#1a1a2e', marginBottom: 2 }}>{activeAgent.name}</div>
+            <div style={{ fontSize: 11, color: activeAgent.color, fontWeight: 600 }}>{activeAgent.role}</div>
+            <div style={{ fontSize: 10, color: '#666', marginTop: 2 }}>
+              {activeAgent.activity === 'running' ? '⚡ Активно выполняет задачу' : activeAgent.activity === 'working' ? '💻 Пишет код' : activeAgent.activity === 'meeting' ? '💬 На совещании у круглого стола' : '⏸ Ожидает задач'}
             </div>
           </div>
-          <button onClick={() => setActiveAgentId(null)} style={{ background: 'none', border: 'none', color: 'rgba(255,255,255,0.3)', cursor: 'pointer', fontSize: 16, padding: 4 }}>✕</button>
+          <button onClick={() => setActiveAgentId(null)} style={{ background: 'none', border: 'none', color: '#999', cursor: 'pointer', fontSize: 18, padding: 4, lineHeight: 1 }}>✕</button>
         </div>
       )}
     </div>
