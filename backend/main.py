@@ -1108,7 +1108,32 @@ async def agent_task_stream(task_id: str):
                 decode_responses=True,
             )
             log_key = f"agent:stream_log:{task_id}"
-            history = r.lrange(log_key, 0, -1) or []
+            last_id = "0-0"
+            while True:
+                # Используем xread для чтения новых событий из Redis stream
+                result = r.xread({log_key: last_id}, block=5000, count=10)
+                if result:
+                    for stream, messages in result:
+                        for message_id, data in messages:
+                            yield {
+                                "event": "message",
+                                "data": json.dumps({"id": message_id, "data": data})
+                            }
+                            last_id = message_id
+                else:
+                    # Если нет новых событий, отправляем keep-alive комментарий
+                    yield {"event": "comment", "data": "keep-alive"}
+                await asyncio.sleep(0.1)
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            log.error("SSE stream error for task %s: %s", task_id, e)
+            yield {"event": "error", "data": json.dumps({"error": str(e)})}
+        finally:
+            if r:
+                r.close()
+    
+    return EventSourceResponse(event_generator())        history = r.lrange(log_key, 0, -1) or []
             for msg in history:
                 yield {"data": msg}
             pubsub = r.pubsub()
