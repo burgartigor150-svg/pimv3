@@ -1,196 +1,249 @@
-import { useState, useEffect } from 'react'
-import { Activity, Layers, Database, PlugZap, Sparkles, Server } from 'lucide-react'
-import { PieChart, Pie, Cell, ResponsiveContainer, Tooltip as RechartsTooltip } from 'recharts'
-import { Link } from 'react-router-dom'
+import React, { useEffect, useState } from 'react';
+import { Activity, Layers, Package, TrendingUp, Plus, Upload, RefreshCw, ChevronRight, Check } from 'lucide-react';
+import { PieChart, Pie, Cell, ResponsiveContainer } from 'recharts';
 
-export default function DashboardPage() {
-  const [stats, setStats] = useState({
-    total_products: 0,
-    total_categories: 0,
-    total_attributes: 0,
-    total_connections: 0,
-    average_completeness: 0
-  })
-  const [loading, setLoading] = useState(true)
+interface DashboardStats {
+  totalProducts: number;
+  activeListings: number;
+  syncedToday: number;
+  completeness: number;
+}
+
+const DashboardPage: React.FC = () => {
+  const [stats, setStats] = useState<DashboardStats | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    fetch('/api/v1/stats')
-      .then(res => res.json())
-      .then(data => {
-        setStats(data)
-        setLoading(false)
-      })
-      .catch(err => {
-        console.error(err)
-        setLoading(false)
-      })
-  }, [])
+    const fetchStats = async () => {
+      try {
+        setLoading(true);
+        const response = await fetch('/api/v1/dashboard/stats');
+        if (!response.ok) throw new Error('Failed to fetch stats');
+        const data = await response.json();
+        setStats(data);
+      } catch (err) {
+        setError(err instanceof Error ? err.message : 'Unknown error');
+      } finally {
+        setLoading(false);
+      }
+    };
 
-  const completenessData = [
-    { name: 'Заполнено', value: stats.average_completeness },
-    { name: 'Пустоты', value: 100 - stats.average_completeness }
-  ]
-  const COLORS = ['#6366f1', '#e2e8f0']
+    fetchStats();
+  }, []);
 
-  if (loading) {
-    return <div className="p-8 flex items-center justify-center">Загрузка аналитики...</div>
-  }
+  const completenessValue = stats?.completeness ?? 72;
+  const pieData = [
+    { name: 'Filled', value: completenessValue },
+    { name: 'Empty', value: 100 - completenessValue },
+  ];
+
+  const kpiCards = [
+    {
+      icon: <Package className="w-5 h-5 text-blue-400" />,
+      iconBg: 'bg-blue-500/10',
+      value: stats?.totalProducts?.toLocaleString() ?? '—',
+      label: 'Товаров',
+      trend: '+12% this week',
+    },
+    {
+      icon: <Layers className="w-5 h-5 text-purple-400" />,
+      iconBg: 'bg-purple-500/10',
+      value: stats?.activeListings?.toLocaleString() ?? '—',
+      label: 'Активных листингов',
+      trend: '+5% this week',
+    },
+    {
+      icon: <Activity className="w-5 h-5 text-emerald-400" />,
+      iconBg: 'bg-emerald-500/10',
+      value: stats?.syncedToday?.toLocaleString() ?? '—',
+      label: 'Синхронизировано сегодня',
+      trend: '+8% this week',
+    },
+    {
+      icon: <TrendingUp className="w-5 h-5 text-orange-400" />,
+      iconBg: 'bg-orange-500/10',
+      value: stats ? `${stats.completeness}%` : '—',
+      label: 'Заполненность каталога',
+      trend: '+3% this week',
+    },
+  ];
+
+  const quickSteps = [
+    {
+      num: '1',
+      title: 'Импортируйте товары',
+      desc: 'Загрузите каталог из Excel или маркетплейса',
+    },
+    {
+      num: '2',
+      title: 'Заполните атрибуты',
+      desc: 'ИИ предложит значения автоматически',
+    },
+    {
+      num: '3',
+      title: 'Опубликуйте на площадках',
+      desc: 'Ozon, Яндекс Маркет, WB одним кликом',
+    },
+  ];
 
   return (
-    <div className="space-y-8 animate-in fade-in duration-500">
-      <div className="flex flex-col md:flex-row md:justify-between md:items-center gap-4">
+    <div className="min-h-screen bg-[#0d0d10] p-6">
+      {/* Page Header */}
+      <div className="flex items-start justify-between mb-8">
         <div>
-          <h1 className="text-3xl font-extrabold text-slate-900 dark:text-white tracking-tight">Добро пожаловать в <span className="text-transparent bg-clip-text bg-gradient-to-r from-emerald-500 to-green-600">PIM.Giper.fm</span></h1>
-          <p className="text-slate-500 dark:text-slate-400 mt-2 text-lg max-w-3xl">
-            Одна база товаров → ИИ собирает «идеальную» карточку из нескольких магазинов → вы выгружаете на Ozon, Яндекс, WB и Мегамаркет без ручного переноса полей.
-          </p>
+          <h1 className="text-slate-100 text-2xl font-semibold">Дашборд</h1>
+          <p className="text-slate-500 text-sm mt-1">Обзор состояния вашего каталога товаров</p>
         </div>
-        <div className="flex flex-wrap gap-3">
-          <Link
-            to="/integrations"
-            className="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-600 rounded-lg px-4 py-2 hover:bg-slate-50 dark:hover:bg-slate-700 shadow-sm flex items-center gap-2 font-medium text-slate-700 dark:text-slate-200"
-          >
-            <PlugZap className="w-4 h-4 text-indigo-500" /> Магазины и ключи
-          </Link>
-          <Link
-            to="/products"
-            className="bg-gradient-to-r from-indigo-600 to-purple-600 hover:from-indigo-700 hover:to-purple-700 text-white font-medium rounded-lg px-4 py-2 shadow-md flex items-center gap-2 transition-all"
-          >
-            <Layers className="w-4 h-4" /> Открыть каталог
-          </Link>
-          <Link
-            to="/settings"
-            className="bg-slate-100 dark:bg-slate-800 border border-slate-200 dark:border-slate-600 rounded-lg px-4 py-2 hover:bg-slate-200 dark:hover:bg-slate-700 flex items-center gap-2 font-medium text-slate-700 dark:text-slate-200"
-          >
-            <Sparkles className="w-4 h-4 text-purple-500" /> Ключ ИИ (DeepSeek)
-          </Link>
+        <div className="flex items-center gap-2">
+          <button className="bg-[#1c1c28] hover:bg-[#28283a] border border-[#1e1e2c] text-slate-300 px-3 py-1.5 rounded-lg text-sm flex items-center gap-1.5 transition-colors">
+            <Plus className="w-3.5 h-3.5" />
+            Добавить товар
+          </button>
+          <button className="bg-[#1c1c28] hover:bg-[#28283a] border border-[#1e1e2c] text-slate-300 px-3 py-1.5 rounded-lg text-sm flex items-center gap-1.5 transition-colors">
+            <Upload className="w-3.5 h-3.5" />
+            Импорт
+          </button>
+          <button className="bg-[#1c1c28] hover:bg-[#28283a] border border-[#1e1e2c] text-slate-300 px-3 py-1.5 rounded-lg text-sm flex items-center gap-1.5 transition-colors">
+            <RefreshCw className="w-3.5 h-3.5" />
+            Синхронизировать
+          </button>
         </div>
       </div>
 
       {/* KPI Cards */}
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
-        <div className="bg-white dark:bg-slate-800 p-6 rounded-2xl border shadow-sm flex items-center gap-5 hover:shadow-md transition-shadow">
-          <div className="p-4 bg-blue-50 text-blue-600 rounded-xl"><Layers className="w-7 h-7" /></div>
-          <div>
-            <p className="text-sm font-medium text-slate-500 uppercase tracking-wide">Всего товаров</p>
-            <p className="text-3xl font-black text-slate-800 mt-1">{stats.total_products}</p>
-          </div>
-        </div>
-        <div className="bg-white dark:bg-slate-800 p-6 rounded-2xl border shadow-sm flex items-center gap-5 hover:shadow-md transition-shadow">
-          <div className="p-4 bg-purple-50 text-purple-600 rounded-xl"><Database className="w-7 h-7" /></div>
-          <div>
-            <p className="text-sm font-medium text-slate-500 uppercase tracking-wide">Атрибуты</p>
-            <p className="text-3xl font-black text-slate-800 mt-1">{stats.total_attributes}</p>
-          </div>
-        </div>
-        <div className="bg-white dark:bg-slate-800 p-6 rounded-2xl border shadow-sm flex items-center gap-5 hover:shadow-md transition-shadow">
-          <div className="p-4 bg-green-50 text-emerald-600 rounded-xl"><Server className="w-7 h-7" /></div>
-          <div>
-            <p className="text-sm font-medium text-slate-500 uppercase tracking-wide">Категории</p>
-            <p className="text-3xl font-black text-slate-800 mt-1">{stats.total_categories}</p>
-          </div>
-        </div>
-        <div className="bg-white dark:bg-slate-800 p-6 rounded-2xl border shadow-sm flex items-center gap-5 hover:shadow-md transition-shadow">
-          <div className="p-4 bg-orange-50 text-orange-600 rounded-xl"><PlugZap className="w-7 h-7" /></div>
-          <div>
-            <p className="text-sm font-medium text-slate-500 uppercase tracking-wide">Магазинов подключено</p>
-            <p className="text-3xl font-black text-slate-800 mt-1">{stats.total_connections}</p>
-          </div>
-        </div>
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
+        {loading
+          ? Array.from({ length: 4 }).map((_, i) => (
+              <div
+                key={i}
+                className="bg-[#13131a] border border-[#1e1e2c] rounded-xl p-5 animate-pulse"
+              >
+                <div className="w-12 h-12 bg-[#1c1c28] rounded-lg mb-4" />
+                <div className="h-8 bg-[#1c1c28] rounded w-2/3 mb-2" />
+                <div className="h-3 bg-[#1c1c28] rounded w-1/2 mb-3" />
+                <div className="h-5 bg-[#1c1c28] rounded w-1/3" />
+              </div>
+            ))
+          : kpiCards.map((card, i) => (
+              <div
+                key={i}
+                className="bg-[#13131a] border border-[#1e1e2c] rounded-xl p-5 hover:border-[#28283a] transition-all"
+              >
+                <div className={`w-12 h-12 ${card.iconBg} rounded-lg flex items-center justify-center mb-4`}>
+                  {card.icon}
+                </div>
+                <div className="text-3xl font-bold text-slate-100 tabular-nums">{card.value}</div>
+                <div className="text-xs text-slate-500 uppercase tracking-wide mt-1">{card.label}</div>
+                <div className="mt-3">
+                  <span className="text-emerald-400 text-xs bg-emerald-500/10 px-1.5 py-0.5 rounded">
+                    {card.trend}
+                  </span>
+                </div>
+              </div>
+            ))}
       </div>
 
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        {/* Chart */}
-        <div className="bg-white dark:bg-slate-800 border rounded-2xl p-6 flex flex-col shadow-sm col-span-1 lg:col-span-2">
-          <h2 className="text-xl font-bold mb-4 flex items-center gap-2 text-slate-800"><Activity className="w-5 h-5 text-indigo-500"/> Индекс Здоровья Каталога (Completeness)</h2>
-          <div className="flex-1 min-h-[300px] flex items-center justify-center relative">
-             <ResponsiveContainer width="100%" height="100%">
-              <PieChart>
-                <Pie
-                  data={completenessData}
-                  cx="50%"
-                  cy="50%"
-                  innerRadius={90}
-                  outerRadius={120}
-                  paddingAngle={5}
-                  dataKey="value"
-                  stroke="none"
-                >
-                  {completenessData.map((entry, index) => (
-                    <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />
-                  ))}
-                </Pie>
-                <RechartsTooltip 
-                  contentStyle={{ borderRadius: '12px', border: 'none', boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.1)' }}
-                />
-              </PieChart>
-            </ResponsiveContainer>
-            <div className="absolute inset-0 flex flex-col items-center justify-center pointer-events-none">
-              <span className="text-5xl font-black text-slate-800 dark:text-white">{stats.average_completeness}%</span>
-              <span className="text-sm font-medium text-slate-500 uppercase mt-1 tracking-wider">Заполнено</span>
+      {/* Bottom Two-Column Section */}
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+        {/* Donut Chart — 2/3 */}
+        <div className="lg:col-span-2 bg-[#13131a] border border-[#1e1e2c] rounded-xl p-5 hover:border-[#28283a] transition-all">
+          <div className="flex items-center justify-between mb-4">
+            <div>
+              <h2 className="text-sm font-medium text-slate-200">Заполненность каталога</h2>
+              <p className="text-xs text-slate-500 mt-0.5">Процент заполненных атрибутов по всем товарам</p>
+            </div>
+          </div>
+
+          {loading ? (
+            <div className="h-56 flex items-center justify-center">
+              <div className="w-40 h-40 rounded-full bg-[#1c1c28] animate-pulse" />
+            </div>
+          ) : (
+            <div className="relative h-56">
+              <ResponsiveContainer width="100%" height="100%">
+                <PieChart>
+                  <Pie
+                    data={pieData}
+                    cx="50%"
+                    cy="50%"
+                    innerRadius={72}
+                    outerRadius={96}
+                    startAngle={90}
+                    endAngle={-270}
+                    dataKey="value"
+                    strokeWidth={0}
+                  >
+                    <Cell fill="#6366f1" />
+                    <Cell fill="#1e1e2c" />
+                  </Pie>
+                </PieChart>
+              </ResponsiveContainer>
+              <div className="absolute inset-0 flex flex-col items-center justify-center pointer-events-none">
+                <span className="text-3xl font-bold text-slate-100">{completenessValue}%</span>
+                <span className="text-xs text-slate-500 mt-1">Заполнено</span>
+              </div>
+            </div>
+          )}
+
+          <div className="flex items-center gap-6 mt-4 pt-4 border-t border-[#1e1e2c]">
+            <div className="flex items-center gap-2">
+              <span className="w-2.5 h-2.5 rounded-full bg-indigo-500 inline-block" />
+              <span className="text-xs text-slate-400">Заполнено</span>
+              <span className="text-xs text-slate-100 font-medium">{completenessValue}%</span>
+            </div>
+            <div className="flex items-center gap-2">
+              <span className="w-2.5 h-2.5 rounded-full bg-[#1e1e2c] border border-slate-600 inline-block" />
+              <span className="text-xs text-slate-400">Не заполнено</span>
+              <span className="text-xs text-slate-100 font-medium">{100 - completenessValue}%</span>
             </div>
           </div>
         </div>
 
-        {/* Quick Actions / Getting Started */}
-        <div className="bg-gradient-to-br from-slate-900 to-indigo-950 rounded-2xl p-8 text-white shadow-xl flex flex-col justify-between relative overflow-hidden">
-          <div className="absolute top-0 right-0 -mt-4 -mr-4 w-24 h-24 bg-indigo-500/20 rounded-full blur-2xl"></div>
-          <div className="absolute bottom-0 left-0 -mb-4 -ml-4 w-32 h-32 bg-purple-500/20 rounded-full blur-3xl"></div>
-          
-          <div className="relative z-10">
-            <h2 className="text-2xl font-bold mb-3 text-white">Как пользоваться (по шагам)</h2>
-            <p className="text-indigo-200 text-sm mb-6 leading-relaxed">
-              {stats.total_products === 0
-                ? 'Начните с подключения хотя бы одного магазина — без ключей API система не сможет скачать карточки.'
-                : `В каталоге уже ${stats.total_products} товар(ов). Откройте карточку → вкладка «Перенос на маркетплейсы» — или выберите несколько строк в каталоге для массовой выгрузки.`}
-            </p>
-            <ul className="space-y-4">
-              <li className="flex items-start gap-3">
-                <div className="w-9 h-9 shrink-0 rounded-full bg-indigo-500/20 flex items-center justify-center text-indigo-200 font-bold border border-indigo-500/30 text-sm">1</div>
-                <div>
-                  <span className="text-sm font-semibold text-white block">Магазины и ключи API</span>
-                  <span className="text-xs text-indigo-200/90">Каждый магазин Ozon / Яндекс / WB / Мегамаркет — отдельное подключение.</span>
+        {/* Quick Actions — 1/3 */}
+        <div className="bg-[#13131a] border border-[#1e1e2c] rounded-xl p-5 hover:border-[#28283a] transition-all flex flex-col">
+          <h2 className="text-sm font-medium text-slate-200 mb-1">Быстрый старт</h2>
+          <p className="text-xs text-slate-500 mb-5">Три шага для запуска каталога</p>
+
+          <div className="flex-1 space-y-0">
+            {quickSteps.map((step, i) => (
+              <div key={i} className="flex gap-3">
+                {/* Dot + vertical line */}
+                <div className="flex flex-col items-center">
+                  <div className="w-6 h-6 rounded-full bg-indigo-500/20 border border-indigo-500/50 text-indigo-400 text-xs flex items-center justify-center flex-shrink-0">
+                    {step.num}
+                  </div>
+                  {i < quickSteps.length - 1 && (
+                    <div className="w-px flex-1 bg-[#1e1e2c] my-1" style={{ minHeight: '28px' }} />
+                  )}
                 </div>
-              </li>
-              <li className="flex items-start gap-3">
-                <div className="w-9 h-9 shrink-0 rounded-full bg-indigo-500/20 flex items-center justify-center text-indigo-200 font-bold border border-indigo-500/30 text-sm">2</div>
-                <div>
-                  <span className="text-sm font-semibold text-white block">Импорт в каталог</span>
-                  <span className="text-xs text-indigo-200/90">По артикулу подтягиваются фото и атрибуты; несколько магазинов дают данные для «идеальной» карточки.</span>
+                <div className={i < quickSteps.length - 1 ? 'pb-5' : ''}>
+                  <p className="text-sm font-medium text-slate-200 leading-tight">{step.title}</p>
+                  <p className="text-xs text-slate-500 mt-0.5">{step.desc}</p>
                 </div>
-              </li>
-              <li className="flex items-start gap-3">
-                <div className="w-9 h-9 shrink-0 rounded-full bg-indigo-500/20 flex items-center justify-center text-indigo-200 font-bold border border-indigo-500/30 text-sm">3</div>
-                <div>
-                  <span className="text-sm font-semibold text-white block">Перенос на площадку</span>
-                  <span className="text-xs text-indigo-200/90">ИИ подбирает категорию и поля; вы проверяете таблицу и нажимаете «Отправить».</span>
-                </div>
-              </li>
-            </ul>
+              </div>
+            ))}
           </div>
-          <div className="relative z-10 mt-8 flex flex-col gap-2">
-            <Link
-              to="/integrations"
-              className="w-full bg-indigo-500 hover:bg-indigo-400 text-white font-semibold py-3 rounded-xl text-center shadow-lg transition-all"
-            >
-              Шаг 1: Подключить магазин
-            </Link>
-            <Link
-              to="/products"
-              className="w-full bg-white/10 hover:bg-white/15 text-white font-medium py-2.5 rounded-xl text-center border border-white/20 text-sm"
-            >
-              Перейти в каталог
-            </Link>
+
+          <div className="flex flex-col gap-2 mt-6 pt-4 border-t border-[#1e1e2c]">
+            <button className="w-full bg-indigo-500 hover:bg-indigo-600 text-white font-medium py-2 rounded-lg text-sm transition-colors flex items-center justify-center gap-1.5">
+              Начать импорт
+              <ChevronRight className="w-3.5 h-3.5" />
+            </button>
+            <button className="w-full bg-transparent hover:bg-[#1c1c28] border border-[#1e1e2c] text-slate-300 font-medium py-2 rounded-lg text-sm transition-colors">
+              Посмотреть документацию
+            </button>
           </div>
         </div>
       </div>
-    </div>
-  )
-}
 
-          <Link
-            to="/documentation"
-            className="bg-slate-100 dark:bg-slate-800 border border-slate-200 dark:border-slate-600 rounded-lg px-4 py-2 hover:bg-slate-200 dark:hover:bg-slate-700 flex items-center gap-2 font-medium text-slate-700 dark:text-slate-200"
-          >
-            <Sparkles className="w-4 h-4 text-purple-500" /> Документация
-          </Link>
+      {error && (
+        <div className="mt-4 bg-red-500/10 border border-red-500/20 text-red-400 text-sm p-3 rounded-lg">
+          Ошибка загрузки данных: {error}
+        </div>
+      )}
+    </div>
+  );
+};
+
+export default DashboardPage;

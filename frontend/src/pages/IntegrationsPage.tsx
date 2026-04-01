@@ -1,141 +1,386 @@
-import { useState, useEffect } from 'react';
-import { api } from '../lib/api';
-import { marketplaceLabel } from '../lib/marketplaceUi';
+import React, { useState, useEffect } from 'react';
+
+// ─── Types ────────────────────────────────────────────────────────────────────
+
+type MarketplaceType = 'ozon' | 'yandex' | 'wildberries' | 'megamarket';
+
+interface Connection {
+  id: string | number;
+  name: string;
+  type: MarketplaceType | string;
+  api_key?: string;
+  client_id?: string;
+  status?: string;
+  [key: string]: unknown;
+}
+
+interface NewConnectionForm {
+  name: string;
+  type: MarketplaceType | '';
+  api_key: string;
+  client_id: string;
+}
+
+// ─── Marketplace meta ─────────────────────────────────────────────────────────
+
+const MARKETPLACES: {
+  type: MarketplaceType;
+  label: string;
+  initials: string;
+  color: string;
+  bgColor: string;
+  fields: { key: 'api_key' | 'client_id'; label: string; placeholder: string }[];
+}[] = [
+  {
+    type: 'ozon',
+    label: 'Ozon',
+    initials: 'OZ',
+    color: 'text-blue-400',
+    bgColor: 'bg-blue-500/15',
+    fields: [
+      { key: 'client_id', label: 'Client ID', placeholder: '123456' },
+      { key: 'api_key', label: 'API Key', placeholder: 'xxxx-xxxx-xxxx' },
+    ],
+  },
+  {
+    type: 'yandex',
+    label: 'Яндекс Маркет',
+    initials: 'YM',
+    color: 'text-yellow-400',
+    bgColor: 'bg-yellow-500/15',
+    fields: [
+      { key: 'client_id', label: 'Campaign ID', placeholder: '123456' },
+      { key: 'api_key', label: 'OAuth Token', placeholder: 'y0_xxxx' },
+    ],
+  },
+  {
+    type: 'wildberries',
+    label: 'Wildberries',
+    initials: 'WB',
+    color: 'text-purple-400',
+    bgColor: 'bg-purple-500/15',
+    fields: [{ key: 'api_key', label: 'API Token', placeholder: 'eyJhb...' }],
+  },
+  {
+    type: 'megamarket',
+    label: 'Мегамаркет',
+    initials: 'MM',
+    color: 'text-emerald-400',
+    bgColor: 'bg-emerald-500/15',
+    fields: [
+      { key: 'client_id', label: 'Merchant ID', placeholder: '123456' },
+      { key: 'api_key', label: 'API Key', placeholder: 'xxxx-xxxx' },
+    ],
+  },
+];
+
+function getMarketplaceMeta(type: string) {
+  return MARKETPLACES.find((m) => m.type === type) ?? null;
+}
+
+// ─── Connection Card ──────────────────────────────────────────────────────────
+
+function ConnectionCard({
+  connection,
+  onDelete,
+}: {
+  connection: Connection;
+  onDelete: (id: string | number) => void;
+}) {
+  const meta = getMarketplaceMeta(connection.type);
+
+  return (
+    <div className="bg-[#13131a] border border-[#1e1e2c] rounded-xl p-5 flex flex-col gap-3 hover:border-[#28283a] transition-colors group">
+      <div className="flex items-start justify-between">
+        <div className="flex items-center gap-3">
+          {/* Logo placeholder */}
+          <div
+            className={`w-10 h-10 rounded-xl flex items-center justify-center font-bold text-sm ${
+              meta ? `${meta.bgColor} ${meta.color}` : 'bg-[#1c1c28] text-slate-400'
+            }`}
+          >
+            {meta ? meta.initials : connection.type.slice(0, 2).toUpperCase()}
+          </div>
+          <div>
+            <p className="text-slate-100 font-medium text-sm leading-tight">{connection.name}</p>
+            <span className="inline-block mt-0.5 text-xs bg-[#1c1c28] text-slate-400 px-2 py-0.5 rounded">
+              {meta ? meta.label : connection.type}
+            </span>
+          </div>
+        </div>
+        <button
+          onClick={() => onDelete(connection.id)}
+          className="p-1.5 rounded-lg text-slate-700 hover:text-red-400 hover:bg-red-500/10 transition-all opacity-0 group-hover:opacity-100"
+          title="Удалить подключение"
+        >
+          <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              strokeWidth={2}
+              d="M19 7l-.867 12.142A2 2 0 0 1 16.138 21H7.862a2 2 0 0 1-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 0 0-1-1h-4a1 1 0 0 0-1 1v3M4 7h16"
+            />
+          </svg>
+        </button>
+      </div>
+
+      {/* Status */}
+      <div className="flex items-center gap-1.5">
+        <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 shadow-[0_0_6px_rgba(16,185,129,0.6)]" />
+        <span className="text-xs text-slate-500">
+          {connection.status === 'active' || !connection.status ? 'Подключено' : connection.status}
+        </span>
+      </div>
+    </div>
+  );
+}
+
+// ─── Main Component ───────────────────────────────────────────────────────────
 
 export default function IntegrationsPage() {
-  const [connections, setConnections] = useState([]);
-  const [newConn, setNewConn] = useState({
+  // ── State ──────────────────────────────────────────────────────────────────
+  const [connections, setConnections] = useState<Connection[]>([]);
+  const [showAddModal, setShowAddModal] = useState(false);
+  const [isLoading, setIsLoading] = useState(false);
+  const [isSaving, setIsSaving] = useState(false);
+  const [form, setForm] = useState<NewConnectionForm>({
     name: '',
-    type: 'ozon',
+    type: '',
     api_key: '',
     client_id: '',
-    store_id: '',
-    warehouse_id: '',
   });
 
+  // ── Fetch connections ──────────────────────────────────────────────────────
   useEffect(() => {
     fetchConnections();
   }, []);
 
-  const fetchConnections = async () => {
+  async function fetchConnections() {
+    setIsLoading(true);
     try {
-      const res = await api.get('/connections');
-      setConnections(res.data);
-    } catch {}
-  };
-
-  const handleCreate = async (e: any) => {
-    e.preventDefault();
-    try {
-      const payload = {
-        ...newConn,
-        warehouse_id: newConn.warehouse_id.trim() || undefined,
-      };
-      await api.post('/connections', payload);
-      setNewConn({ name: '', type: 'ozon', api_key: '', client_id: '', store_id: '', warehouse_id: '' });
-      fetchConnections();
-    } catch (err) {
-      console.error(err);
-      alert('Ошибка при сохранении подключения. Возможно Бэкенд ещё не обновлен.');
+      const res = await fetch('/api/integrations');
+      const data = await res.json();
+      setConnections(Array.isArray(data) ? data : data.connections ?? []);
+    } catch (e) {
+      console.error('Failed to fetch connections', e);
+    } finally {
+      setIsLoading(false);
     }
-  };
+  }
 
+  // ── Handlers ───────────────────────────────────────────────────────────────
+  async function handleAdd() {
+    if (!form.name.trim() || !form.type) return;
+    setIsSaving(true);
+    try {
+      const res = await fetch('/api/integrations', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name: form.name,
+          type: form.type,
+          api_key: form.api_key,
+          client_id: form.client_id,
+        }),
+      });
+      const data = await res.json();
+      console.log('Connection added', data);
+      setShowAddModal(false);
+      setForm({ name: '', type: '', api_key: '', client_id: '' });
+      fetchConnections();
+    } catch (e) {
+      console.error('Failed to add connection', e);
+    } finally {
+      setIsSaving(false);
+    }
+  }
+
+  async function handleDelete(id: string | number) {
+    try {
+      await fetch(`/api/integrations/${id}`, { method: 'DELETE' });
+      setConnections((prev) => prev.filter((c) => c.id !== id));
+    } catch (e) {
+      console.error('Failed to delete connection', e);
+    }
+  }
+
+  function closeModal() {
+    setShowAddModal(false);
+    setForm({ name: '', type: '', api_key: '', client_id: '' });
+  }
+
+  const selectedMeta = form.type ? getMarketplaceMeta(form.type) : null;
+  const canSave = form.name.trim() && form.type && form.api_key.trim();
+
+  // ─────────────────────────────────────────────────────────────────────────
   return (
-    <div className="flex flex-col gap-6">
-      <div>
-        <h2 className="text-2xl font-bold text-slate-900 dark:text-white">Магазины и ключи API</h2>
-        <p className="text-gray-600 dark:text-gray-400 mt-1 max-w-3xl">
-          Здесь вы привязываете реальные магазины к системе. Несколько магазинов одной площадки (например, два Ozon) — это <strong>два отдельных подключения</strong>: так ИИ сможет скачать одну и ту же модель с разных витрин и собрать из данных одну полную карточку в каталоге.
-        </p>
-      </div>
-
-      <div className="rounded-xl border border-indigo-200 dark:border-indigo-900/50 bg-indigo-50/80 dark:bg-indigo-950/40 p-4 text-sm text-indigo-950 dark:text-indigo-100">
-        <p className="font-semibold mb-2">Подсказки по полям</p>
-        <ul className="list-disc pl-5 space-y-1 text-indigo-900/90 dark:text-indigo-200/90">
-          <li><strong>Ozon</strong> — Client-Id и Api-Key из кабинета продавца.</li>
-          <li><strong>Яндекс Маркет</strong> — рекомендуется токен <strong>Api-Key</strong> (поле ключа); при OAuth укажите ещё Client ID. В «businessId» — число кабинета из API.</li>
-          <li><strong>Wildberries</strong> — токен категории «Контент».</li>
-          <li><strong>Мегамаркет</strong> — токен продавца; при необходимости отдельно укажите склад для цены и остатка.</li>
-        </ul>
-      </div>
-      
-      <form onSubmit={handleCreate} className="bg-white dark:bg-slate-800 p-4 rounded shadow grid gap-4 lg:grid-cols-3 items-end">
-        <label className="flex flex-col">
-          <span className="text-sm font-medium">Маркетплейс</span>
-          <select
-            className="border rounded p-2 text-black"
-            value={newConn.type}
-            onChange={(e) =>
-              setNewConn({ ...newConn, type: e.target.value, warehouse_id: e.target.value === 'megamarket' ? newConn.warehouse_id : '' })
-            }
+    <div className="min-h-screen bg-[#0d0d10] text-slate-100 pb-10">
+      {/* ── Page Header ───────────────────────────────────────────────────── */}
+      <div className="px-6 pt-8 pb-6">
+        <div className="flex items-center justify-between">
+          <div>
+            <h1 className="text-xl font-semibold text-slate-100">Подключения к маркетплейсам</h1>
+            <p className="text-sm text-slate-600 mt-0.5">Управляйте интеграциями с торговыми площадками</p>
+          </div>
+          <button
+            onClick={() => setShowAddModal(true)}
+            className="bg-indigo-500 hover:bg-indigo-600 text-white px-4 py-2 rounded-lg text-sm font-medium transition-all"
           >
-            <option value="ozon">Ozon</option>
-            <option value="yandex">Яндекс.Маркет</option>
-            <option value="megamarket">Мегамаркет</option>
-            <option value="wildberries">Wildberries</option>
-          </select>
-        </label>
-        <label className="flex flex-col">
-          <span className="text-sm font-medium">Название магазина (для себя)</span>
-          <input required className="border rounded p-2 text-black" value={newConn.name} onChange={e => setNewConn({...newConn, name: e.target.value})} placeholder="Магазин Обуви - Ozon" />
-        </label>
-        <label className="flex flex-col">
-          <span className="text-sm font-medium">API Ключ / Token</span>
-          <input required className="border rounded p-2 text-black" value={newConn.api_key} onChange={e => setNewConn({...newConn, api_key: e.target.value})} placeholder="токен..." />
-        </label>
-        <label className="flex flex-col">
-          <span className="text-sm font-medium">
-            {newConn.type === 'yandex' ? 'OAuth: Client ID (если только Api-Key — оставьте пустым)' : 'Client ID (если применимо)'}
-          </span>
-          <input className="border rounded p-2 text-black" value={newConn.client_id} onChange={e => setNewConn({...newConn, client_id: e.target.value})} placeholder={newConn.type === 'yandex' ? 'oauth_client_id для OAuth' : 'client id...'} />
-        </label>
-        <label className="flex flex-col">
-          <span className="text-sm font-medium">
-            {newConn.type === 'yandex'
-              ? 'Я.Маркет: businessId кабинета (число)'
-              : 'Store ID / ФБС (если применимо)'}
-          </span>
-          <input className="border rounded p-2 text-black" value={newConn.store_id} onChange={e => setNewConn({...newConn, store_id: e.target.value})} placeholder={newConn.type === 'yandex' ? 'из GET /v2/campaigns' : 'store id...'} />
-        </label>
-        {newConn.type === 'megamarket' && (
-          <label className="flex flex-col lg:col-span-2">
-            <span className="text-sm font-medium">Мегамаркет: locationId склада</span>
-            <input
-              className="border rounded p-2 text-black"
-              value={newConn.warehouse_id}
-              onChange={(e) => setNewConn({ ...newConn, warehouse_id: e.target.value })}
-              placeholder="из кабинета / API (для price/updateByOfferId и stock/updateByOfferId)"
-            />
-            <span className="text-xs text-gray-500 dark:text-gray-400 mt-1">
-              Без склада цена и остаток после выгрузки карточки не отправляются (или задайте MEGAMARKET_DEFAULT_LOCATION_ID на сервере).
-            </span>
-          </label>
-        )}
-        <button type="submit" className="bg-blue-600 text-white px-4 py-2 rounded hover:bg-blue-700">Подключить магазин</button>
-      </form>
-
-      <div className="bg-white dark:bg-slate-800 rounded shadow overflow-hidden mt-4">
-        <table className="w-full text-left">
-          <thead className="bg-slate-100 dark:bg-slate-900">
-            <tr>
-              <th className="p-4 border-b">Площадка</th>
-              <th className="p-4 border-b">Название</th>
-              <th className="p-4 border-b">Client ID</th>
-              <th className="p-4 border-b">Склад (MM)</th>
-            </tr>
-          </thead>
-          <tbody>
-            {connections.map((c: any) => (
-              <tr key={c.id} className="hover:bg-slate-50 dark:hover:bg-slate-700">
-                <td className="p-4 border-b font-semibold text-slate-800 dark:text-slate-200">{marketplaceLabel(c.type)}</td>
-                <td className="p-4 border-b">{c.name}</td>
-                <td className="p-4 border-b">{c.client_id || '-'}</td>
-                <td className="p-4 border-b font-mono text-sm">{c.type === 'megamarket' ? c.warehouse_id || '—' : '—'}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
+            + Добавить
+          </button>
+        </div>
       </div>
+
+      {/* ── Connections grid ───────────────────────────────────────────────── */}
+      <div className="px-6">
+        {isLoading ? (
+          <div className="flex items-center justify-center py-20 gap-3 text-slate-600">
+            <div className="w-5 h-5 border-2 border-indigo-500 border-t-transparent rounded-full animate-spin" />
+            <span className="text-sm">Загрузка...</span>
+          </div>
+        ) : connections.length === 0 ? (
+          <div className="flex flex-col items-center justify-center py-24 gap-4 text-slate-600">
+            <div className="w-14 h-14 rounded-2xl bg-[#13131a] border border-[#1e1e2c] flex items-center justify-center">
+              <svg className="w-7 h-7" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  strokeWidth={1.5}
+                  d="M13.828 10.172a4 4 0 0 0-5.656 0l-4 4a4 4 0 1 0 5.656 5.656l1.102-1.101m-.758-4.899a4 4 0 0 0 5.656 0l4-4a4 4 0 0 0-5.656-5.656l-1.1 1.1"
+                />
+              </svg>
+            </div>
+            <div className="text-center">
+              <p className="text-sm font-medium text-slate-500">Нет подключений</p>
+              <p className="text-xs text-slate-700 mt-1">Добавьте первый маркетплейс для синхронизации товаров</p>
+            </div>
+            <button
+              onClick={() => setShowAddModal(true)}
+              className="bg-indigo-500 hover:bg-indigo-600 text-white px-4 py-2 rounded-lg text-sm font-medium transition-all"
+            >
+              + Добавить подключение
+            </button>
+          </div>
+        ) : (
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
+            {connections.map((connection) => (
+              <ConnectionCard
+                key={connection.id}
+                connection={connection}
+                onDelete={handleDelete}
+              />
+            ))}
+            {/* Add card */}
+            <button
+              onClick={() => setShowAddModal(true)}
+              className="bg-[#13131a] border border-dashed border-[#28283a] rounded-xl p-5 flex flex-col items-center justify-center gap-2 text-slate-700 hover:text-slate-500 hover:border-[#3a3a54] transition-all min-h-[120px]"
+            >
+              <svg className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M12 4v16m8-8H4" />
+              </svg>
+              <span className="text-xs">Добавить</span>
+            </button>
+          </div>
+        )}
+      </div>
+
+      {/* ── Add connection modal ───────────────────────────────────────────── */}
+      {showAddModal && (
+        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center">
+          <div className="bg-[#13131a] border border-[#1e1e2c] rounded-2xl p-6 w-full max-w-md shadow-2xl">
+            {/* Header */}
+            <div className="flex items-center justify-between mb-5">
+              <h2 className="text-base font-semibold text-slate-100">Новое подключение</h2>
+              <button
+                onClick={closeModal}
+                className="text-slate-600 hover:text-slate-400 transition-colors"
+              >
+                <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                </svg>
+              </button>
+            </div>
+
+            <div className="space-y-5">
+              {/* Marketplace selector */}
+              <div>
+                <label className="block text-xs text-slate-500 mb-2">Площадка</label>
+                <div className="grid grid-cols-2 gap-2">
+                  {MARKETPLACES.map((mp) => (
+                    <button
+                      key={mp.type}
+                      onClick={() => setForm((f) => ({ ...f, type: mp.type }))}
+                      className={`flex items-center gap-3 p-3 rounded-xl border text-left transition-all ${
+                        form.type === mp.type
+                          ? 'border-indigo-500 bg-indigo-500/10'
+                          : 'border-[#28283a] bg-[#0d0d10] hover:border-[#3a3a54]'
+                      }`}
+                    >
+                      <div
+                        className={`w-8 h-8 rounded-lg flex items-center justify-center text-xs font-bold flex-shrink-0 ${mp.bgColor} ${mp.color}`}
+                      >
+                        {mp.initials}
+                      </div>
+                      <span className="text-sm text-slate-300 leading-tight">{mp.label}</span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* Connection name */}
+              <div>
+                <label className="block text-xs text-slate-500 mb-1.5">Название подключения</label>
+                <input
+                  value={form.name}
+                  onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))}
+                  placeholder="Мой магазин"
+                  className="w-full bg-[#0d0d10] border border-[#28283a] rounded-lg px-3 py-2 text-sm text-slate-100 placeholder:text-slate-700 focus:border-indigo-500 outline-none transition-colors"
+                />
+              </div>
+
+              {/* Dynamic marketplace fields */}
+              {selectedMeta &&
+                selectedMeta.fields.map((field) => (
+                  <div key={field.key}>
+                    <label className="block text-xs text-slate-500 mb-1.5">{field.label}</label>
+                    <input
+                      value={form[field.key]}
+                      onChange={(e) => setForm((f) => ({ ...f, [field.key]: e.target.value }))}
+                      placeholder={field.placeholder}
+                      className="w-full bg-[#0d0d10] border border-[#28283a] rounded-lg px-3 py-2 text-sm text-slate-100 placeholder:text-slate-700 focus:border-indigo-500 outline-none transition-colors font-mono"
+                    />
+                  </div>
+                ))}
+
+              {/* Fallback if no marketplace selected yet */}
+              {!selectedMeta && (
+                <p className="text-xs text-slate-700 text-center py-2">
+                  Выберите площадку выше для продолжения
+                </p>
+              )}
+            </div>
+
+            <div className="flex justify-end gap-2 mt-6">
+              <button
+                onClick={closeModal}
+                className="bg-[#1c1c28] hover:bg-[#28283a] border border-[#1e1e2c] text-slate-300 px-3 py-1.5 rounded-lg text-sm transition-all"
+              >
+                Отмена
+              </button>
+              <button
+                onClick={handleAdd}
+                disabled={!canSave || isSaving}
+                className="bg-indigo-500 hover:bg-indigo-600 disabled:opacity-40 disabled:cursor-not-allowed text-white px-4 py-2 rounded-lg text-sm font-medium transition-all flex items-center gap-2"
+              >
+                {isSaving && (
+                  <span className="w-3.5 h-3.5 border-2 border-white/40 border-t-white rounded-full animate-spin" />
+                )}
+                Сохранить
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
