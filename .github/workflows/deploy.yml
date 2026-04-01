@@ -31,14 +31,17 @@ jobs:
             backend/venv/bin/pip install -r backend/requirements.txt -q
 
             echo '▶ Running DB migrations...'
-            cd backend && ../backend/venv/bin/python3 -m alembic upgrade head 2>/dev/null || echo 'Migration skipped' && cd ..
+            cd backend && ../backend/venv/bin/python3 -m alembic upgrade head && cd ..
 
             echo '▶ Building frontend...'
             cd frontend && npm ci --silent && npm run build && cd ..
 
-            echo '▶ Restarting services...'
+            echo '▶ Restarting backend services...'
             sudo systemctl restart pimv3-backend.service
             sudo systemctl restart pim-celery.service
             sudo systemctl restart pimv3-agent-worker.service
+
+            echo '▶ Reloading nginx...'
+            sudo systemctl reload nginx
 
             echo '✓ Deploy complete'

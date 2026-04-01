@@ -10,9 +10,6 @@ jobs:
   backend:
     name: Backend — lint & test
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: backend
 
     steps:
       - uses: actions/checkout@v4
@@ -24,13 +21,15 @@ jobs:
           cache-dependency-path: backend/requirements.txt
 
       - name: Install dependencies
-        run: pip install -r requirements.txt
+        run: pip install -r backend/requirements.txt pytest pytest-asyncio
 
       - name: Lint (ruff)
-        run: pip install ruff && ruff check . --ignore E501 || true
+        run: pip install ruff && ruff check backend/ --ignore E501,E402 || true
 
       - name: Test
-        run: pip install pytest pytest-asyncio && python -m pytest -q 2>/dev/null || echo "No tests found"
+        env:
+          PYTHONPATH: ${{ github.workspace }}
+        run: python -m pytest backend/tests/ -q
 
   frontend:
     name: Frontend — build
