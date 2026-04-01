@@ -178,6 +178,17 @@ async def system_status():
 
 @app.get("/api/v1/version")
 async def get_version():
+
+@app.get("/api/v1/uptime")
+async def get_uptime():
+    """Возвращает время работы сервера в секундах с момента запуска."""
+    import time
+    from backend.services.telemetry import get_server_start_time
+    start_time = get_server_start_time()
+    if start_time is None:
+        return {"uptime_seconds": 0, "message": "Start time not recorded"}
+    uptime = time.time() - start_time
+    return {"uptime_seconds": uptime, "uptime_human": str(timedelta(seconds=int(uptime)))}
     """Возвращает текущую версию бэкенда для мониторинга."""
     return {"version": "1.0.0", "service": "pimv3-backend", "timestamp": time.time()}
 
