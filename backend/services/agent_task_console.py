@@ -678,31 +678,37 @@ async def run_agent_task(task_id: str, ai_key: str = "") -> Dict[str, Any]:
             return {"ok": False, "error": "patch_proposal_failed", "proposal": proposal}
 
         prop = proposal.get("proposal", {}) if isinstance(proposal.get("proposal"), dict) else {}
+        applied_directly = bool(prop.get("applied_directly"))
         patch_text = str(prop.get("patch_unified_diff") or "")
-        if not patch_text.strip():
+        changed_files = prop.get("affected_files", []) if isinstance(prop.get("affected_files"), list) else []
+
+        if applied_directly:
+            # ReAct-агент уже записал файлы напрямую — пропускаем apply
+            _append_log(task_id, f"ReAct agent applied changes directly to {len(changed_files)} file(s), skipping patch apply step")
+            _append_team_message(task_id, "backend_dev", f"Агент применил изменения напрямую ({len(changed_files)} файлов).")
+            result["apply_patch"] = {"ok": True, "applied_directly": True}
+        elif not patch_text.strip():
             _set_task(task_id, {"status": "failed", "stage": "failed_empty_patch", "updated_at_ts": int(time.time()), "result": result})
             _append_log(task_id, "Patch proposal returned empty patch")
             return {"ok": False, "error": "empty_patch"}
+        else:
+            _set_task(task_id, {"stage": "execution_apply_patch", "progress_percent": 55, "eta_seconds": 170, "updated_at_ts": int(time.time())})
+            await _wait_if_paused(task_id)
+            _append_team_message(task_id, "backend_dev", "Применяю изменения к репозиторию.")
 
-        _set_task(task_id, {"stage": "execution_apply_patch", "progress_percent": 55, "eta_seconds": 170, "updated_at_ts": int(time.time())})
-        await _wait_if_paused(task_id)
-        _append_team_message(task_id, "backend_dev", "Применяю изменения к репозиторию.")
+            # [FIX-1] Stash перед применением — чтобы можно было откатиться
+            stash_result = _git_stash(workspace_root)
+            _append_log(task_id, f"Git stash before patch: ok={stash_result.get('ok')}")
 
-        # [FIX-1] Stash перед применением — чтобы можно было откатиться
-        stash_result = _git_stash(workspace_root)
-        _append_log(task_id, f"Git stash before patch: ok={stash_result.get('ok')}")
-
-        ap = _apply_unified_diff(workspace_root, patch_text)
-        result["apply_patch"] = ap
-        _append_log(task_id, f"Apply patch result: ok={ap.get('ok')}")
-        if not ap.get("ok"):
-            # Откатываем stash
-            _git_stash_pop(workspace_root)
-            _release_git_lock(task_id)
-            _set_task(task_id, {"status": "failed", "stage": "failed_apply_patch", "updated_at_ts": int(time.time()), "result": result})
-            return {"ok": False, "error": "apply_patch_failed", "apply": ap}
-
-        changed_files = prop.get("affected_files", []) if isinstance(prop.get("affected_files"), list) else []
+            ap = _apply_unified_diff(workspace_root, patch_text)
+            result["apply_patch"] = ap
+            _append_log(task_id, f"Apply patch result: ok={ap.get('ok')}")
+            if not ap.get("ok"):
+                # Откатываем stash
+                _git_stash_pop(workspace_root)
+                _release_git_lock(task_id)
+                _set_task(task_id, {"status": "failed", "stage": "failed_apply_patch", "updated_at_ts": int(time.time()), "result": result})
+                return {"ok": False, "error": "apply_patch_failed", "apply": ap}
         _set_task(task_id, {"stage": "execution_tests", "progress_percent": 68, "eta_seconds": 130, "updated_at_ts": int(time.time())})
         await _wait_if_paused(task_id)
         _queue_step(task_id, dev_queue, "implement", "Разработка завершена, передаю в QA.")
@@ -775,6 +781,24 @@ async def run_agent_task(task_id: str, ai_key: str = "") -> Dict[str, Any]:
     _release_git_lock(task_id)  # [FIX-4] освобождаем лок при успехе
     _append_log(task_id, "Task completed")
     _append_team_message(task_id, "project_manager", "Задача завершена. Отчёт и логи готовы.", kind="done")
+
+    # Сохраняем успешный кейс в память агента для будущих задач
+    try:
+        from backend.services.agent_memory import get_agent_memory
+        mem = get_agent_memory()
+        mem.add_case(
+            namespace=str(task.get("namespace") or "default"),
+            sku=str(task_id),
+            category_id=str(tt),
+            problem_text=str(task.get("description") or task.get("title") or "")[:500],
+            action_summary=str(rewrite_plan or "")[:500],
+            result_status="success",
+            metadata={"task_type": tt, "changed_files": changed_files},
+        )
+        _append_log(task_id, "Saved success case to agent memory")
+    except Exception as _mem_err:
+        _append_log(task_id, f"Memory save skipped: {_mem_err}")
+
     return {"ok": True, "task_id": task_id, "result": result}
 
 
