@@ -1045,11 +1045,11 @@ async def agent_task_create(
 
 
 @app.get("/api/v1/agent-tasks")
-async def agent_tasks_list(
-    limit: int = 100,
-    current_user: models.User = Depends(get_current_user),
-):
-    return list_agent_tasks(limit=limit)
+async def list_agent_tasks_endpoint(limit: int = 100, offset: int = 0, current_user: models.User = Depends(get_current_user)):
+    from backend.services.agent_task_console import list_agent_tasks
+    result = list_agent_tasks(limit=limit, offset=offset)
+    return result
+
 
 
 @app.get("/api/v1/agent-tasks/{task_id}")
@@ -1062,7 +1062,12 @@ async def agent_task_get(
 
 @app.get("/api/v1/agent-tasks/context7-connected")
 async def agent_context7_connected(current_user: models.User = Depends(get_current_user)):
-    """Возвращает статус подключения к MCP-серверу context7 для документации."""
+    """Возвращает статус подключения к MCP серверу context7."""
+    from backend.services.agent_task_console import context7_is_connected
+    return {"connected": context7_is_connected()}_is_connected()}_is_connected()}татус подключения к MCP-серверу context7 для документации."""
+"""Возвращает статус подключения к Context7 MCP серверу."""
+    connected = context7_is_connected()
+    return {"connected": connected}
     return {"connected": context7_is_connected()}
 
 
