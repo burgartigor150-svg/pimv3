@@ -78,6 +78,7 @@ from backend.services.agent_task_console import (
     context7_is_connected,
     set_task_control_state,
     answer_agent_clarification,
+    rollback_task,
 )
 from backend.services.agent_chat import (
     route_message_with_llm,
@@ -1047,6 +1048,60 @@ async def agent_task_clarify(
     if not answer:
         raise HTTPException(status_code=400, detail="answer is required")
     return answer_agent_clarification(task_id, answer)
+
+
+@app.post("/api/v1/agent/tasks/{task_id}/rollback")
+async def agent_task_rollback(
+    task_id: str,
+    current_user: models.User = Depends(get_current_user),
+):
+    """Откатить изменения задачи через git revert."""
+    return rollback_task(task_id)
+
+
+@app.get("/api/v1/agent/tasks/{task_id}/stream")
+async def agent_task_stream(task_id: str):
+    """SSE stream событий ReAct-агента для задачи."""
+    import asyncio
+    try:
+        from sse_starlette.sse import EventSourceResponse
+    except ImportError:
+        raise HTTPException(status_code=501, detail="sse_starlette not installed")
+
+    async def event_generator():
+        r = None
+        try:
+            import redis as _redis_lib
+            r = _redis_lib.Redis.from_url(
+                os.getenv("REDIS_URL", "redis://localhost:6379/0"),
+                decode_responses=True,
+            )
+            log_key = f"agent:stream_log:{task_id}"
+            history = r.lrange(log_key, 0, -1) or []
+            for msg in history:
+                yield {"data": msg}
+            pubsub = r.pubsub()
+            pubsub.subscribe(f"agent:stream:{task_id}")
+            for message in pubsub.listen():
+                if message["type"] == "message":
+                    yield {"data": message["data"]}
+                    try:
+                        data = json.loads(message["data"])
+                        if data.get("type") in ("completed", "error"):
+                            break
+                    except Exception:
+                        pass
+                await asyncio.sleep(0)
+        except Exception as e:
+            yield {"data": json.dumps({"type": "error", "data": str(e)})}
+        finally:
+            if r:
+                try:
+                    r.close()
+                except Exception:
+                    pass
+
+    return EventSourceResponse(event_generator())
 
 
 @app.post("/api/v1/agent-chat/message")

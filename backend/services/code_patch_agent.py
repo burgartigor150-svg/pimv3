@@ -1,10 +1,20 @@
 """
-code_patch_agent.py — ReAct Tool Loop агент для генерации кода. v5
+code_patch_agent.py — ReAct Tool Loop агент для генерации кода. v6
 
-Архитектура: LLM получает 14 инструментов и работает в цикле до 40 шагов.
+Архитектура: LLM получает 15 инструментов и работает в цикле до 40 шагов.
 Полное соответствие возможностям Claude Code внутри проекта.
 
-v5 новое:
+v6 новое (поверх v5):
+  - [#1]  Dry-run mode — dry_run=True не пишет на диск, возвращает preview
+  - [#2]  Scope enforcement — allowlist проверяет пути всех write-операций
+  - [#3]  find_dependents — найти все файлы, импортирующие данный модуль
+  - [#4]  Mypy check — после ruff запускает mypy, ошибки репортятся в summary
+  - [#5]  Task decomposition — LLM декомпозирует задачу на параллельные подзадачи
+  - [#6]  Streaming via Redis pub/sub — события агента в реальном времени
+  - [#7]  CHANGELOG update — автоматически обновляет CHANGELOG.md после task_done
+  - [#8]  Token budget awareness — отслеживает токены, сжимает историю при лимите
+
+v5 (сохранено):
   - [#1]  glob_files — поиск файлов по паттерну (**/*adapter*.py)
   - [#2]  Параллельные tool calls — обрабатываем все вызовы за один шаг
   - [#3]  web_fetch — скачать документацию по URL прямо во время задачи
@@ -24,6 +34,7 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import datetime
 import difflib
 import fnmatch
 import json
@@ -78,6 +89,26 @@ def _get_redis() -> Optional[redis.Redis]:
         except Exception:
             _redis_client = None
     return _redis_client
+
+
+# ---------------------------------------------------------------------------
+# [#6] Streaming via Redis pub/sub
+# ---------------------------------------------------------------------------
+
+def _publish_stream(task_id: str, event_type: str, data: Any) -> None:
+    """[#6] Публикуем событие агента в Redis pub/sub для стриминга."""
+    r = _get_redis()
+    if r is None or not task_id:
+        return
+    try:
+        import time
+        msg = json.dumps({"type": event_type, "data": data, "ts": time.time()}, ensure_ascii=False)
+        r.publish(f"agent:stream:{task_id}", msg)
+        r.rpush(f"agent:stream_log:{task_id}", msg)
+        r.ltrim(f"agent:stream_log:{task_id}", -200, -1)
+        r.expire(f"agent:stream_log:{task_id}", 3600)
+    except Exception:
+        pass
 
 
 # ---------------------------------------------------------------------------
@@ -170,6 +201,20 @@ TOOLS_SCHEMA = [
                     "max_chars": {"type": "integer", "description": "Max characters to return (default 8000)"}
                 },
                 "required": ["url"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "find_dependents",
+            "description": "Find all files that import a given module or file. Use before modifying a file to understand what else might break.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "file path to check (e.g. backend/models.py)"}
+                },
+                "required": ["path"]
             }
         }
     },
@@ -313,6 +358,67 @@ TOOLS_SCHEMA = [
         }
     }
 ]
+
+
+# ---------------------------------------------------------------------------
+# [#2] Scope enforcement helper
+# ---------------------------------------------------------------------------
+
+def _check_scope(path: str, allowlist: List[str]) -> Optional[str]:
+    """[#2] Проверяем, что path входит в allowlist (или в backend/tests/)."""
+    if not allowlist:
+        return None
+    if path.startswith("backend/tests/"):
+        return None
+    if path in allowlist:
+        return None
+    preview = allowlist[:5]
+    return (
+        f"SCOPE ERROR: {path} is not in the task allowlist. "
+        f"Allowed: {preview}. "
+        f"If you need to modify this file, it must be added to the task scope."
+    )
+
+
+# ---------------------------------------------------------------------------
+# [#3] find_dependents tool implementation
+# ---------------------------------------------------------------------------
+
+def _tool_find_dependents(path: str, workspace_root: str) -> str:
+    """[#3] Найти все файлы, импортирующие данный модуль."""
+    # Convert file path to module name: backend/models.py -> backend.models
+    module_name = path.removesuffix(".py").replace("/", ".")
+
+    try:
+        base = Path(workspace_root)
+        py_files = list(base.rglob("*.py"))
+        skip = {"__pycache__", "venv", ".venv", "node_modules"}
+        py_files = [f for f in py_files if not any(s in f.parts for s in skip)]
+
+        pattern_from = f"from {module_name}"
+        pattern_import = f"import {module_name}"
+
+        results: List[str] = []
+        for pyf in py_files:
+            try:
+                text = pyf.read_text(encoding="utf-8", errors="replace")
+                matching_lines = []
+                for lineno, line in enumerate(text.splitlines(), 1):
+                    if pattern_from in line or pattern_import in line:
+                        matching_lines.append(f"  line {lineno}: {line.strip()}")
+                if matching_lines:
+                    rel = str(pyf.relative_to(base))
+                    results.append(f"{rel}:\n" + "\n".join(matching_lines))
+            except Exception:
+                continue
+
+        if not results:
+            return f"No files found importing '{module_name}' (from path: {path})"
+
+        header = f"Files importing '{module_name}' ({len(results)} found):"
+        return header + "\n\n" + "\n\n".join(results)
+    except Exception as e:
+        return f"ERROR find_dependents: {e}"
 
 
 # ---------------------------------------------------------------------------
@@ -469,7 +575,18 @@ def _tool_web_fetch(url: str, max_chars: int, workspace_root: str) -> str:
         return f"ERROR fetching {url}: {e}"
 
 
-def _tool_write_file(path: str, content: str, workspace_root: str) -> Tuple[str, Optional[str]]:
+def _tool_write_file(
+    path: str,
+    content: str,
+    workspace_root: str,
+    dry_run: bool = False,
+    allowlist: Optional[List[str]] = None,
+) -> Tuple[str, Optional[str]]:
+    # [#2] Scope check
+    scope_err = _check_scope(path, allowlist or [])
+    if scope_err:
+        return scope_err, None
+
     abs_path = _safe_resolve(path, workspace_root)
     if abs_path is None:
         return f"ERROR: path traversal: {path}", None
@@ -480,6 +597,11 @@ def _tool_write_file(path: str, content: str, workspace_root: str) -> Tuple[str,
         import_err = _check_new_imports(content, workspace_root)
         if import_err:
             return f"WARNING: unresolvable imports: {import_err}", None
+
+    # [#1] Dry-run mode
+    if dry_run:
+        return f"DRY-RUN: would write {path} ({len(content)} chars)", path
+
     try:
         abs_path.parent.mkdir(parents=True, exist_ok=True)
         abs_path.write_text(content, encoding="utf-8")
@@ -488,7 +610,19 @@ def _tool_write_file(path: str, content: str, workspace_root: str) -> Tuple[str,
         return f"ERROR writing {path}: {e}", None
 
 
-def _tool_edit_file(path: str, old_snippet: str, new_snippet: str, workspace_root: str) -> Tuple[str, Optional[str]]:
+def _tool_edit_file(
+    path: str,
+    old_snippet: str,
+    new_snippet: str,
+    workspace_root: str,
+    dry_run: bool = False,
+    allowlist: Optional[List[str]] = None,
+) -> Tuple[str, Optional[str]]:
+    # [#2] Scope check
+    scope_err = _check_scope(path, allowlist or [])
+    if scope_err:
+        return scope_err, None
+
     abs_path = _safe_resolve(path, workspace_root)
     if abs_path is None:
         return f"ERROR: path traversal: {path}", None
@@ -526,6 +660,11 @@ def _tool_edit_file(path: str, old_snippet: str, new_snippet: str, workspace_roo
         ok, err = _validate_python_syntax(new_content, path)
         if not ok:
             return f"ERROR: syntax after edit — {err}", None
+
+    # [#1] Dry-run mode
+    if dry_run:
+        return f"DRY-RUN: would edit {path}", path
+
     try:
         abs_path.write_text(new_content, encoding="utf-8")
         return f"OK: edited {path}", path
@@ -533,7 +672,19 @@ def _tool_edit_file(path: str, old_snippet: str, new_snippet: str, workspace_roo
         return f"ERROR writing {path}: {e}", None
 
 
-def _tool_append_file(path: str, content: str, after_pattern: Optional[str], workspace_root: str) -> Tuple[str, Optional[str]]:
+def _tool_append_file(
+    path: str,
+    content: str,
+    after_pattern: Optional[str],
+    workspace_root: str,
+    dry_run: bool = False,
+    allowlist: Optional[List[str]] = None,
+) -> Tuple[str, Optional[str]]:
+    # [#2] Scope check
+    scope_err = _check_scope(path, allowlist or [])
+    if scope_err:
+        return scope_err, None
+
     abs_path = _safe_resolve(path, workspace_root)
     if abs_path is None:
         return f"ERROR: path traversal: {path}", None
@@ -558,6 +709,11 @@ def _tool_append_file(path: str, content: str, after_pattern: Optional[str], wor
         ok, err = _validate_python_syntax(new_content, path)
         if not ok:
             return f"ERROR: syntax after append — {err}", None
+
+    # [#1] Dry-run mode
+    if dry_run:
+        return f"DRY-RUN: would append {len(content)} chars to {path}", path
+
     try:
         abs_path.write_text(new_content, encoding="utf-8")
         return f"OK: appended {len(content)} chars to {path}", path
@@ -565,14 +721,29 @@ def _tool_append_file(path: str, content: str, after_pattern: Optional[str], wor
         return f"ERROR writing {path}: {e}", None
 
 
-def _tool_move_file(src: str, dst: str, workspace_root: str) -> Tuple[str, List[str]]:
+def _tool_move_file(
+    src: str,
+    dst: str,
+    workspace_root: str,
+    dry_run: bool = False,
+    allowlist: Optional[List[str]] = None,
+) -> Tuple[str, List[str]]:
     """[#8] Переместить/переименовать файл + обновить импорты."""
+    # [#2] Scope check (check destination)
+    scope_err = _check_scope(dst, allowlist or [])
+    if scope_err:
+        return scope_err, []
+
     abs_src = _safe_resolve(src, workspace_root)
     abs_dst = _safe_resolve(dst, workspace_root)
     if abs_src is None or abs_dst is None:
         return "ERROR: path traversal detected", []
     if not abs_src.exists():
         return f"ERROR: source not found: {src}", []
+
+    # [#1] Dry-run mode
+    if dry_run:
+        return f"DRY-RUN: would move {src} → {dst}", [dst]
 
     try:
         abs_dst.parent.mkdir(parents=True, exist_ok=True)
@@ -610,8 +781,19 @@ def _tool_move_file(src: str, dst: str, workspace_root: str) -> Tuple[str, List[
     return f"OK: moved {src} → {dst}", affected
 
 
-def _tool_delete_file(path: str, reason: str, workspace_root: str) -> Tuple[str, str]:
+def _tool_delete_file(
+    path: str,
+    reason: str,
+    workspace_root: str,
+    dry_run: bool = False,
+    allowlist: Optional[List[str]] = None,
+) -> Tuple[str, str]:
     """[#8] Удалить файл."""
+    # [#2] Scope check
+    scope_err = _check_scope(path, allowlist or [])
+    if scope_err:
+        return scope_err, ""
+
     abs_path = _safe_resolve(path, workspace_root)
     if abs_path is None:
         return f"ERROR: path traversal: {path}", ""
@@ -621,6 +803,11 @@ def _tool_delete_file(path: str, reason: str, workspace_root: str) -> Tuple[str,
     protected = {"backend/main.py", "backend/models.py", "backend/database.py", "backend/schemas.py"}
     if path in protected:
         return f"ERROR: cannot delete protected file: {path}", ""
+
+    # [#1] Dry-run mode
+    if dry_run:
+        return f"DRY-RUN: would delete {path} (reason: {reason})", path
+
     try:
         abs_path.unlink()
         return f"OK: deleted {path} (reason: {reason})", path
@@ -829,6 +1016,67 @@ def _run_ruff_check(affected_files: List[str], workspace_root: str) -> Dict[str,
         return {"ok": True, "skipped": True, "reason": str(e)}
 
 
+def _run_mypy_check(affected_files: List[str], workspace_root: str) -> Dict[str, Any]:
+    """[#4] Запускаем mypy проверку после ruff."""
+    py_files = [f for f in affected_files if f.endswith(".py")]
+    if not py_files:
+        return {"ok": True, "skipped": True}
+    try:
+        result = subprocess.run(
+            ["mypy", "--ignore-missing-imports", "--no-error-summary"] + py_files,
+            cwd=workspace_root, capture_output=True, text=True, timeout=60
+        )
+        issues = (result.stdout or "").strip()
+        stderr = (result.stderr or "").strip()
+        all_output = (issues + "\n" + stderr).strip()
+        return {
+            "ok": result.returncode == 0,
+            "issues": all_output[:2000] if all_output else "",
+            "files_checked": py_files,
+        }
+    except FileNotFoundError:
+        return {"ok": True, "skipped": True, "reason": "mypy not installed"}
+    except subprocess.TimeoutExpired:
+        return {"ok": True, "skipped": True, "reason": "mypy timed out"}
+    except Exception as e:
+        return {"ok": True, "skipped": True, "reason": str(e)}
+
+
+def _update_changelog(
+    workspace_root: str,
+    task_id: str,
+    task_title: str,
+    affected_files: List[str],
+    summary: str,
+) -> None:
+    """[#7] Обновляем CHANGELOG.md — добавляем запись в начало файла."""
+    try:
+        changelog_path = Path(workspace_root) / "CHANGELOG.md"
+
+        # Проверяем размер файла — пропускаем если > 50KB
+        if changelog_path.exists():
+            size = changelog_path.stat().st_size
+            if size > 50 * 1024:
+                log.info("CHANGELOG.md > 50KB, skipping update")
+                return
+            existing = changelog_path.read_text(encoding="utf-8", errors="replace")
+        else:
+            existing = ""
+
+        date_str = datetime.date.today().isoformat()
+        entry = (
+            f"## {date_str} — {task_title}\n"
+            f"- Task: {task_id}\n"
+            f"- Files: {affected_files}\n"
+            f"- {summary[:200]}\n\n"
+        )
+        new_content = entry + existing
+        changelog_path.write_text(new_content, encoding="utf-8")
+        log.info(f"CHANGELOG.md updated for task {task_id}")
+    except Exception:
+        pass  # Silently skip on any error
+
+
 def _compress_messages(messages: List[Dict], keep_recent: int = _KEEP_RECENT_MESSAGES) -> List[Dict]:
     if len(messages) <= keep_recent + 2:
         return messages
@@ -942,6 +1190,54 @@ async def _wait_for_user_answer(task_id: str, timeout: int = 300) -> Optional[st
 
 
 # ---------------------------------------------------------------------------
+# [#5] Task decomposition before react loop
+# ---------------------------------------------------------------------------
+
+async def _decompose_task(
+    client: Any,
+    model: str,
+    title: str,
+    description: str,
+) -> List[Dict]:
+    """[#5] Декомпозируем задачу на параллельные подзадачи через LLM."""
+    system_prompt = (
+        "You decompose software tasks. "
+        "Return JSON array of subtasks or empty array if task is simple enough for one agent."
+    )
+    user_prompt = (
+        f"Task: {title}\n{description}\n"
+        'Return JSON: [{"title": ..., "description": ..., "type": "backend|frontend|test"}] or []'
+    )
+    try:
+        response = await client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            temperature=0.0,
+            max_tokens=1000,
+        )
+        raw = (response.choices[0].message.content or "").strip()
+        # Extract JSON array from response
+        match = re.search(r"\[.*\]", raw, re.DOTALL)
+        if not match:
+            return []
+        subtasks = json.loads(match.group(0))
+        if not isinstance(subtasks, list):
+            return []
+        # Validate each subtask has required fields
+        valid = []
+        for s in subtasks:
+            if isinstance(s, dict) and s.get("title") and s.get("description"):
+                valid.append(s)
+        return valid
+    except Exception as e:
+        log.info(f"Task decomposition failed: {e}")
+        return []
+
+
+# ---------------------------------------------------------------------------
 # Субагенты для параллельных подзадач  [#10]
 # ---------------------------------------------------------------------------
 
@@ -954,6 +1250,8 @@ async def _run_subagent(
     workspace_root: str,
     conventions: str,
     task_id: str,
+    dry_run: bool = False,
+    allowlist: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     """[#10] Запускает независимый ReAct-цикл для подзадачи."""
     log.info(f"Subagent starting: {subtask_title}")
@@ -976,6 +1274,8 @@ async def _run_subagent(
         max_steps=20,
         progress_callback=None,
         is_subagent=True,
+        dry_run=dry_run,
+        allowlist=allowlist or [],
     )
 
 
@@ -1001,12 +1301,17 @@ async def _react_agent_loop(
     max_steps: int = _MAX_REACT_STEPS,
     progress_callback: Optional[Callable] = None,
     is_subagent: bool = False,
+    dry_run: bool = False,
+    allowlist: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     """
     ReAct (Reasoning + Acting) цикл.
     Шаг 0: thinking (tool_choice=auto) — агент пишет план
     Шаги 1+: tool_choice=required — агент действует
+
+    v6: dry_run, allowlist, streaming, token budget awareness
     """
+    allowlist = allowlist or []
     subagent_note = "\nYou are a subagent. Focus only on your specific subtask." if is_subagent else ""
 
     system_prompt = f"""You are an expert software engineer working on PIMv3 — a Python/FastAPI + React/TypeScript PIM system for Russian e-commerce marketplaces (Ozon, Wildberries, Yandex Market, Megamarket).{subagent_note}
@@ -1018,6 +1323,7 @@ async def _react_agent_loop(
 - search_code: grep search in source files
 - semantic_search: find relevant docs/code by meaning
 - web_fetch: fetch external API documentation URLs
+- find_dependents: find all files importing a given module
 - write_file: create NEW files only
 - edit_file: targeted edit (ALWAYS read_file first)
 - append_file: add to end of file or after a pattern
@@ -1044,7 +1350,8 @@ async def _react_agent_loop(
 - write tests for every new feature in backend/tests/test_<feature>.py
 - ask_user if the task is genuinely ambiguous (not enough info to proceed correctly)
 - git_status to review changes before task_done
-- semantic_search to find how similar problems were solved before{conventions}
+- semantic_search to find how similar problems were solved before
+- find_dependents before modifying shared modules to understand impact{conventions}
 
 {knowledge_context}
 {memory_context}
@@ -1070,21 +1377,43 @@ Start with your implementation plan (no tool call), then proceed step by step.""
     last_tool_was_error = False
     thinking_done = False  # [#7] первый шаг — plan без tool_choice
 
+    # [#8] Token budget tracking
+    total_tokens_used = 0
+
     for step in range(max_steps):
-        # Компрессия истории
-        if len(messages) > _MAX_MESSAGES_BEFORE_COMPRESS:
+        # [#8] Token-aware compression: aggressive at high usage
+        if total_tokens_used > 100000 or step > 30:
+            aggressive_keep = 5
+            if len(messages) > aggressive_keep + 2:
+                messages = _compress_messages(messages, keep_recent=aggressive_keep)
+                log.info(f"Step {step}: aggressive compression (tokens={total_tokens_used})")
+        elif len(messages) > _MAX_MESSAGES_BEFORE_COMPRESS:
             messages = _compress_messages(messages)
             log.info(f"Step {step}: compressed history to {len(messages)} messages")
+
+        # [#8] Add step-limit warning
+        extra_user_msg: Optional[str] = None
+        if step > 35:
+            extra_user_msg = (
+                "WARNING: approaching step limit. "
+                "Finish the current subtask and call task_done soon."
+            )
 
         # [#7] Первый шаг — thinking/planning без принудительного tool call
         use_tool_choice: Any = "required"
         if not thinking_done and step == 0:
             use_tool_choice = "auto"
 
+        # Inject step warning into messages temporarily if needed
+        if extra_user_msg:
+            messages_to_send = messages + [{"role": "user", "content": extra_user_msg}]
+        else:
+            messages_to_send = messages
+
         try:
             response = await client.chat.completions.create(
                 model=model,
-                messages=messages,
+                messages=messages_to_send,
                 tools=TOOLS_SCHEMA,
                 tool_choice=use_tool_choice,
                 temperature=0.1,
@@ -1092,7 +1421,13 @@ Start with your implementation plan (no tool call), then proceed step by step.""
             )
         except Exception as e:
             log.error(f"ReAct step {step} LLM error: {e}")
+            _publish_stream(task_id, "error", {"message": str(e)})
             return {"ok": False, "error": f"llm_error_at_step_{step}: {e}"}
+
+        # [#8] Track token usage
+        if hasattr(response, "usage") and response.usage is not None:
+            step_tokens = getattr(response.usage, "total_tokens", 0) or 0
+            total_tokens_used += step_tokens
 
         msg = response.choices[0].message
         tool_calls = msg.tool_calls or []
@@ -1144,6 +1479,14 @@ Start with your implementation plan (no tool call), then proceed step by step.""
                 tool_args = {}
 
             log.info(f"  Tool: {tool_name}({list(tool_args.keys())})")
+
+            # [#6] Publish tool call event
+            _publish_stream(task_id, "tool_call", {
+                "step": step,
+                "tool": tool_name,
+                "args_summary": list(tool_args.keys()),
+            })
+
             tool_result = ""
             is_write_op = False
 
@@ -1181,9 +1524,20 @@ Start with your implementation plan (no tool call), then proceed step by step.""
                     workspace_root,
                 )
 
+            elif tool_name == "find_dependents":
+                # [#3] find_dependents
+                tool_result = _tool_find_dependents(
+                    tool_args.get("path", ""),
+                    workspace_root,
+                )
+
             elif tool_name == "write_file":
                 msg_str, affected = _tool_write_file(
-                    tool_args.get("path", ""), tool_args.get("content", ""), workspace_root
+                    tool_args.get("path", ""),
+                    tool_args.get("content", ""),
+                    workspace_root,
+                    dry_run=dry_run,
+                    allowlist=allowlist,
                 )
                 tool_result = msg_str
                 if affected and affected not in affected_files:
@@ -1196,6 +1550,8 @@ Start with your implementation plan (no tool call), then proceed step by step.""
                     tool_args.get("old_snippet", ""),
                     tool_args.get("new_snippet", ""),
                     workspace_root,
+                    dry_run=dry_run,
+                    allowlist=allowlist,
                 )
                 tool_result = msg_str
                 if affected and affected not in affected_files:
@@ -1208,6 +1564,8 @@ Start with your implementation plan (no tool call), then proceed step by step.""
                     tool_args.get("content", ""),
                     tool_args.get("after_pattern"),
                     workspace_root,
+                    dry_run=dry_run,
+                    allowlist=allowlist,
                 )
                 tool_result = msg_str
                 if affected and affected not in affected_files:
@@ -1216,7 +1574,11 @@ Start with your implementation plan (no tool call), then proceed step by step.""
 
             elif tool_name == "move_file":
                 msg_str, mv_affected = _tool_move_file(
-                    tool_args.get("src", ""), tool_args.get("dst", ""), workspace_root
+                    tool_args.get("src", ""),
+                    tool_args.get("dst", ""),
+                    workspace_root,
+                    dry_run=dry_run,
+                    allowlist=allowlist,
                 )
                 tool_result = msg_str
                 for f in mv_affected:
@@ -1226,7 +1588,11 @@ Start with your implementation plan (no tool call), then proceed step by step.""
 
             elif tool_name == "delete_file":
                 msg_str, del_path = _tool_delete_file(
-                    tool_args.get("path", ""), tool_args.get("reason", ""), workspace_root
+                    tool_args.get("path", ""),
+                    tool_args.get("reason", ""),
+                    workspace_root,
+                    dry_run=dry_run,
+                    allowlist=allowlist,
                 )
                 tool_result = msg_str
                 if del_path:
@@ -1271,12 +1637,55 @@ Start with your implementation plan (no tool call), then proceed step by step.""
                     )
                     has_error = True
                 else:
+                    # [#4] Mypy check (non-blocking — just report)
+                    mypy_result = _run_mypy_check(all_affected, workspace_root)
+                    mypy_note = ""
+                    if not mypy_result.get("skipped") and not mypy_result.get("ok"):
+                        mypy_issues = mypy_result.get("issues", "")
+                        mypy_note = f"\nMypy warnings:\n{mypy_issues}"
+                        log.info(f"Step {step}: mypy issues (non-blocking): {mypy_issues[:200]}")
+
                     log.info(f"task_done after {step} steps. Files: {all_affected}")
                     messages.append({
                         "role": "tool",
                         "tool_call_id": tc.id,
                         "content": "Task marked as done.",
                     })
+
+                    # [#7] Update CHANGELOG
+                    _update_changelog(
+                        workspace_root=workspace_root,
+                        task_id=task_id,
+                        task_title=task_title,
+                        affected_files=all_affected,
+                        summary=summary,
+                    )
+
+                    # [#6] Publish completed event
+                    _publish_stream(task_id, "completed", {
+                        "summary": summary,
+                        "files": all_affected,
+                    })
+
+                    # [#1] Dry-run response
+                    if dry_run:
+                        return {
+                            "ok": True,
+                            "proposal": {
+                                "dry_run": True,
+                                "applied_directly": False,
+                                "affected_files": all_affected,
+                                "deleted_files": deleted_files,
+                                "plan": steps_log,
+                                "summary": summary,
+                                "wrote_tests": wrote_tests,
+                                "steps": step + 1,
+                                "steps_log": steps_log,
+                                "lint": lint_result,
+                                "mypy": mypy_result,
+                            },
+                        }
+
                     return {
                         "ok": True,
                         "proposal": {
@@ -1284,11 +1693,12 @@ Start with your implementation plan (no tool call), then proceed step by step.""
                             "affected_files": all_affected,
                             "deleted_files": deleted_files,
                             "applied_directly": True,
-                            "summary": summary,
+                            "summary": summary + mypy_note,
                             "wrote_tests": wrote_tests,
                             "steps": step + 1,
                             "steps_log": steps_log,
                             "lint": lint_result,
+                            "mypy": mypy_result,
                         },
                     }
                 task_done_called = True
@@ -1304,6 +1714,13 @@ Start with your implementation plan (no tool call), then proceed step by step.""
                 "role": "tool",
                 "tool_call_id": tc.id,
                 "content": str(tool_result)[:8000],
+            })
+
+            # [#6] Publish tool result event
+            _publish_stream(task_id, "tool_result", {
+                "step": step,
+                "tool": tool_name,
+                "result_preview": str(tool_result)[:200],
             })
 
             # [#1] Авто-подсказка при ошибке edit/append
@@ -1322,6 +1739,7 @@ Start with your implementation plan (no tool call), then proceed step by step.""
         last_tool_was_error = has_error and not is_write_op
 
     log.warning(f"ReAct loop exceeded {max_steps} steps without task_done")
+    _publish_stream(task_id, "error", {"message": f"max_steps_{max_steps}_exceeded"})
     return {
         "ok": False,
         "error": f"max_steps_{max_steps}_exceeded",
@@ -1341,9 +1759,15 @@ async def generate_code_patch_proposal(
     workspace_root: str = _WORKSPACE_ROOT,
     task_id: str = "",
     progress_callback: Optional[Callable] = None,
+    dry_run: bool = False,
+    allowlist: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     """
-    Главная функция агента. Запускает ReAct Tool Loop v5.
+    Главная функция агента. Запускает ReAct Tool Loop v6.
+
+    Args:
+        dry_run: если True, файлы не записываются на диск (preview mode)
+        allowlist: список разрешённых путей для записи (пустой = без ограничений)
     """
     from backend.services.ai_service import get_client_and_model
 
@@ -1363,6 +1787,8 @@ async def generate_code_patch_proposal(
     if not title and not description:
         return {"ok": False, "error": "empty_task_description"}
 
+    effective_allowlist = allowlist or allowlist_files or []
+
     conventions = _load_conventions(workspace_root)
     knowledge_context = _build_knowledge_context(rewrite_plan)
     file_tree = _build_file_tree(workspace_root)
@@ -1370,6 +1796,69 @@ async def generate_code_patch_proposal(
     baseline_tests = _run_baseline_tests(workspace_root)
     memory_context = _load_memory_context(description or title, workspace_root)  # [#5]
 
+    # [#5] Task decomposition — try to split into parallel subtasks
+    subtasks = await _decompose_task(client, model, title, description)
+
+    if len(subtasks) >= 2:
+        log.info(f"Decomposed into {len(subtasks)} subtasks: {[s['title'] for s in subtasks]}")
+        subagent_tasks = [
+            _run_subagent(
+                subtask_title=s["title"],
+                subtask_description=s["description"],
+                client=client,
+                model=model,
+                workspace_root=workspace_root,
+                conventions=conventions,
+                task_id=task_id,
+                dry_run=dry_run,
+                allowlist=effective_allowlist,
+            )
+            for s in subtasks
+        ]
+        results = await asyncio.gather(*subagent_tasks, return_exceptions=True)
+
+        # Merge results from all subagents
+        merged_affected: List[str] = []
+        merged_deleted: List[str] = []
+        merged_steps_log: List[str] = []
+        all_ok = True
+        errors = []
+
+        for i, res in enumerate(results):
+            if isinstance(res, Exception):
+                all_ok = False
+                errors.append(f"Subagent {i} exception: {res}")
+                continue
+            if not isinstance(res, dict):
+                continue
+            if not res.get("ok"):
+                all_ok = False
+                errors.append(f"Subagent {i} failed: {res.get('error', 'unknown')}")
+            proposal = res.get("proposal", {})
+            for f in proposal.get("affected_files", []):
+                if f not in merged_affected:
+                    merged_affected.append(f)
+            for f in proposal.get("deleted_files", []):
+                if f not in merged_deleted:
+                    merged_deleted.append(f)
+            merged_steps_log.extend(proposal.get("steps_log", []))
+
+        return {
+            "ok": all_ok,
+            "proposal": {
+                "patch_unified_diff": "",
+                "affected_files": merged_affected,
+                "deleted_files": merged_deleted,
+                "applied_directly": not dry_run,
+                "dry_run": dry_run,
+                "summary": f"Decomposed into {len(subtasks)} subtasks. Errors: {errors}" if errors else f"Completed {len(subtasks)} subtasks.",
+                "steps_log": merged_steps_log,
+                "subtasks": len(subtasks),
+            },
+            "errors": errors if errors else None,
+        }
+
+    # Single agent path
     return await _react_agent_loop(
         client=client,
         model=model,
@@ -1385,6 +1874,8 @@ async def generate_code_patch_proposal(
         memory_context=memory_context,
         task_id=task_id,
         progress_callback=progress_callback,
+        dry_run=dry_run,
+        allowlist=effective_allowlist,
     )
 
 
