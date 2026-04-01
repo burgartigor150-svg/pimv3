@@ -121,6 +121,7 @@ app = FastAPI(title="PIM V3 API")
 
 @app.get("/api/v1/health")
 async def health_check():
+    return {"status": "ok"}
 
 @app.get("/api/v1/system-status")
 async def system_status():
