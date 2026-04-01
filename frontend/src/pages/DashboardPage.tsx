@@ -3,10 +3,11 @@ import { Activity, Layers, Package, TrendingUp, Plus, Upload, RefreshCw, Chevron
 import { PieChart, Pie, Cell, ResponsiveContainer } from 'recharts';
 
 interface DashboardStats {
-  totalProducts: number;
-  activeListings: number;
-  syncedToday: number;
-  completeness: number;
+  total_products: number;
+  total_categories: number;
+  total_attributes: number;
+  total_connections: number;
+  average_completeness: number;
 }
 
 const DashboardPage: React.FC = () => {
@@ -18,7 +19,7 @@ const DashboardPage: React.FC = () => {
     const fetchStats = async () => {
       try {
         setLoading(true);
-        const response = await fetch('/api/v1/dashboard/stats');
+        const response = await fetch('/api/v1/stats');
         if (!response.ok) throw new Error('Failed to fetch stats');
         const data = await response.json();
         setStats(data);
@@ -32,7 +33,7 @@ const DashboardPage: React.FC = () => {
     fetchStats();
   }, []);
 
-  const completenessValue = stats?.completeness ?? 72;
+  const completenessValue = stats?.average_completeness ?? 72;
   const pieData = [
     { name: 'Filled', value: completenessValue },
     { name: 'Empty', value: 100 - completenessValue },
@@ -42,28 +43,28 @@ const DashboardPage: React.FC = () => {
     {
       icon: <Package className="w-5 h-5 text-blue-400" />,
       iconBg: 'bg-blue-500/10',
-      value: stats?.totalProducts?.toLocaleString() ?? '—',
+      value: stats?.total_products?.toLocaleString() ?? '—',
       label: 'Товаров',
       trend: '+12% this week',
     },
     {
       icon: <Layers className="w-5 h-5 text-purple-400" />,
       iconBg: 'bg-purple-500/10',
-      value: stats?.activeListings?.toLocaleString() ?? '—',
+      value: stats?.total_attributes?.toLocaleString() ?? '—',
       label: 'Активных листингов',
       trend: '+5% this week',
     },
     {
       icon: <Activity className="w-5 h-5 text-emerald-400" />,
       iconBg: 'bg-emerald-500/10',
-      value: stats?.syncedToday?.toLocaleString() ?? '—',
+      value: stats?.total_connections?.toLocaleString() ?? '—',
       label: 'Синхронизировано сегодня',
       trend: '+8% this week',
     },
     {
       icon: <TrendingUp className="w-5 h-5 text-orange-400" />,
       iconBg: 'bg-orange-500/10',
-      value: stats ? `${stats.completeness}%` : '—',
+      value: stats ? `${stats.average_completeness}%` : '—',
       label: 'Заполненность каталога',
       trend: '+3% this week',
     },

@@ -158,7 +158,7 @@ export default function IntegrationsPage() {
   async function fetchConnections() {
     setIsLoading(true);
     try {
-      const res = await fetch('/api/integrations');
+      const res = await fetch('/api/v1/connections');
       const data = await res.json();
       setConnections(Array.isArray(data) ? data : data.connections ?? []);
     } catch (e) {
@@ -173,7 +173,7 @@ export default function IntegrationsPage() {
     if (!form.name.trim() || !form.type) return;
     setIsSaving(true);
     try {
-      const res = await fetch('/api/integrations', {
+      const res = await fetch('/api/v1/connections', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -197,7 +197,7 @@ export default function IntegrationsPage() {
 
   async function handleDelete(id: string | number) {
     try {
-      await fetch(`/api/integrations/${id}`, { method: 'DELETE' });
+      await fetch(`/api/v1/connections/${id}`, { method: 'DELETE' });
       setConnections((prev) => prev.filter((c) => c.id !== id));
     } catch (e) {
       console.error('Failed to delete connection', e);
