@@ -121,6 +121,57 @@ app = FastAPI(title="PIM V3 API")
 
 @app.get("/api/v1/health")
 async def health_check():
+
+@app.get("/api/v1/system-status")
+async def system_status():
+    """Возвращает статус зависимостей: PostgreSQL, Redis, Celery."""
+    import psycopg2
+    from redis import Redis
+    from celery import Celery
+    from sqlalchemy import text
+    from backend.database import engine
+    from backend.celery_worker import celery_app, redis_client
+    import time
+    
+    status = {
+        "timestamp": time.time(),
+        "postgresql": "unknown",
+        "redis": "unknown",
+        "celery": "unknown",
+        "details": {}
+    }
+    
+    # Проверка PostgreSQL
+    try:
+        async with engine.connect() as conn:
+            await conn.execute(text("SELECT 1"))
+            status["postgresql"] = "ok"
+    except Exception as e:
+        status["postgresql"] = "error"
+        status["details"]["postgresql_error"] = str(e)
+    
+    # Проверка Redis
+    try:
+        if redis_client.ping():
+            status["redis"] = "ok"
+        else:
+            status["redis"] = "error"
+    except Exception as e:
+        status["redis"] = "error"
+        status["details"]["redis_error"] = str(e)
+    
+    # Проверка Celery
+    try:
+        inspect = celery_app.control.inspect()
+        if inspect.active():
+            status["celery"] = "ok"
+        else:
+            status["celery"] = "no_workers"
+    except Exception as e:
+        status["celery"] = "error"
+        status["details"]["celery_error"] = str(e)
+    
+    return status
     """Проверка работоспособности backend."""
     return {"status": "ok", "service": "pimv3-backend", "timestamp": time.time()}
 
@@ -901,6 +952,12 @@ async def agent_task_get(
     current_user: models.User = Depends(get_current_user),
 ):
     return get_agent_task(task_id)
+
+
+@app.get("/api/v1/agent-tasks/context7-connected")
+async def agent_context7_connected(current_user: models.User = Depends(get_current_user)):
+    """Возвращает статус подключения к MCP-серверу context7 для документации."""
+    return {"connected": context7_is_connected()}
 
 
 @app.post("/api/v1/agent-tasks/{task_id}/run")
