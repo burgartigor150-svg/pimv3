@@ -823,3 +823,17 @@ def run_agent_task_in_background(task_id: str, ai_key: str = "") -> None:
         )
         _append_log(task_id, f"Task failed: {e}")
 
+
+def answer_agent_clarification(task_id: str, answer: str) -> Dict[str, Any]:
+    """Ответить на вопрос агента (ask_user). Агент возобновит работу автоматически."""
+    raw = _redis.hgetall(_task_key(task_id)) or {}
+    if not raw:
+        return {"ok": False, "error": "task not found"}
+    status = str(raw.get("status") or "")
+    if status != "waiting_user":
+        return {"ok": False, "error": f"task is not waiting for answer (status={status})"}
+    _redis.hset(_task_key(task_id), "clarification_answer", str(answer or "").strip())
+    _append_log(task_id, f"User answered clarification: {answer[:100]}")
+    _append_team_message(task_id, "user", f"Ответ на вопрос агента: {answer}", kind="clarification")
+    return {"ok": True, "task_id": task_id}
+

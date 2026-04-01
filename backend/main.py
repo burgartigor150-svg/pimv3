@@ -77,6 +77,7 @@ from backend.services.agent_task_console import (
     run_agent_task,
     context7_is_connected,
     set_task_control_state,
+    answer_agent_clarification,
 )
 from backend.services.agent_chat import (
     route_message_with_llm,
@@ -1033,6 +1034,19 @@ async def agent_task_resume(
     current_user: models.User = Depends(get_current_user),
 ):
     return set_task_control_state(task_id, "running")
+
+
+@app.post("/api/v1/agent/tasks/{task_id}/clarify")
+async def agent_task_clarify(
+    task_id: str,
+    req: dict,
+    current_user: models.User = Depends(get_current_user),
+):
+    """Ответить на вопрос агента который ждёт уточнения (ask_user)."""
+    answer = str((req or {}).get("answer") or "").strip()
+    if not answer:
+        raise HTTPException(status_code=400, detail="answer is required")
+    return answer_agent_clarification(task_id, answer)
 
 
 @app.post("/api/v1/agent-chat/message")
