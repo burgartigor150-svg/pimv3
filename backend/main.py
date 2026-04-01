@@ -1023,6 +1023,9 @@ async def agent_chat_message(
             "assistant_reply": llm or str(inferred.get("clarification_question") or "Уточни, пожалуйста, цель задачи."),
             "task": {},
             "active_task_id": str(state.get("active_task_id") or ""),
+        }d.get("clarification_question") or "Уточни, пожалуйста, цель задачи."),
+            "task": {},
+            "active_task_id": str(state.get("active_task_id") or ""),
         }
     if intent == "task_status":
         task_id = str(inferred.get("task_id") or "").strip()
