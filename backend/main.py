@@ -3,7 +3,13 @@ import json
 import logging
 import shutil
 import re
-from fastapi import FastAPI, Depends, HTTPException, UploadFile, File, Request, Form, Response
+import uuid
+import asyncio
+import copy
+import time
+import redis
+from datetime import timedelta
+from fastapi import FastAPI, Depends, HTTPException, UploadFile, File, Request, Form, Response, BackgroundTasks
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import OAuth2PasswordRequestForm
@@ -11,13 +17,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 from sqlalchemy import text
 from typing import List, Dict, Any, Optional
-import uuid
-import asyncio
-import copy
-import time
-import redis
-from datetime import timedelta
-from fastapi import BackgroundTasks
 from pydantic import BaseModel
 
 from backend.services.auth import create_access_token, verify_password, get_current_user, ACCESS_TOKEN_EXPIRE_MINUTES
@@ -134,7 +133,6 @@ async def system_status():
     from sqlalchemy import text
     from backend.database import engine
     from backend.celery_worker import celery_app, redis_client
-    import time
     
     status = {
         "timestamp": time.time(),
@@ -517,7 +515,7 @@ async def get_connections(db: AsyncSession = Depends(get_db), current_user: mode
 async def test_connection(conn: schemas.MarketplaceConnectionCreate, db: AsyncSession = Depends(get_db), current_user: models.User = Depends(get_current_user)):
     """Тестирует подключение к маркетплейсу с предоставленными данными интеграции."""
     from backend.services.adapters import get_adapter
-    # Импорт адаптера для Яндекс.Маркет добавлен автоматически
+    from backend.services.yandex_adapter import YandexAdapter  # Импорт адаптера для Яндекс.Маркет добавлен автоматически
     try:
         adapter = get_adapter(conn.type, conn.api_key, conn.client_id, conn.store_id, getattr(conn, "warehouse_id", None))
         # Вызываем простой метод для проверки подключения, например, получение списка категорий или статуса
@@ -1044,20 +1042,7 @@ async def agent_task_create(
     return created
 
 
-@app.get("/api/v1/agent-tasks")
-async def get_agent_tasks(
-    skip: int = 0,
-    limit: int = 100,
-    db: AsyncSession = Depends(get_db),
-    current_user: models.User = Depends(get_current_user)
-):
-    """Возвращает список агентских задач с пагинацией."""
-    result = list_agent_tasks(skip=skip, limit=limit)
-    return result
-async def list_agent_tasks_endpoint(limit: int = 100, offset: int = 0, current_user: models.User = Depends(get_current_user)):
-    from backend.services.agent_task_console import list_agent_tasks
-    result = list_agent_tasks(limit=limit, offset=offset)
-    return result
+
 
 
 
@@ -1066,13 +1051,25 @@ async def agent_task_get(
     task_id: str,
     current_user: models.User = Depends(get_current_user),
 ):
-    return get_agent_task(task_id)
+    return get_agent_task(task_id)ask_id)
+
+
+@app.get("/api/v1/agent-tasks")
+async def get_agent_tasks(
+    skip: int = 0,
+    limit: int = 100,
+    current_user: models.User = Depends(get_current_user)
+):
+    """Возвращает список агентских задач с пагинацией."""
+    from backend.services.agent_task_console import list_agent_tasks
+    result = list_agent_tasks(skip=skip, limit=limit)
+    return result
 
 
 @app.get("/api/v1/agent-tasks/context7-connected")
 async def agent_context7_connected(current_user: models.User = Depends(get_current_user)):
     """Возвращает статус подключения к MCP серверу context7."""
-    from backend.services.agent_task_console import context7_is_connected
+    return context7_is_connected()services.agent_task_console import context7_is_connected
     return {"connected": context7_is_connected()}_is_connected()}_is_connected()}татус подключения к MCP-серверу context7 для документации."""
 """Возвращает статус подключения к Context7 MCP серверу."""
     connected = context7_is_connected()
