@@ -25,3 +25,4 @@ backend/data/telemetry/
 backend/data/vector_memory/
 frontend/*.tsbuildinfo
 backend/data/attribute_star_map/
+backend/runtime/
