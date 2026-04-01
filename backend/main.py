@@ -227,8 +227,8 @@ async def get_version():
 async def get_uptime():
     """Возвращает время работы сервера в секундах с момента запуска."""
     import time
-    from backend.services.telemetry import get_task_events
-    from backend.services.kpi_guard import compute_task_kpis, should_auto_stop_self_rewritervices.telemetry import get_server_start_time
+    from backend.services.telemetry import get_task_events, get_server_start_time
+    from backend.services.kpi_guard import compute_task_kpis, should_auto_stop_self_rewrite
     start_time = get_server_start_time()
     if start_time is None:
         return {"uptime_seconds": 0, "message": "Start time not recorded"}
@@ -513,14 +513,11 @@ async def get_connections(db: AsyncSession = Depends(get_db), current_user: mode
     result = await db.execute(select(models.MarketplaceConnection))
     return result.scalars().all()
 
-@app.post("/api/v1/connections", response_model=schemas.MarketplaceConnection)
-
-
 @app.post("/api/v1/connections/test")
 async def test_connection(conn: schemas.MarketplaceConnectionCreate, db: AsyncSession = Depends(get_db), current_user: models.User = Depends(get_current_user)):
     """Тестирует подключение к маркетплейсу с предоставленными данными интеграции."""
     from backend.services.adapters import get_adapter
-# Импорт адаптера для Яндекс.Маркет добавлен автоматически
+    # Импорт адаптера для Яндекс.Маркет добавлен автоматически
     try:
         adapter = get_adapter(conn.type, conn.api_key, conn.client_id, conn.store_id, getattr(conn, "warehouse_id", None))
         # Вызываем простой метод для проверки подключения, например, получение списка категорий или статуса
@@ -529,6 +526,8 @@ async def test_connection(conn: schemas.MarketplaceConnectionCreate, db: AsyncSe
     except Exception as e:
         log.error(f"Connection test failed for {conn.type}: {e}")
         raise HTTPException(status_code=400, detail=f"Ошибка подключения: {str(e)}")
+
+@app.post("/api/v1/connections", response_model=schemas.MarketplaceConnection)
 async def create_connection(conn: schemas.MarketplaceConnectionCreate, db: AsyncSession = Depends(get_db), current_user: models.User = Depends(get_current_user)):
     db_conn = models.MarketplaceConnection(**conn.model_dump())
     db.add(db_conn)
@@ -1070,7 +1069,13 @@ async def agent_context7_connected(current_user: models.User = Depends(get_curre
 @app.get("/api/v1/agent-tasks/{task_id}/metrics")
 async def agent_task_metrics(
     task_id: str,
-    current_user: models.User = Depends(get_current_user),
+    current_user: models.User = Depends(get_current_user)
+):
+    from backend.services.agent_metrics import get_task_metrics
+    metrics = get_task_metrics(task_id)
+    if metrics is None:
+        raise HTTPException(status_code=404, detail="Task metrics not found")
+    return metricss(get_current_user),
 ):
     from backend.services.agent_metrics import get_task_metrics
     metrics = get_task_metrics(task_id)
