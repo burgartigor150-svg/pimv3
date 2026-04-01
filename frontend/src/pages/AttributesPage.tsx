@@ -23,7 +23,6 @@ export default function AttributesPage() {
     setConnections(res.data);
   };
 
-
   const fetchCategories = async () => {
     const res = await api.get('/categories');
     setCategories(res.data);
@@ -63,180 +62,193 @@ export default function AttributesPage() {
   const typeLabel = (t: string) =>
     t === 'string' ? 'Текст' : t === 'number' ? 'Число' : 'Да / нет';
 
-  return (
-    <div className="flex flex-col gap-6 px-1 sm:px-0">
-      <div>
-        <h2 className="text-2xl font-bold text-slate-900 dark:text-white">Схема атрибутов</h2>
-        <p className="text-slate-600 dark:text-slate-400 mt-1 max-w-3xl">
-          Здесь перечислены поля, которые видны в карточке товара и участвуют в заполненности. Большую часть атрибутов система создаёт сама при импорте и при работе ИИ — руками добавляют редко. Привязка к магазину нужна только для специфичных полей одной площадки.
-        </p>
-      </div>
+  const selectStyle: React.CSSProperties = {
+    background: '#0f0f1a',
+    border: '1px solid rgba(255,255,255,0.08)',
+    borderRadius: 10,
+    padding: '8px 12px',
+    color: 'rgba(255,255,255,0.85)',
+    fontSize: 13,
+    outline: 'none',
+    cursor: 'pointer',
+  };
 
-      <div className="rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-900/50 p-4 text-sm text-slate-700 dark:text-slate-300">
-        <span className="font-semibold text-slate-800 dark:text-slate-200">Связь с остальным интерфейсом: </span>
-        товары — в <Link to="/products" className="text-indigo-600 dark:text-indigo-400 underline font-medium">каталоге</Link>
-        , ключи магазинов — в <Link to="/integrations" className="text-indigo-600 dark:text-indigo-400 underline font-medium">магазинах и ключах API</Link>.
-      </div>
-      
-      <div className="bg-white dark:bg-slate-800 p-4 rounded-lg border border-slate-200 dark:border-slate-700 shadow-sm">
-        <div 
-          className="flex justify-between items-center cursor-pointer select-none" 
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 24 }}>
+
+      {/* Page header */}
+      <div style={{ marginBottom: 4, display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', flexWrap: 'wrap', gap: 12 }}>
+        <div>
+          <h1 style={{ fontSize: 22, fontWeight: 800, letterSpacing: '-0.03em', color: 'rgba(255,255,255,0.95)', marginBottom: 4 }}>
+            Схема атрибутов
+          </h1>
+          <p style={{ fontSize: 13, color: 'rgba(255,255,255,0.35)', maxWidth: 620, lineHeight: 1.5 }}>
+            Поля карточки товара и заполненности. Большинство создаётся при импорте — руками добавляют редко.
+          </p>
+        </div>
+        <button
+          className="btn-glow"
           onClick={() => setShowCreateForm(!showCreateForm)}
         >
-          <h3 className="text-lg font-semibold text-blue-600 dark:text-blue-400 hover:underline">
-            {showCreateForm ? 'Скрыть форму' : 'Добавить атрибут вручную'}
-          </h3>
-          <span className="text-sm text-slate-500 dark:text-slate-400 hidden sm:block">Обычно не нужно — атрибуты появляются при импорте и при переносе на маркетплейсы</span>
-        </div>
-        {showCreateForm && (
-        <form onSubmit={handleCreate} className="flex flex-wrap gap-4 items-end mt-4 pt-4 border-t dark:border-slate-700">
-        <label className="flex flex-col">
-          <span className="text-sm font-medium text-slate-700 dark:text-slate-300">Код (латиницей, без пробелов)</span>
-          <input required className="border rounded p-2 text-black dark:bg-slate-900 dark:border-slate-600 dark:text-white" value={newAttr.code} onChange={e => setNewAttr({...newAttr, code: e.target.value})} placeholder="например: color" />
-        </label>
-        <label className="flex flex-col">
-          <span className="text-sm font-medium text-slate-700 dark:text-slate-300">Подпись в интерфейсе</span>
-          <input required className="border rounded p-2 text-black dark:bg-slate-900 dark:border-slate-600 dark:text-white" value={newAttr.name} onChange={e => setNewAttr({...newAttr, name: e.target.value})} placeholder="например: Цвет" />
-        </label>
-        <label className="flex flex-col">
-          <span className="text-sm font-medium text-slate-700 dark:text-slate-300">Тип значения</span>
-          <select className="border rounded p-2 text-black dark:bg-slate-900 dark:border-slate-600 dark:text-white" value={newAttr.type} onChange={e => setNewAttr({...newAttr, type: e.target.value})}>
-            <option value="string">Строка</option>
-            <option value="number">Число</option>
-            <option value="boolean">Логическое (Да/Нет)</option>
-          </select>
-        </label>
-        <label className="flex items-center gap-2 pb-2">
-          <input type="checkbox" checked={newAttr.is_required} onChange={e => setNewAttr({...newAttr, is_required: e.target.checked})} />
-          <span className="text-sm font-medium">Обязательный</span>
-        </label>
-        <label className="flex flex-col min-w-[200px]">
-          <span className="text-sm font-medium text-slate-700 dark:text-slate-300">Папка каталога</span>
-          <select className="border rounded p-2 text-black dark:bg-slate-900 dark:border-slate-600 dark:text-white" value={newAttr.category_id} onChange={e => setNewAttr({...newAttr, category_id: e.target.value})}>
-            <option value="">Для всех категорий</option>
-            {categories.map((c: any) => (
-              <option key={c.id} value={c.id}>{c.name}</option>
-            ))}
-          </select>
-        </label>
-        <label className="flex flex-col min-w-[200px]">
-          <span className="text-sm font-medium text-slate-700 dark:text-slate-300">Только для магазина (необязательно)</span>
-          <select className="border rounded p-2 text-black dark:bg-slate-900 dark:border-slate-600 dark:text-white" value={newAttr.connection_id} onChange={e => setNewAttr({...newAttr, connection_id: e.target.value})}>
-            <option value="">Общий атрибут каталога</option>
-            {connections.map((conn: any) => (
-              <option key={conn.id} value={conn.id}>{connectionOptionLabel(conn.name, conn.type)}</option>
-            ))}
-          </select>
-        </label>
-        <button type="submit" className="bg-blue-600 text-white px-4 py-2 rounded hover:bg-blue-700 font-medium">Сохранить атрибут</button>
-        </form>
-        )}
+          {showCreateForm ? '✕ Скрыть форму' : '+ Добавить атрибут'}
+        </button>
       </div>
 
-      <div className="bg-slate-100 dark:bg-slate-800 p-4 rounded-lg flex flex-col sm:flex-row sm:flex-wrap gap-3 sm:gap-4 sm:items-center mb-[-1rem] border border-slate-200 dark:border-slate-700">
-        <span className="font-medium text-sm text-slate-700 dark:text-slate-300 shrink-0">Показать:</span>
-        <select className="border rounded p-2 text-sm text-black dark:bg-slate-900 dark:border-slate-600 dark:text-white w-full sm:w-auto sm:min-w-[180px]" value={filterCategory} onChange={e => setFilterCategory(e.target.value)}>
+      {/* Info banner */}
+      <div style={{ background: 'rgba(99,102,241,0.08)', border: '1px solid rgba(99,102,241,0.2)', borderRadius: 12, padding: '12px 16px', fontSize: 13, color: 'rgba(255,255,255,0.55)', lineHeight: 1.5 }}>
+        <span style={{ color: 'rgba(255,255,255,0.75)', fontWeight: 600 }}>Связь с интерфейсом: </span>
+        товары — в{' '}
+        <Link to="/products" style={{ color: '#6366f1', textDecoration: 'underline' }}>каталоге</Link>
+        , ключи магазинов — в{' '}
+        <Link to="/integrations" style={{ color: '#6366f1', textDecoration: 'underline' }}>магазинах и ключах API</Link>.
+      </div>
+
+      {/* Create form */}
+      {showCreateForm && (
+        <div style={{ background: '#0f0f1a', border: '1px solid rgba(255,255,255,0.07)', borderRadius: 16, padding: 24 }}>
+          <p style={{ fontSize: 12, color: 'rgba(255,255,255,0.3)', marginBottom: 16 }}>
+            Обычно не нужно — атрибуты появляются при импорте и при переносе на маркетплейсы
+          </p>
+          <form onSubmit={handleCreate} style={{ display: 'flex', flexWrap: 'wrap', gap: 16, alignItems: 'flex-end' }}>
+            <label style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+              <span style={{ fontSize: 12, color: 'rgba(255,255,255,0.45)', fontWeight: 500 }}>Код (латиницей, без пробелов)</span>
+              <input
+                required
+                className="input-premium"
+                style={{ width: 180 }}
+                value={newAttr.code}
+                onChange={e => setNewAttr({ ...newAttr, code: e.target.value })}
+                placeholder="например: color"
+              />
+            </label>
+            <label style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+              <span style={{ fontSize: 12, color: 'rgba(255,255,255,0.45)', fontWeight: 500 }}>Подпись в интерфейсе</span>
+              <input
+                required
+                className="input-premium"
+                style={{ width: 180 }}
+                value={newAttr.name}
+                onChange={e => setNewAttr({ ...newAttr, name: e.target.value })}
+                placeholder="например: Цвет"
+              />
+            </label>
+            <label style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+              <span style={{ fontSize: 12, color: 'rgba(255,255,255,0.45)', fontWeight: 500 }}>Тип значения</span>
+              <select style={selectStyle} value={newAttr.type} onChange={e => setNewAttr({ ...newAttr, type: e.target.value })}>
+                <option value="string">Строка</option>
+                <option value="number">Число</option>
+                <option value="boolean">Логическое (Да/Нет)</option>
+              </select>
+            </label>
+            <label style={{ display: 'flex', alignItems: 'center', gap: 8, paddingBottom: 2, cursor: 'pointer' }}>
+              <input
+                type="checkbox"
+                checked={newAttr.is_required}
+                onChange={e => setNewAttr({ ...newAttr, is_required: e.target.checked })}
+                style={{ accentColor: '#6366f1', width: 15, height: 15 }}
+              />
+              <span style={{ fontSize: 13, color: 'rgba(255,255,255,0.65)' }}>Обязательный</span>
+            </label>
+            <label style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+              <span style={{ fontSize: 12, color: 'rgba(255,255,255,0.45)', fontWeight: 500 }}>Папка каталога</span>
+              <select style={{ ...selectStyle, minWidth: 200 }} value={newAttr.category_id} onChange={e => setNewAttr({ ...newAttr, category_id: e.target.value })}>
+                <option value="">Для всех категорий</option>
+                {categories.map((c: any) => (
+                  <option key={c.id} value={c.id}>{c.name}</option>
+                ))}
+              </select>
+            </label>
+            <label style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+              <span style={{ fontSize: 12, color: 'rgba(255,255,255,0.45)', fontWeight: 500 }}>Только для магазина</span>
+              <select style={{ ...selectStyle, minWidth: 220 }} value={newAttr.connection_id} onChange={e => setNewAttr({ ...newAttr, connection_id: e.target.value })}>
+                <option value="">Общий атрибут каталога</option>
+                {connections.map((conn: any) => (
+                  <option key={conn.id} value={conn.id}>{connectionOptionLabel(conn.name, conn.type)}</option>
+                ))}
+              </select>
+            </label>
+            <button type="submit" className="btn-glow">Сохранить атрибут</button>
+          </form>
+        </div>
+      )}
+
+      {/* Filters */}
+      <div style={{ background: '#0f0f1a', border: '1px solid rgba(255,255,255,0.07)', borderRadius: 12, padding: '12px 16px', display: 'flex', flexWrap: 'wrap', gap: 12, alignItems: 'center' }}>
+        <span style={{ fontSize: 13, color: 'rgba(255,255,255,0.4)', fontWeight: 500, flexShrink: 0 }}>Показать:</span>
+        <select style={{ ...selectStyle, minWidth: 180 }} value={filterCategory} onChange={e => setFilterCategory(e.target.value)}>
           <option value="">Все папки</option>
           <option value="global">Только без папки (общие)</option>
           {categories.map((c: any) => (
             <option key={c.id} value={c.id}>{c.name}</option>
           ))}
         </select>
-        <select className="border rounded p-2 text-sm text-black dark:bg-slate-900 dark:border-slate-600 dark:text-white w-full sm:w-auto sm:min-w-[200px]" value={filterConnection} onChange={e => setFilterConnection(e.target.value)}>
+        <select style={{ ...selectStyle, minWidth: 220 }} value={filterConnection} onChange={e => setFilterConnection(e.target.value)}>
           <option value="">Все магазины</option>
           <option value="global">Только без привязки к магазину</option>
           {connections.map((conn: any) => (
             <option key={conn.id} value={conn.id}>{connectionOptionLabel(conn.name, conn.type)}</option>
           ))}
         </select>
+        <span style={{ fontSize: 12, color: 'rgba(255,255,255,0.25)', marginLeft: 'auto' }}>
+          {filteredAttributes.length} атрибутов
+        </span>
       </div>
 
-      {/* Мобильные карточки */}
-      <div className="md:hidden flex flex-col gap-3">
+      {/* Table */}
+      <div style={{ background: '#0f0f1a', border: '1px solid rgba(255,255,255,0.07)', borderRadius: 16, overflow: 'hidden' }}>
         {filteredAttributes.length === 0 ? (
-          <p className="text-sm text-slate-500 dark:text-slate-400 text-center py-8">Нет атрибутов по выбранным фильтрам.</p>
+          <p style={{ textAlign: 'center', padding: '48px 0', fontSize: 14, color: 'rgba(255,255,255,0.25)' }}>
+            Нет атрибутов по выбранным фильтрам.
+          </p>
         ) : (
-          filteredAttributes.map((attr: any) => (
-            <article
-              key={attr.id}
-              className="rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 p-4 shadow-sm space-y-2"
-            >
-              <div className="flex justify-between items-start gap-2">
-                <span className="font-mono text-xs text-indigo-600 dark:text-indigo-400 break-all">{attr.code}</span>
-                <span className="text-xs shrink-0 px-2 py-0.5 rounded-full bg-slate-100 dark:bg-slate-700 text-slate-600 dark:text-slate-300">
-                  {typeLabel(attr.type)}
-                </span>
-              </div>
-              <h3 className="font-semibold text-slate-900 dark:text-white">{attr.name}</h3>
-              <dl className="grid grid-cols-1 gap-1.5 text-xs text-slate-600 dark:text-slate-400">
-                <div className="flex flex-col gap-0.5">
-                  <dt className="text-slate-400 dark:text-slate-500 uppercase tracking-wide">Магазин</dt>
-                  <dd>
+          <table className="table-premium" style={{ minWidth: 640 }}>
+            <thead>
+              <tr>
+                <th>Код</th>
+                <th>Подпись</th>
+                <th>Магазин</th>
+                <th>Папка</th>
+                <th>Тип</th>
+                <th>Обязательно</th>
+              </tr>
+            </thead>
+            <tbody>
+              {filteredAttributes.map((attr: any) => (
+                <tr key={attr.id}>
+                  <td>
+                    <span style={{ fontFamily: 'monospace', fontSize: 12, color: '#6366f1' }}>{attr.code}</span>
+                  </td>
+                  <td style={{ color: 'rgba(255,255,255,0.85)' }}>{attr.name}</td>
+                  <td>
                     {attr.connection ? (
-                      <span className="inline-block bg-orange-100 text-orange-800 dark:bg-orange-900/40 dark:text-orange-200 px-2 py-1 rounded text-[11px]">
+                      <span className="badge badge-warning">
                         {connectionOptionLabel(attr.connection.name, attr.connection.type)}
                       </span>
                     ) : (
-                      'Любой магазин'
+                      <span style={{ color: 'rgba(255,255,255,0.25)', fontSize: 12 }}>Любой магазин</span>
                     )}
-                  </dd>
-                </div>
-                <div className="flex flex-col gap-0.5">
-                  <dt className="text-slate-400 dark:text-slate-500 uppercase tracking-wide">Папка</dt>
-                  <dd>{attr.category ? attr.category.name : 'Все папки'}</dd>
-                </div>
-                <div className="flex flex-col gap-0.5">
-                  <dt className="text-slate-400 dark:text-slate-500 uppercase tracking-wide">Обязательно</dt>
-                  <dd className="font-medium text-slate-800 dark:text-slate-200">{attr.is_required ? 'Да' : 'Нет'}</dd>
-                </div>
-              </dl>
-            </article>
-          ))
-        )}
-      </div>
-
-      {/* Таблица на планшете и десктопе */}
-      <div className="hidden md:block bg-white dark:bg-slate-800 rounded-lg border border-slate-200 dark:border-slate-700 shadow-sm overflow-x-auto">
-        <table className="w-full text-left min-w-[640px]">
-          <thead className="bg-slate-100 dark:bg-slate-900">
-            <tr>
-              <th className="p-4 border-b dark:border-slate-700">Код</th>
-              <th className="p-4 border-b dark:border-slate-700">Подпись</th>
-              <th className="p-4 border-b dark:border-slate-700">Магазин</th>
-              <th className="p-4 border-b dark:border-slate-700">Папка</th>
-              <th className="p-4 border-b dark:border-slate-700">Тип</th>
-              <th className="p-4 border-b dark:border-slate-700">Обязательно</th>
-            </tr>
-          </thead>
-          <tbody>
-            {filteredAttributes.map((attr: any) => (
-              <tr key={attr.id} className="hover:bg-slate-50 dark:hover:bg-slate-700/80">
-                <td className="p-4 border-b dark:border-slate-700 font-mono text-sm">{attr.code}</td>
-                <td className="p-4 border-b dark:border-slate-700">{attr.name}</td>
-                <td className="p-4 border-b dark:border-slate-700">
-                  {attr.connection ? (
-                    <span className="bg-orange-100 text-orange-800 text-xs px-2 py-1 rounded dark:bg-orange-900/50 dark:text-orange-200">
-                      {connectionOptionLabel(attr.connection.name, attr.connection.type)}
-                    </span>
-                  ) : (
-                    <span className="text-slate-400 text-xs">Любой магазин</span>
-                  )}
-                </td>
-                <td className="p-4 border-b dark:border-slate-700">
-                  {attr.category ? (
-                    <span className="bg-indigo-100 text-indigo-800 text-xs px-2 py-1 rounded dark:bg-indigo-900/50 dark:text-indigo-200">{attr.category.name}</span>
-                  ) : (
-                    <span className="text-slate-400 text-xs">Все папки</span>
-                  )}
-                </td>
-                <td className="p-4 border-b dark:border-slate-700">{typeLabel(attr.type)}</td>
-                <td className="p-4 border-b dark:border-slate-700">{attr.is_required ? 'Да' : 'Нет'}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-        {filteredAttributes.length === 0 && (
-          <p className="text-sm text-slate-500 dark:text-slate-400 text-center py-12">Нет атрибутов по выбранным фильтрам.</p>
+                  </td>
+                  <td>
+                    {attr.category ? (
+                      <span className="badge badge-purple">{attr.category.name}</span>
+                    ) : (
+                      <span style={{ color: 'rgba(255,255,255,0.25)', fontSize: 12 }}>Все папки</span>
+                    )}
+                  </td>
+                  <td>
+                    <span className="badge badge-neutral">{typeLabel(attr.type)}</span>
+                  </td>
+                  <td>
+                    {attr.is_required ? (
+                      <span className="badge badge-error">Да</span>
+                    ) : (
+                      <span style={{ color: 'rgba(255,255,255,0.3)', fontSize: 12 }}>Нет</span>
+                    )}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
         )}
       </div>
     </div>

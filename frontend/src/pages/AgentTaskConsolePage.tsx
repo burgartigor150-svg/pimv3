@@ -91,20 +91,20 @@ function timeAgo(iso: string): string {
   return `${Math.floor(diff / 86_400_000)} д назад`
 }
 
-const STATUS_DOT: Record<TaskStatus, string> = {
-  pending: 'bg-slate-500',
-  running: 'bg-indigo-400 animate-pulse',
-  completed: 'bg-emerald-400',
-  failed: 'bg-rose-400',
-  cancelled: 'bg-slate-600',
-}
-
-const STATUS_BADGE: Record<TaskStatus, string> = {
-  pending: 'bg-slate-700 text-slate-300',
-  running: 'bg-indigo-500/20 text-indigo-300',
-  completed: 'bg-emerald-500/20 text-emerald-300',
-  failed: 'bg-rose-500/20 text-rose-300',
-  cancelled: 'bg-slate-700 text-slate-400',
+function StatusDot({ status }: { status: TaskStatus }) {
+  const bg =
+    status === 'running' ? '#22d3ee' :
+    status === 'completed' ? '#10b981' :
+    status === 'failed' ? '#f87171' :
+    status === 'cancelled' ? 'rgba(255,255,255,0.2)' :
+    'rgba(255,255,255,0.15)'
+  return (
+    <span style={{
+      width: 8, height: 8, borderRadius: '50%', background: bg,
+      display: 'inline-block', flexShrink: 0,
+      animation: status === 'running' ? 'glow-pulse 1.5s ease infinite' : undefined,
+    }} />
+  )
 }
 
 const STATUS_LABEL: Record<TaskStatus, string> = {
@@ -115,71 +115,67 @@ const STATUS_LABEL: Record<TaskStatus, string> = {
   cancelled: 'Отменено',
 }
 
-const TYPE_BADGE: Record<TaskType, string> = {
-  design: 'bg-purple-500/15 text-purple-300',
-  backend: 'bg-sky-500/15 text-sky-300',
-  'api-integration': 'bg-teal-500/15 text-teal-300',
-  'docs-ingest': 'bg-amber-500/15 text-amber-300',
-  frontend: 'bg-pink-500/15 text-pink-300',
-  qa: 'bg-lime-500/15 text-lime-300',
+const STATUS_BADGE_CLS: Record<TaskStatus, string> = {
+  pending: 'badge badge-neutral',
+  running: 'badge badge-info',
+  completed: 'badge badge-success',
+  failed: 'badge badge-error',
+  cancelled: 'badge badge-neutral',
+}
+
+const TYPE_COLOR: Record<TaskType, string> = {
+  design: 'badge badge-purple',
+  backend: 'badge badge-info',
+  'api-integration': 'badge badge-info',
+  'docs-ingest': 'badge badge-warning',
+  frontend: 'badge badge-purple',
+  qa: 'badge badge-success',
 }
 
 const PRIORITY_CONFIG: Record<
   Priority,
-  { label: string; activeClass: string; inactiveClass: string }
+  { label: string; activeStyle: React.CSSProperties; inactiveStyle: React.CSSProperties }
 > = {
   critical: {
     label: 'Critical',
-    activeClass: 'bg-rose-500 text-white border-rose-500',
-    inactiveClass: 'bg-[#1c1c28] text-rose-400 border-[#1e1e2c] hover:border-rose-500/50',
+    activeStyle: { background: '#f87171', color: '#fff', border: '1px solid #f87171' },
+    inactiveStyle: { background: 'transparent', color: '#f87171', border: '1px solid rgba(248,113,113,0.25)' },
   },
   high: {
     label: 'High',
-    activeClass: 'bg-orange-500 text-white border-orange-500',
-    inactiveClass: 'bg-[#1c1c28] text-orange-400 border-[#1e1e2c] hover:border-orange-500/50',
+    activeStyle: { background: '#fb923c', color: '#fff', border: '1px solid #fb923c' },
+    inactiveStyle: { background: 'transparent', color: '#fb923c', border: '1px solid rgba(251,146,60,0.25)' },
   },
   normal: {
     label: 'Normal',
-    activeClass: 'bg-slate-500 text-white border-slate-500',
-    inactiveClass: 'bg-[#1c1c28] text-slate-400 border-[#1e1e2c] hover:border-slate-500/50',
+    activeStyle: { background: '#6366f1', color: '#fff', border: '1px solid #6366f1' },
+    inactiveStyle: { background: 'transparent', color: 'rgba(255,255,255,0.5)', border: '1px solid rgba(255,255,255,0.12)' },
   },
   low: {
     label: 'Low',
-    activeClass: 'bg-sky-500 text-white border-sky-500',
-    inactiveClass: 'bg-[#1c1c28] text-sky-400 border-[#1e1e2c] hover:border-sky-500/50',
+    activeStyle: { background: '#22d3ee', color: '#03030a', border: '1px solid #22d3ee' },
+    inactiveStyle: { background: 'transparent', color: '#22d3ee', border: '1px solid rgba(34,211,238,0.25)' },
   },
 }
 
 const TASK_TYPES: TaskType[] = [
-  'design',
-  'backend',
-  'api-integration',
-  'docs-ingest',
-  'frontend',
-  'qa',
+  'design', 'backend', 'api-integration', 'docs-ingest', 'frontend', 'qa',
 ]
 
 // ─── Sub-components ───────────────────────────────────────────────────────────
-
-function Badge({ className, children }: { className: string; children: React.ReactNode }) {
-  return (
-    <span className={`inline-flex items-center px-2 py-0.5 rounded-md text-xs font-medium ${className}`}>
-      {children}
-    </span>
-  )
-}
 
 function Input({
   label,
   ...props
 }: React.InputHTMLAttributes<HTMLInputElement> & { label?: string }) {
   return (
-    <div className="flex flex-col gap-1">
-      {label && <label className="text-xs text-slate-500 font-medium uppercase tracking-wide">{label}</label>}
-      <input
-        className="bg-[#0d0d10] border border-[#28283a] rounded-lg px-3 py-2 text-sm text-slate-100 focus:border-indigo-500 outline-none w-full placeholder:text-slate-600 transition-colors"
-        {...props}
-      />
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+      {label && (
+        <label style={{ fontSize: 11, color: 'rgba(255,255,255,0.35)', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.06em' }}>
+          {label}
+        </label>
+      )}
+      <input className="input-premium" {...props} />
     </div>
   )
 }
@@ -189,10 +185,19 @@ function Textarea({
   ...props
 }: React.TextareaHTMLAttributes<HTMLTextAreaElement> & { label?: string }) {
   return (
-    <div className="flex flex-col gap-1">
-      {label && <label className="text-xs text-slate-500 font-medium uppercase tracking-wide">{label}</label>}
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+      {label && (
+        <label style={{ fontSize: 11, color: 'rgba(255,255,255,0.35)', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.06em' }}>
+          {label}
+        </label>
+      )}
       <textarea
-        className="bg-[#0d0d10] border border-[#28283a] rounded-lg px-3 py-2 text-sm text-slate-100 focus:border-indigo-500 outline-none w-full placeholder:text-slate-600 resize-none transition-colors"
+        style={{
+          background: '#0f0f1a', border: '1px solid rgba(255,255,255,0.08)',
+          borderRadius: 8, padding: '8px 12px', fontSize: 14, color: 'rgba(255,255,255,0.9)',
+          outline: 'none', width: '100%', resize: 'none', fontFamily: 'inherit',
+          transition: 'border-color 0.2s',
+        }}
         rows={4}
         {...props}
       />
@@ -200,16 +205,24 @@ function Textarea({
   )
 }
 
-function Select({
+function SelectField({
   label,
   children,
   ...props
 }: React.SelectHTMLAttributes<HTMLSelectElement> & { label?: string }) {
   return (
-    <div className="flex flex-col gap-1">
-      {label && <label className="text-xs text-slate-500 font-medium uppercase tracking-wide">{label}</label>}
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+      {label && (
+        <label style={{ fontSize: 11, color: 'rgba(255,255,255,0.35)', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.06em' }}>
+          {label}
+        </label>
+      )}
       <select
-        className="bg-[#0d0d10] border border-[#28283a] rounded-lg px-3 py-2 text-sm text-slate-100 focus:border-indigo-500 outline-none w-full transition-colors"
+        style={{
+          background: '#0f0f1a', border: '1px solid rgba(255,255,255,0.08)',
+          borderRadius: 8, padding: '8px 12px', fontSize: 14, color: 'rgba(255,255,255,0.9)',
+          outline: 'none', width: '100%', appearance: 'none',
+        }}
         {...props}
       >
         {children}
@@ -239,9 +252,7 @@ function CreateTaskForm({ onCreated }: CreateTaskFormProps) {
   useEffect(() => {
     apiFetch<TaskTemplate[]>('/templates')
       .then(setTemplates)
-      .catch(() => {
-        // templates are optional; silently ignore
-      })
+      .catch(() => {})
   }, [])
 
   function applyTemplate(tpl: TaskTemplate) {
@@ -289,21 +300,25 @@ function CreateTaskForm({ onCreated }: CreateTaskFormProps) {
   }
 
   return (
-    <div className="h-full overflow-y-auto">
-      <div className="p-6 max-w-2xl mx-auto">
-        <h2 className="text-lg font-semibold text-slate-100 mb-6">Создать задачу агента</h2>
+    <div style={{ height: '100%', overflowY: 'auto' }}>
+      <div style={{ padding: '24px', maxWidth: 600, margin: '0 auto' }}>
+        <h2 style={{ fontSize: 16, fontWeight: 600, color: 'rgba(255,255,255,0.95)', marginBottom: 24, marginTop: 0 }}>
+          Создать задачу агента
+        </h2>
 
-        {/* Template selector */}
         {templates.length > 0 && (
-          <div className="mb-6">
-            <p className="text-xs text-slate-500 font-medium uppercase tracking-wide mb-2">Шаблоны</p>
-            <div className="flex flex-wrap gap-2">
+          <div style={{ marginBottom: 24 }}>
+            <p style={{ fontSize: 11, color: 'rgba(255,255,255,0.35)', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 8, marginTop: 0 }}>
+              Шаблоны
+            </p>
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
               {templates.map((tpl) => (
                 <button
                   key={tpl.id}
                   type="button"
                   onClick={() => applyTemplate(tpl)}
-                  className="bg-[#1c1c28] hover:bg-[#28283a] border border-[#1e1e2c] text-slate-300 px-3 py-1.5 rounded-lg text-sm transition-all"
+                  className="btn-ghost-premium"
+                  style={{ fontSize: 13 }}
                 >
                   {tpl.name}
                 </button>
@@ -312,7 +327,7 @@ function CreateTaskForm({ onCreated }: CreateTaskFormProps) {
           </div>
         )}
 
-        <form onSubmit={handleSubmit} className="flex flex-col gap-5">
+        <form onSubmit={handleSubmit} style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
           <Input
             label="Название"
             placeholder="Кратко опишите задачу..."
@@ -327,22 +342,22 @@ function CreateTaskForm({ onCreated }: CreateTaskFormProps) {
             onChange={(e) => setDescription(e.target.value)}
           />
 
-          <Select
+          <SelectField
             label="Тип задачи"
             value={type}
             onChange={(e) => setType(e.target.value as TaskType)}
           >
             {TASK_TYPES.map((t) => (
-              <option key={t} value={t}>
-                {t}
-              </option>
+              <option key={t} value={t}>{t}</option>
             ))}
-          </Select>
+          </SelectField>
 
           {/* Priority selector */}
-          <div className="flex flex-col gap-1">
-            <p className="text-xs text-slate-500 font-medium uppercase tracking-wide">Приоритет</p>
-            <div className="flex gap-2">
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+            <p style={{ fontSize: 11, color: 'rgba(255,255,255,0.35)', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.06em', margin: 0 }}>
+              Приоритет
+            </p>
+            <div style={{ display: 'flex', gap: 8 }}>
               {(Object.keys(PRIORITY_CONFIG) as Priority[]).map((p) => {
                 const cfg = PRIORITY_CONFIG[p]
                 return (
@@ -350,9 +365,11 @@ function CreateTaskForm({ onCreated }: CreateTaskFormProps) {
                     key={p}
                     type="button"
                     onClick={() => setPriority(p)}
-                    className={`flex-1 border px-3 py-1.5 rounded-lg text-sm font-medium transition-all ${
-                      priority === p ? cfg.activeClass : cfg.inactiveClass
-                    }`}
+                    style={{
+                      flex: 1, padding: '7px 0', borderRadius: 8, fontSize: 13,
+                      fontWeight: 500, cursor: 'pointer', transition: 'all 0.15s',
+                      ...(priority === p ? cfg.activeStyle : cfg.inactiveStyle),
+                    }}
                   >
                     {cfg.label}
                   </button>
@@ -362,41 +379,47 @@ function CreateTaskForm({ onCreated }: CreateTaskFormProps) {
           </div>
 
           {/* Depends on */}
-          <div className="flex flex-col gap-1">
-            <p className="text-xs text-slate-500 font-medium uppercase tracking-wide">Зависит от</p>
-            <div className="flex gap-2">
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+            <p style={{ fontSize: 11, color: 'rgba(255,255,255,0.35)', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.06em', margin: 0 }}>
+              Зависит от
+            </p>
+            <div style={{ display: 'flex', gap: 8 }}>
               <input
-                className="bg-[#0d0d10] border border-[#28283a] rounded-lg px-3 py-2 text-sm text-slate-100 focus:border-indigo-500 outline-none flex-1 placeholder:text-slate-600 transition-colors"
+                className="input-premium"
+                style={{ flex: 1 }}
                 placeholder="ID задачи..."
                 value={dependsOnInput}
                 onChange={(e) => setDependsOnInput(e.target.value)}
                 onKeyDown={(e) => {
-                  if (e.key === 'Enter') {
-                    e.preventDefault()
-                    addDependency()
-                  }
+                  if (e.key === 'Enter') { e.preventDefault(); addDependency() }
                 }}
               />
               <button
                 type="button"
                 onClick={addDependency}
-                className="bg-[#1c1c28] hover:bg-[#28283a] border border-[#1e1e2c] text-slate-300 px-3 py-2 rounded-lg text-sm transition-all"
+                className="btn-ghost-premium"
+                style={{ whiteSpace: 'nowrap', fontSize: 13 }}
               >
                 + Добавить
               </button>
             </div>
             {dependsOn.length > 0 && (
-              <div className="flex flex-wrap gap-1.5 mt-1">
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
                 {dependsOn.map((id) => (
                   <span
                     key={id}
-                    className="inline-flex items-center gap-1 bg-indigo-500/10 text-indigo-300 border border-indigo-500/20 px-2 py-0.5 rounded-md text-xs"
+                    style={{
+                      display: 'inline-flex', alignItems: 'center', gap: 4,
+                      background: 'rgba(99,102,241,0.12)', color: '#a5b4fc',
+                      border: '1px solid rgba(99,102,241,0.25)',
+                      padding: '2px 8px', borderRadius: 6, fontSize: 12, fontFamily: 'monospace',
+                    }}
                   >
                     {id}
                     <button
                       type="button"
                       onClick={() => removeDependency(id)}
-                      className="hover:text-indigo-100 ml-0.5"
+                      style={{ background: 'none', border: 'none', color: 'inherit', cursor: 'pointer', padding: 0, lineHeight: 1, opacity: 0.7 }}
                     >
                       ×
                     </button>
@@ -406,11 +429,12 @@ function CreateTaskForm({ onCreated }: CreateTaskFormProps) {
             )}
           </div>
 
-          <div className="flex justify-end pt-2">
+          <div style={{ display: 'flex', justifyContent: 'flex-end', paddingTop: 4 }}>
             <button
               type="submit"
               disabled={submitting}
-              className="bg-indigo-500 hover:bg-indigo-600 disabled:opacity-50 disabled:cursor-not-allowed text-white px-4 py-2 rounded-lg text-sm font-medium transition-all"
+              className="btn-glow"
+              style={{ opacity: submitting ? 0.6 : 1, cursor: submitting ? 'not-allowed' : 'pointer' }}
             >
               {submitting ? 'Создание...' : 'Создать задачу'}
             </button>
@@ -439,14 +463,12 @@ function TaskDetails({ task, onRefresh }: TaskDetailsProps) {
   const [metricsLoading, setMetricsLoading] = useState(false)
   const logsEndRef = useRef<HTMLDivElement>(null)
 
-  // Auto-scroll logs
   useEffect(() => {
     if (activeTab === 'logs') {
       logsEndRef.current?.scrollIntoView({ behavior: 'smooth' })
     }
   }, [task.logs, activeTab])
 
-  // Load diff when tab selected
   useEffect(() => {
     if (activeTab !== 'diff') return
     setDiffLoading(true)
@@ -456,7 +478,6 @@ function TaskDetails({ task, onRefresh }: TaskDetailsProps) {
       .finally(() => setDiffLoading(false))
   }, [activeTab, task.id, toastError])
 
-  // Load metrics when tab selected
   useEffect(() => {
     if (activeTab !== 'metrics') return
     setMetricsLoading(true)
@@ -505,42 +526,37 @@ function TaskDetails({ task, onRefresh }: TaskDetailsProps) {
   ]
 
   return (
-    <div className="h-full flex flex-col">
+    <div style={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
       {/* Header */}
-      <div className="px-6 pt-6 pb-4 border-b border-[#1e1e2c]">
-        <div className="flex items-start justify-between gap-4 mb-3">
-          <h2 className="text-base font-semibold text-slate-100 leading-snug">{task.title}</h2>
-          <div className="flex items-center gap-2 shrink-0">
-            <Badge className={TYPE_BADGE[task.type]}>{task.type}</Badge>
-            <Badge className={STATUS_BADGE[task.status]}>{STATUS_LABEL[task.status]}</Badge>
+      <div style={{ padding: '20px 24px 16px', borderBottom: '1px solid rgba(255,255,255,0.06)' }}>
+        <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 12, marginBottom: 8 }}>
+          <h2 style={{ fontSize: 15, fontWeight: 600, color: 'rgba(255,255,255,0.95)', margin: 0, lineHeight: 1.4 }}>
+            {task.title}
+          </h2>
+          <div style={{ display: 'flex', gap: 6, flexShrink: 0 }}>
+            <span className={TYPE_COLOR[task.type]}>{task.type}</span>
+            <span className={STATUS_BADGE_CLS[task.status]}>{STATUS_LABEL[task.status]}</span>
           </div>
         </div>
-        <p className="text-xs text-slate-500">{timeAgo(task.createdAt)}</p>
+        <p style={{ fontSize: 12, color: 'rgba(255,255,255,0.35)', margin: 0 }}>{timeAgo(task.createdAt)}</p>
 
-        {/* Progress bar for running tasks */}
         {task.status === 'running' && (
-          <div className="mt-3 h-1 bg-[#1e1e2c] rounded-full overflow-hidden">
-            <div className="h-full bg-indigo-500 rounded-full animate-[progress_2s_ease-in-out_infinite]" style={{ width: '60%' }} />
+          <div className="progress-track" style={{ marginTop: 12, height: 3 }}>
+            <div className="progress-fill" style={{ width: '60%', animation: 'progress-indeterminate 2s ease-in-out infinite' }} />
           </div>
         )}
 
-        {/* Action buttons */}
-        <div className="flex gap-2 mt-4">
-          <button
-            onClick={handleRerun}
-            className="bg-[#1c1c28] hover:bg-[#28283a] border border-[#1e1e2c] text-slate-300 px-3 py-1.5 rounded-lg text-sm transition-all"
-          >
+        <div style={{ display: 'flex', gap: 8, marginTop: 14 }}>
+          <button onClick={handleRerun} className="btn-ghost-premium" style={{ fontSize: 13 }}>
             ↺ Перезапустить
           </button>
-          <button
-            onClick={handlePRDescription}
-            className="bg-[#1c1c28] hover:bg-[#28283a] border border-[#1e1e2c] text-slate-300 px-3 py-1.5 rounded-lg text-sm transition-all"
-          >
+          <button onClick={handlePRDescription} className="btn-ghost-premium" style={{ fontSize: 13 }}>
             PR Description
           </button>
           <button
             onClick={handleRollback}
-            className="bg-[#1c1c28] hover:bg-[#28283a] border border-rose-900/40 text-rose-400 px-3 py-1.5 rounded-lg text-sm transition-all"
+            className="btn-ghost-premium"
+            style={{ fontSize: 13, color: '#f87171', border: '1px solid rgba(248,113,113,0.2)' }}
           >
             Откат
           </button>
@@ -548,17 +564,17 @@ function TaskDetails({ task, onRefresh }: TaskDetailsProps) {
       </div>
 
       {/* Tabs */}
-      <div className="flex border-b border-[#1e1e2c] px-6">
+      <div style={{ display: 'flex', borderBottom: '1px solid rgba(255,255,255,0.06)', padding: '0 24px' }}>
         {tabs.map((tab) => (
           <button
             key={tab.id}
             onClick={() => setActiveTab(tab.id)}
-            className={[
-              'px-4 py-3 text-sm font-medium border-b-2 -mb-px transition-colors',
-              activeTab === tab.id
-                ? 'border-indigo-500 text-indigo-400'
-                : 'border-transparent text-slate-500 hover:text-slate-300',
-            ].join(' ')}
+            style={{
+              padding: '12px 16px', fontSize: 13, fontWeight: 500, background: 'none', border: 'none',
+              borderBottom: `2px solid ${activeTab === tab.id ? '#6366f1' : 'transparent'}`,
+              color: activeTab === tab.id ? '#818cf8' : 'rgba(255,255,255,0.4)',
+              cursor: 'pointer', transition: 'color 0.15s', marginBottom: -1,
+            }}
           >
             {tab.label}
           </button>
@@ -566,37 +582,39 @@ function TaskDetails({ task, onRefresh }: TaskDetailsProps) {
       </div>
 
       {/* Tab content */}
-      <div className="flex-1 overflow-y-auto">
+      <div style={{ flex: 1, overflowY: 'auto' }}>
         {/* Details tab */}
         {activeTab === 'details' && (
-          <div className="p-6 flex flex-col gap-5">
+          <div style={{ padding: 24, display: 'flex', flexDirection: 'column', gap: 20 }}>
             {task.description && (
               <div>
-                <p className="text-xs text-slate-500 font-medium uppercase tracking-wide mb-1">Описание</p>
-                <p className="text-sm text-slate-300 leading-relaxed">{task.description}</p>
+                <p style={{ fontSize: 11, color: 'rgba(255,255,255,0.35)', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 6, marginTop: 0 }}>
+                  Описание
+                </p>
+                <p style={{ fontSize: 14, color: 'rgba(255,255,255,0.65)', lineHeight: 1.6, margin: 0 }}>{task.description}</p>
               </div>
             )}
-            <div className="grid grid-cols-2 gap-4">
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
               <div>
-                <p className="text-xs text-slate-500 font-medium uppercase tracking-wide mb-1">ID</p>
-                <p className="text-sm text-slate-400 font-mono">{task.id}</p>
+                <p style={{ fontSize: 11, color: 'rgba(255,255,255,0.35)', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 4, marginTop: 0 }}>ID</p>
+                <p style={{ fontSize: 13, color: 'rgba(255,255,255,0.5)', fontFamily: 'monospace', margin: 0 }}>{task.id}</p>
               </div>
               <div>
-                <p className="text-xs text-slate-500 font-medium uppercase tracking-wide mb-1">Приоритет</p>
-                <p className="text-sm text-slate-300 capitalize">{task.priority ?? 'normal'}</p>
+                <p style={{ fontSize: 11, color: 'rgba(255,255,255,0.35)', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 4, marginTop: 0 }}>Приоритет</p>
+                <p style={{ fontSize: 14, color: 'rgba(255,255,255,0.65)', textTransform: 'capitalize', margin: 0 }}>{task.priority ?? 'normal'}</p>
               </div>
               {task.updatedAt && (
                 <div>
-                  <p className="text-xs text-slate-500 font-medium uppercase tracking-wide mb-1">Обновлено</p>
-                  <p className="text-sm text-slate-400">{timeAgo(task.updatedAt)}</p>
+                  <p style={{ fontSize: 11, color: 'rgba(255,255,255,0.35)', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 4, marginTop: 0 }}>Обновлено</p>
+                  <p style={{ fontSize: 13, color: 'rgba(255,255,255,0.5)', margin: 0 }}>{timeAgo(task.updatedAt)}</p>
                 </div>
               )}
               {task.dependsOn && task.dependsOn.length > 0 && (
                 <div>
-                  <p className="text-xs text-slate-500 font-medium uppercase tracking-wide mb-1">Зависит от</p>
-                  <div className="flex flex-wrap gap-1">
+                  <p style={{ fontSize: 11, color: 'rgba(255,255,255,0.35)', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 4, marginTop: 0 }}>Зависит от</p>
+                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
                     {task.dependsOn.map((id) => (
-                      <span key={id} className="text-xs text-indigo-400 font-mono bg-indigo-500/10 px-1.5 py-0.5 rounded">
+                      <span key={id} style={{ fontSize: 12, color: '#a5b4fc', fontFamily: 'monospace', background: 'rgba(99,102,241,0.1)', padding: '1px 6px', borderRadius: 4 }}>
                         {id}
                       </span>
                     ))}
@@ -606,16 +624,30 @@ function TaskDetails({ task, onRefresh }: TaskDetailsProps) {
             </div>
             {task.result && (
               <div>
-                <p className="text-xs text-slate-500 font-medium uppercase tracking-wide mb-1">Результат</p>
-                <pre className="text-sm text-slate-300 bg-[#0d0d10] border border-[#28283a] rounded-lg p-4 overflow-x-auto whitespace-pre-wrap font-mono leading-relaxed">
+                <p style={{ fontSize: 11, color: 'rgba(255,255,255,0.35)', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 6, marginTop: 0 }}>
+                  Результат
+                </p>
+                <pre style={{
+                  fontSize: 13, color: 'rgba(255,255,255,0.65)', background: '#0f0f1a',
+                  border: '1px solid rgba(255,255,255,0.08)', borderRadius: 8,
+                  padding: 16, overflowX: 'auto', whiteSpace: 'pre-wrap',
+                  fontFamily: 'monospace', lineHeight: 1.6, margin: 0,
+                }}>
                   {task.result}
                 </pre>
               </div>
             )}
             {task.error && (
               <div>
-                <p className="text-xs text-rose-400 font-medium uppercase tracking-wide mb-1">Ошибка</p>
-                <pre className="text-sm text-rose-300 bg-rose-500/5 border border-rose-500/20 rounded-lg p-4 overflow-x-auto whitespace-pre-wrap font-mono leading-relaxed">
+                <p style={{ fontSize: 11, color: '#f87171', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 6, marginTop: 0 }}>
+                  Ошибка
+                </p>
+                <pre style={{
+                  fontSize: 13, color: '#fca5a5', background: 'rgba(248,113,113,0.05)',
+                  border: '1px solid rgba(248,113,113,0.2)', borderRadius: 8,
+                  padding: 16, overflowX: 'auto', whiteSpace: 'pre-wrap',
+                  fontFamily: 'monospace', lineHeight: 1.6, margin: 0,
+                }}>
                   {task.error}
                 </pre>
               </div>
@@ -625,19 +657,25 @@ function TaskDetails({ task, onRefresh }: TaskDetailsProps) {
 
         {/* Logs tab */}
         {activeTab === 'logs' && (
-          <div className="p-4">
+          <div style={{ padding: 16 }}>
             {task.logs && task.logs.length > 0 ? (
-              <div className="bg-[#0d0d10] border border-[#28283a] rounded-lg p-4 font-mono text-xs text-slate-400 leading-6 overflow-x-auto">
+              <div style={{
+                background: '#0a0a12', border: '1px solid rgba(255,255,255,0.06)',
+                borderRadius: 8, padding: 16, fontFamily: 'monospace', fontSize: 12,
+                color: 'rgba(255,255,255,0.5)', lineHeight: 1.7, overflowX: 'auto',
+              }}>
                 {task.logs.map((line, i) => (
-                  <div key={i} className="hover:text-slate-300 transition-colors">
-                    <span className="text-slate-600 select-none mr-3">{String(i + 1).padStart(4, ' ')}</span>
-                    {line}
+                  <div key={i} style={{ display: 'flex', gap: 12 }}>
+                    <span style={{ color: 'rgba(255,255,255,0.15)', userSelect: 'none', minWidth: 32, textAlign: 'right' }}>
+                      {String(i + 1).padStart(4, ' ')}
+                    </span>
+                    <span style={{ color: 'rgba(255,255,255,0.6)' }}>{line}</span>
                   </div>
                 ))}
                 <div ref={logsEndRef} />
               </div>
             ) : (
-              <div className="flex items-center justify-center h-32 text-slate-600 text-sm">
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: 120, color: 'rgba(255,255,255,0.2)', fontSize: 14 }}>
                 Логи отсутствуют
               </div>
             )}
@@ -646,27 +684,31 @@ function TaskDetails({ task, onRefresh }: TaskDetailsProps) {
 
         {/* Diff tab */}
         {activeTab === 'diff' && (
-          <div className="p-4">
+          <div style={{ padding: 16 }}>
             {diffLoading ? (
-              <div className="flex items-center justify-center h-32 text-slate-500 text-sm">
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: 120, color: 'rgba(255,255,255,0.3)', fontSize: 14 }}>
                 Загрузка diff...
               </div>
             ) : diff ? (
-              <pre className="bg-[#0d0d10] border border-[#28283a] rounded-lg p-4 font-mono text-xs text-slate-300 overflow-x-auto leading-6 whitespace-pre">
+              <pre style={{
+                background: '#0a0a12', border: '1px solid rgba(255,255,255,0.06)',
+                borderRadius: 8, padding: 16, fontFamily: 'monospace', fontSize: 12,
+                color: 'rgba(255,255,255,0.6)', overflowX: 'auto', lineHeight: 1.7,
+                whiteSpace: 'pre', margin: 0,
+              }}>
                 {diff.split('\n').map((line, i) => {
-                  let cls = 'text-slate-400'
-                  if (line.startsWith('+') && !line.startsWith('+++')) cls = 'text-emerald-400 bg-emerald-500/5'
-                  if (line.startsWith('-') && !line.startsWith('---')) cls = 'text-rose-400 bg-rose-500/5'
-                  if (line.startsWith('@@')) cls = 'text-indigo-400'
-                  return (
-                    <div key={i} className={`${cls} block`}>
-                      {line}
-                    </div>
-                  )
+                  let style: React.CSSProperties = { display: 'block', color: 'rgba(255,255,255,0.4)' }
+                  if (line.startsWith('+') && !line.startsWith('+++'))
+                    style = { display: 'block', color: '#10b981', background: 'rgba(16,185,129,0.06)' }
+                  if (line.startsWith('-') && !line.startsWith('---'))
+                    style = { display: 'block', color: '#f87171', background: 'rgba(248,113,113,0.06)' }
+                  if (line.startsWith('@@'))
+                    style = { display: 'block', color: '#818cf8' }
+                  return <span key={i} style={style}>{line}</span>
                 })}
               </pre>
             ) : (
-              <div className="flex items-center justify-center h-32 text-slate-600 text-sm">
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: 120, color: 'rgba(255,255,255,0.2)', fontSize: 14 }}>
                 Diff недоступен
               </div>
             )}
@@ -675,20 +717,20 @@ function TaskDetails({ task, onRefresh }: TaskDetailsProps) {
 
         {/* Metrics tab */}
         {activeTab === 'metrics' && (
-          <div className="p-6">
+          <div style={{ padding: 24 }}>
             {metricsLoading ? (
-              <div className="flex items-center justify-center h-32 text-slate-500 text-sm">
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: 120, color: 'rgba(255,255,255,0.3)', fontSize: 14 }}>
                 Загрузка метрик...
               </div>
             ) : metrics ? (
-              <div className="grid grid-cols-2 gap-4">
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
                 {[
-                  { label: 'Токены', value: metrics.tokens?.toLocaleString() ?? '—', unit: '' },
-                  { label: 'Шаги', value: metrics.steps?.toLocaleString() ?? '—', unit: '' },
+                  { label: 'Токены', value: metrics.tokens?.toLocaleString() ?? '—', accent: '#6366f1' },
+                  { label: 'Шаги', value: metrics.steps?.toLocaleString() ?? '—', accent: '#a855f7' },
                   {
                     label: 'Стоимость',
                     value: metrics.cost !== undefined ? `$${metrics.cost.toFixed(4)}` : '—',
-                    unit: '',
+                    accent: '#22d3ee',
                   },
                   {
                     label: 'Длительность',
@@ -698,20 +740,23 @@ function TaskDetails({ task, onRefresh }: TaskDetailsProps) {
                           ? `${metrics.durationMs}ms`
                           : `${(metrics.durationMs / 1000).toFixed(1)}s`
                         : '—',
-                    unit: '',
+                    accent: '#10b981',
                   },
-                ].map(({ label, value }) => (
+                ].map(({ label, value, accent }) => (
                   <div
                     key={label}
-                    className="bg-[#13131a] border border-[#1e1e2c] rounded-xl p-4"
+                    className="super-box"
+                    style={{ padding: 20, borderRadius: 12 }}
                   >
-                    <p className="text-xs text-slate-500 mb-1">{label}</p>
-                    <p className="text-2xl font-semibold text-slate-100">{value}</p>
+                    <p style={{ fontSize: 11, color: 'rgba(255,255,255,0.35)', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 8, marginTop: 0 }}>
+                      {label}
+                    </p>
+                    <p style={{ fontSize: 28, fontWeight: 700, color: accent, margin: 0, letterSpacing: '-0.02em' }}>{value}</p>
                   </div>
                 ))}
               </div>
             ) : (
-              <div className="flex items-center justify-center h-32 text-slate-600 text-sm">
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: 120, color: 'rgba(255,255,255,0.2)', fontSize: 14 }}>
                 Метрики недоступны
               </div>
             )}
@@ -752,34 +797,42 @@ function RightSidebar({ tasks }: { tasks: AgentTask[] }) {
   }, [fetchSidebarData])
 
   return (
-    <div className="w-[280px] shrink-0 border-l border-[#1e1e2c] flex flex-col overflow-y-auto">
+    <div style={{ width: 240, flexShrink: 0, borderLeft: '1px solid rgba(255,255,255,0.06)', display: 'flex', flexDirection: 'column', overflowY: 'auto' }}>
       {/* Stats */}
-      <div className="p-4 border-b border-[#1e1e2c]">
-        <p className="text-xs text-slate-500 font-medium uppercase tracking-wide mb-3">Статистика</p>
-        <div className="flex gap-3">
-          <div className="flex-1 bg-[#13131a] border border-[#1e1e2c] rounded-xl p-3 text-center">
-            <p className="text-2xl font-semibold text-indigo-400">{runningCount}</p>
-            <p className="text-xs text-slate-500 mt-0.5">Запущено</p>
+      <div style={{ padding: 16, borderBottom: '1px solid rgba(255,255,255,0.06)' }}>
+        <p style={{ fontSize: 11, color: 'rgba(255,255,255,0.35)', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 10, marginTop: 0 }}>
+          Статистика
+        </p>
+        <div style={{ display: 'flex', gap: 8 }}>
+          <div className="super-box" style={{ flex: 1, padding: '10px 8px', textAlign: 'center', borderRadius: 10 }}>
+            <p style={{ fontSize: 22, fontWeight: 700, color: '#22d3ee', margin: 0 }}>{runningCount}</p>
+            <p style={{ fontSize: 11, color: 'rgba(255,255,255,0.35)', marginTop: 2, marginBottom: 0 }}>Запущено</p>
           </div>
-          <div className="flex-1 bg-[#13131a] border border-[#1e1e2c] rounded-xl p-3 text-center">
-            <p className="text-2xl font-semibold text-slate-300">{pendingCount}</p>
-            <p className="text-xs text-slate-500 mt-0.5">В очереди</p>
+          <div className="super-box" style={{ flex: 1, padding: '10px 8px', textAlign: 'center', borderRadius: 10 }}>
+            <p style={{ fontSize: 22, fontWeight: 700, color: 'rgba(255,255,255,0.65)', margin: 0 }}>{pendingCount}</p>
+            <p style={{ fontSize: 11, color: 'rgba(255,255,255,0.35)', marginTop: 2, marginBottom: 0 }}>В очереди</p>
           </div>
         </div>
       </div>
 
       {/* Cron jobs */}
-      <div className="p-4 border-b border-[#1e1e2c]">
-        <p className="text-xs text-slate-500 font-medium uppercase tracking-wide mb-3">Cron задачи</p>
+      <div style={{ padding: 16, borderBottom: '1px solid rgba(255,255,255,0.06)' }}>
+        <p style={{ fontSize: 11, color: 'rgba(255,255,255,0.35)', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 10, marginTop: 0 }}>
+          Cron задачи
+        </p>
         {cronJobs.length === 0 ? (
-          <p className="text-xs text-slate-600">Нет активных cron задач</p>
+          <p style={{ fontSize: 12, color: 'rgba(255,255,255,0.2)', margin: 0 }}>Нет активных cron задач</p>
         ) : (
-          <div className="flex flex-col gap-2">
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
             {cronJobs.map((job) => (
-              <div key={job.id} className="bg-[#13131a] border border-[#1e1e2c] rounded-lg p-2.5">
-                <p className="text-sm text-slate-200 font-medium truncate">{job.name}</p>
-                <p className="text-xs text-slate-500 mt-0.5 font-mono">{job.schedule}</p>
-                <p className="text-xs text-indigo-400 mt-1">
+              <div key={job.id} className="super-box" style={{ padding: 10, borderRadius: 8 }}>
+                <p style={{ fontSize: 13, color: 'rgba(255,255,255,0.85)', fontWeight: 500, margin: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                  {job.name}
+                </p>
+                <p style={{ fontSize: 11, color: 'rgba(255,255,255,0.35)', fontFamily: 'monospace', marginTop: 2, marginBottom: 0 }}>
+                  {job.schedule}
+                </p>
+                <p style={{ fontSize: 11, color: '#6366f1', marginTop: 4, marginBottom: 0 }}>
                   ↻ {new Date(job.nextFireTime).toLocaleString('ru-RU', { hour: '2-digit', minute: '2-digit', day: '2-digit', month: 'short' })}
                 </p>
               </div>
@@ -789,20 +842,25 @@ function RightSidebar({ tasks }: { tasks: AgentTask[] }) {
       </div>
 
       {/* Queue */}
-      <div className="p-4">
-        <p className="text-xs text-slate-500 font-medium uppercase tracking-wide mb-3">Очередь</p>
+      <div style={{ padding: 16 }}>
+        <p style={{ fontSize: 11, color: 'rgba(255,255,255,0.35)', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 10, marginTop: 0 }}>
+          Очередь
+        </p>
         {queue.length === 0 ? (
-          <p className="text-xs text-slate-600">Очередь пуста</p>
+          <p style={{ fontSize: 12, color: 'rgba(255,255,255,0.2)', margin: 0 }}>Очередь пуста</p>
         ) : (
-          <div className="flex flex-col gap-1.5">
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
             {queue.slice(0, 5).map((item, index) => (
               <div
                 key={item.id}
-                className="flex items-center gap-2 bg-[#13131a] border border-[#1e1e2c] rounded-lg px-3 py-2"
+                className="super-box"
+                style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '8px 10px', borderRadius: 8 }}
               >
-                <span className="text-xs text-slate-600 w-4 shrink-0">{index + 1}</span>
-                <span className="text-xs text-slate-300 flex-1 truncate">{item.title}</span>
-                <Badge className={TYPE_BADGE[item.type]}>{item.type.slice(0, 3)}</Badge>
+                <span style={{ fontSize: 11, color: 'rgba(255,255,255,0.2)', width: 16, flexShrink: 0 }}>{index + 1}</span>
+                <span style={{ fontSize: 12, color: 'rgba(255,255,255,0.65)', flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                  {item.title}
+                </span>
+                <span className={TYPE_COLOR[item.type]} style={{ fontSize: 10 }}>{item.type.slice(0, 3)}</span>
               </div>
             ))}
           </div>
@@ -833,7 +891,6 @@ export default function AgentTaskConsolePage() {
     }
   }, [toastError])
 
-  // Initial load + auto-refresh every 3s
   useEffect(() => {
     fetchTasks()
     const interval = setInterval(fetchTasks, 3_000)
@@ -859,29 +916,28 @@ export default function AgentTaskConsolePage() {
   }
 
   return (
-    <div className="flex h-screen bg-[#0d0d10] text-slate-100 overflow-hidden">
-      {/* Left sidebar — task list */}
-      <div className="w-[300px] shrink-0 border-r border-[#1e1e2c] flex flex-col">
+    <div style={{ display: 'flex', gap: 0, height: 'calc(100vh - 110px)', overflow: 'hidden', background: '#03030a' }}>
+      {/* Left: task list 280px */}
+      <div style={{ width: 280, borderRight: '1px solid rgba(255,255,255,0.06)', overflowY: 'auto', flexShrink: 0, display: 'flex', flexDirection: 'column' }}>
         {/* Header */}
-        <div className="p-4 border-b border-[#1e1e2c]">
-          <div className="flex items-center justify-between mb-3">
-            <h1 className="text-sm font-semibold text-slate-100">Agent Console</h1>
+        <div style={{ padding: 16, borderBottom: '1px solid rgba(255,255,255,0.06)' }}>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12 }}>
+            <h1 style={{ fontSize: 13, fontWeight: 600, color: 'rgba(255,255,255,0.95)', margin: 0, letterSpacing: '0.01em' }}>
+              Agent Console
+            </h1>
             {loading && (
-              <span className="w-1.5 h-1.5 rounded-full bg-indigo-400 animate-pulse" />
+              <StatusDot status="running" />
             )}
           </div>
-          <button
-            onClick={openCreateForm}
-            className="bg-indigo-500 hover:bg-indigo-600 text-white px-4 py-2 rounded-lg text-sm font-medium transition-all w-full"
-          >
+          <button onClick={openCreateForm} className="btn-glow" style={{ width: '100%', justifyContent: 'center' }}>
             + Новая задача
           </button>
         </div>
 
         {/* Task list */}
-        <div className="flex-1 overflow-y-auto">
+        <div style={{ flex: 1, overflowY: 'auto' }}>
           {tasks.length === 0 && !loading ? (
-            <div className="flex items-center justify-center h-32 text-slate-600 text-sm px-4 text-center">
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: 120, color: 'rgba(255,255,255,0.2)', fontSize: 13, textAlign: 'center', padding: '0 16px' }}>
               Задач пока нет. Создайте первую.
             </div>
           ) : (
@@ -891,21 +947,31 @@ export default function AgentTaskConsolePage() {
                 <button
                   key={task.id}
                   onClick={() => handleSelectTask(task.id)}
-                  className={[
-                    'w-full text-left bg-[#13131a] border-b border-[#1e1e2c] p-3 cursor-pointer transition-colors',
-                    'hover:bg-[#181822]',
-                    isSelected ? 'border-l-2 border-l-indigo-500 bg-indigo-500/5 pl-2.5' : 'border-l-2 border-l-transparent',
-                  ].join(' ')}
+                  style={{
+                    width: '100%', textAlign: 'left', background: isSelected ? 'rgba(99,102,241,0.08)' : 'transparent',
+                    borderBottom: '1px solid rgba(255,255,255,0.04)',
+                    borderLeft: `2px solid ${isSelected ? '#6366f1' : 'transparent'}`,
+                    padding: isSelected ? '10px 12px 10px 10px' : '10px 12px',
+                    cursor: 'pointer', transition: 'background 0.15s', border: 'none',
+                    borderBottomWidth: 1, borderBottomStyle: 'solid', borderBottomColor: 'rgba(255,255,255,0.04)',
+                    borderLeftWidth: 2, borderLeftStyle: 'solid', borderLeftColor: isSelected ? '#6366f1' : 'transparent',
+                  }}
+                  onMouseEnter={(e) => {
+                    if (!isSelected) (e.currentTarget as HTMLButtonElement).style.background = 'rgba(255,255,255,0.03)'
+                  }}
+                  onMouseLeave={(e) => {
+                    if (!isSelected) (e.currentTarget as HTMLButtonElement).style.background = 'transparent'
+                  }}
                 >
-                  <div className="flex items-center gap-2">
-                    <span
-                      className={`w-2 h-2 rounded-full shrink-0 ${STATUS_DOT[task.status]}`}
-                    />
-                    <span className="text-sm text-slate-200 truncate flex-1">{task.title}</span>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                    <StatusDot status={task.status} />
+                    <span style={{ fontSize: 13, color: 'rgba(255,255,255,0.85)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 }}>
+                      {task.title}
+                    </span>
                   </div>
-                  <div className="flex items-center gap-2 mt-1 pl-4">
-                    <Badge className={`${TYPE_BADGE[task.type]} text-[10px]`}>{task.type}</Badge>
-                    <span className="text-xs text-slate-600 ml-auto">{timeAgo(task.createdAt)}</span>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 6, paddingLeft: 16 }}>
+                    <span className={TYPE_COLOR[task.type]} style={{ fontSize: 10 }}>{task.type}</span>
+                    <span style={{ fontSize: 11, color: 'rgba(255,255,255,0.25)', marginLeft: 'auto' }}>{timeAgo(task.createdAt)}</span>
                   </div>
                 </button>
               )
@@ -914,22 +980,22 @@ export default function AgentTaskConsolePage() {
         </div>
       </div>
 
-      {/* Center panel */}
-      <div className="flex-1 min-w-0 flex flex-col overflow-hidden">
+      {/* Center: details/form flex:1 */}
+      <div style={{ flex: 1, overflowY: 'auto' }}>
         {showCreateForm ? (
           <CreateTaskForm onCreated={handleTaskCreated} />
         ) : selectedTask ? (
           <TaskDetails task={selectedTask} onRefresh={fetchTasks} />
         ) : (
-          <div className="flex-1 flex flex-col items-center justify-center text-center px-6">
-            <div className="bg-[#13131a] border border-[#1e1e2c] rounded-xl p-8 max-w-sm">
-              <p className="text-slate-400 text-sm mb-4">
+          <div style={{ display: 'flex', flex: 1, flexDirection: 'column', alignItems: 'center', justifyContent: 'center', height: '100%', textAlign: 'center', padding: '0 24px' }}>
+            <div className="glass" style={{ padding: 32, borderRadius: 16, maxWidth: 320 }}>
+              <div style={{ width: 48, height: 48, borderRadius: '50%', background: 'rgba(99,102,241,0.12)', border: '1px solid rgba(99,102,241,0.25)', display: 'flex', alignItems: 'center', justifyContent: 'center', margin: '0 auto 16px', fontSize: 20 }}>
+                ⚡
+              </div>
+              <p style={{ fontSize: 14, color: 'rgba(255,255,255,0.5)', marginBottom: 16, margin: '0 0 16px' }}>
                 Выберите задачу из списка или создайте новую
               </p>
-              <button
-                onClick={openCreateForm}
-                className="bg-indigo-500 hover:bg-indigo-600 text-white px-4 py-2 rounded-lg text-sm font-medium transition-all"
-              >
+              <button onClick={openCreateForm} className="btn-glow">
                 + Новая задача
               </button>
             </div>
@@ -937,7 +1003,7 @@ export default function AgentTaskConsolePage() {
         )}
       </div>
 
-      {/* Right sidebar */}
+      {/* Right sidebar 240px */}
       <RightSidebar tasks={tasks} />
     </div>
   )

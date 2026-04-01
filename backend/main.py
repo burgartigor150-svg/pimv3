@@ -772,6 +772,36 @@ async def get_stats(db: AsyncSession = Depends(get_db), current_user: models.Use
         "average_completeness": avg_score
     }
 
+@app.get("/api/v1/users/stats")
+async def get_users_stats(db: AsyncSession = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+    """Возвращает статистику по пользователям: общее количество, распределение по ролям, последняя активность."""
+    from sqlalchemy import func, desc
+    # Общее количество пользователей
+    total_users = (await db.execute(select(func.count(models.User.id)))).scalar() or 0
+    # Количество пользователей по ролям
+    role_counts = {}
+    roles_result = await db.execute(
+        select(models.User.role, func.count(models.User.id)).group_by(models.User.role)
+    )
+    for role, count in roles_result:
+        role_counts[role] = count
+    # Последние активные пользователи (например, по дате создания или обновления, если есть поле updated_at)
+    # В модели User может не быть updated_at, используем created_at как пример
+    recent_users_result = await db.execute(
+        select(models.User.email, models.User.role, models.User.created_at)
+        .order_by(desc(models.User.created_at))
+        .limit(10)
+    )
+    recent_users = [
+        {"email": email, "role": role, "created_at": created_at.isoformat() if created_at else None}
+        for email, role, created_at in recent_users_result
+    ]
+    return {
+        "total_users": total_users,
+        "roles_distribution": role_counts,
+        "recent_users": recent_users
+    }
+
 # === IMPORT ENDPOINT ===
 @app.post("/api/v1/import/product", response_model=schemas.Product)
 async def import_marketplace_product(req: schemas.ImportRequest, db: AsyncSession = Depends(get_db), current_user: models.User = Depends(get_current_user)):

@@ -23,75 +23,126 @@ export default function SettingsPage() {
     try {
       await api.post('/settings/deepseek_api_key', { value: deepseekKey });
       await api.post('/settings/ai_provider', { value: aiProvider });
-      alert('Настройки успешно сохранены!');
+      console.error('Настройки успешно сохранены!');
     } catch (e: any) {
-      alert('Ошибка при сохранении: ' + e.message);
+      console.error('Ошибка при сохранении: ' + e.message);
     } finally {
       setIsSaving(false);
     }
   };
 
+  const providerCardStyle = (active: boolean): React.CSSProperties => ({
+    display: 'flex',
+    alignItems: 'flex-start',
+    gap: 14,
+    padding: '16px 18px',
+    borderRadius: 12,
+    border: active ? '1px solid rgba(99,102,241,0.5)' : '1px solid rgba(255,255,255,0.07)',
+    background: active ? 'rgba(99,102,241,0.08)' : '#141422',
+    cursor: 'pointer',
+    transition: 'border-color 0.15s, background 0.15s',
+  });
+
   return (
-    <div className="flex flex-col gap-6 max-w-3xl">
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 24, maxWidth: 680 }}>
+
+      {/* Page header */}
       <div>
-        <h2 className="text-3xl font-bold flex items-center gap-2 text-slate-900 dark:text-white">
-          <Settings className="w-8 h-8 text-indigo-500" /> Настройки ИИ
-        </h2>
-        <p className="text-slate-600 dark:text-slate-400 mt-2">
-          Здесь задаётся «мозг» для подсказок и автоматических шагов: сбор идеальной карточки, маппинг под маркетплейсы, подсказки в чате. Ключи маркетплейсов настраиваются отдельно в разделе{' '}
-          <Link to="/integrations" className="text-indigo-600 dark:text-indigo-400 underline font-medium">магазинов и ключей API</Link>.
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 6 }}>
+          <Settings size={20} color="#6366f1" />
+          <h1 style={{ fontSize: 22, fontWeight: 800, letterSpacing: '-0.03em', color: 'rgba(255,255,255,0.95)', margin: 0 }}>
+            Настройки ИИ
+          </h1>
+        </div>
+        <p style={{ fontSize: 13, color: 'rgba(255,255,255,0.35)', lineHeight: 1.6, maxWidth: 580 }}>
+          Здесь задаётся «мозг» для подсказок и автоматических шагов. Ключи маркетплейсов настраиваются отдельно в разделе{' '}
+          <Link to="/integrations" style={{ color: '#6366f1', textDecoration: 'underline' }}>магазинов и ключей API</Link>.
         </p>
       </div>
 
-      <div className="rounded-lg border border-amber-200 dark:border-amber-900/50 bg-amber-50/90 dark:bg-amber-950/30 p-4 text-sm text-amber-950 dark:text-amber-100">
-        Не пересылайте API-ключ в мессенджеры и не сохраняйте в общих файлах. Доступ к этой странице должен быть только у доверенных сотрудников.
+      {/* Security warning */}
+      <div style={{ background: 'rgba(234,179,8,0.07)', border: '1px solid rgba(234,179,8,0.2)', borderRadius: 12, padding: '12px 16px', fontSize: 13, color: 'rgba(255,220,100,0.75)', lineHeight: 1.5 }}>
+        ⚠️ Не пересылайте API-ключ в мессенджеры и не сохраняйте в общих файлах. Доступ к этой странице должен быть только у доверенных сотрудников.
       </div>
 
-      <div className="bg-white dark:bg-slate-800 p-6 rounded-xl border border-slate-200 dark:border-slate-700 shadow-sm">
-        <h3 className="text-xl font-bold flex items-center gap-2 mb-2 text-slate-900 dark:text-white">
-          <Cpu className="w-6 h-6 text-indigo-500" /> Какой ИИ использовать
-        </h3>
-        <p className="text-sm text-slate-600 dark:text-slate-400 mb-6">
-          <strong>Облако (DeepSeek)</strong> — удобно для продакшена: не нужен свой сервер с видеокартой. <strong>Локально (Ollama)</strong> — если у вас уже поднят Ollama на машине с бэкендом; качество и скорость зависят от выбранной модели на сервере.
+      {/* Provider selection card */}
+      <div style={{ background: '#0f0f1a', border: '1px solid rgba(255,255,255,0.07)', borderRadius: 16, padding: 24 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
+          <Cpu size={16} color="#6366f1" />
+          <h2 style={{ fontSize: 16, fontWeight: 700, color: 'rgba(255,255,255,0.9)', margin: 0 }}>Какой ИИ использовать</h2>
+        </div>
+        <p style={{ fontSize: 13, color: 'rgba(255,255,255,0.35)', marginBottom: 20, lineHeight: 1.6 }}>
+          <strong style={{ color: 'rgba(255,255,255,0.55)' }}>Облако (DeepSeek)</strong> — удобно для продакшена: не нужен свой сервер с видеокартой.{' '}
+          <strong style={{ color: 'rgba(255,255,255,0.55)' }}>Локально (Ollama)</strong> — если у вас уже поднят Ollama на машине с бэкендом.
         </p>
 
-        <div className="flex flex-col gap-4 mb-6">
-          <label className={`flex items-start gap-3 p-4 border rounded-lg cursor-pointer transition-colors ${aiProvider === 'deepseek' ? 'bg-indigo-50 dark:bg-indigo-900/20 border-indigo-500' : 'border-slate-200 dark:border-slate-700'}`}>
-            <input type="radio" name="provider" value="deepseek" checked={aiProvider === 'deepseek'} onChange={(e) => setAiProvider(e.target.value)} className="mt-1" />
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 10, marginBottom: 24 }}>
+          <label style={providerCardStyle(aiProvider === 'deepseek')}>
+            <input
+              type="radio"
+              name="provider"
+              value="deepseek"
+              checked={aiProvider === 'deepseek'}
+              onChange={e => setAiProvider(e.target.value)}
+              style={{ accentColor: '#6366f1', marginTop: 2, flexShrink: 0 }}
+            />
             <div>
-              <div className="font-bold flex items-center gap-2 text-slate-900 dark:text-white"><Cloud className="w-4 h-4"/> DeepSeek (облако)</div>
-              <div className="text-sm text-slate-600 dark:text-slate-400">Нужен ключ с сайта DeepSeek. Обычно лучше распознаёт сложные задачи маппинга.</div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontWeight: 600, color: 'rgba(255,255,255,0.9)', fontSize: 14, marginBottom: 4 }}>
+                <Cloud size={14} color="#22d3ee" /> DeepSeek (облако)
+              </div>
+              <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.4)', lineHeight: 1.5 }}>
+                Нужен ключ с сайта DeepSeek. Обычно лучше распознаёт сложные задачи маппинга.
+              </div>
             </div>
           </label>
-          <label className={`flex items-start gap-3 p-4 border rounded-lg cursor-pointer transition-colors ${aiProvider === 'local' ? 'bg-indigo-50 dark:bg-indigo-900/20 border-indigo-500' : 'border-slate-200 dark:border-slate-700'}`}>
-            <input type="radio" name="provider" value="local" checked={aiProvider === 'local'} onChange={(e) => setAiProvider(e.target.value)} className="mt-1" />
+
+          <label style={providerCardStyle(aiProvider === 'local')}>
+            <input
+              type="radio"
+              name="provider"
+              value="local"
+              checked={aiProvider === 'local'}
+              onChange={e => setAiProvider(e.target.value)}
+              style={{ accentColor: '#6366f1', marginTop: 2, flexShrink: 0 }}
+            />
             <div>
-              <div className="font-bold flex items-center gap-2 text-slate-900 dark:text-white"><Cpu className="w-4 h-4"/> Локальный Ollama</div>
-              <div className="text-sm text-slate-600 dark:text-slate-400">Запросы идут на адрес, настроенный на сервере (часто Qwen и аналоги). Подходит для тестов и закрытого контура.</div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontWeight: 600, color: 'rgba(255,255,255,0.9)', fontSize: 14, marginBottom: 4 }}>
+                <Cpu size={14} color="#a855f7" /> Локальный Ollama
+              </div>
+              <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.4)', lineHeight: 1.5 }}>
+                Запросы идут на адрес, настроенный на сервере (часто Qwen и аналоги). Подходит для тестов и закрытого контура.
+              </div>
             </div>
           </label>
         </div>
-        
+
         {aiProvider === 'deepseek' && (
-          <label className="flex flex-col gap-2 mb-6">
-            <span className="font-medium text-sm text-slate-800 dark:text-slate-200">Секретный ключ DeepSeek</span>
-            <input 
-              type="password"
-              className="border p-3 rounded-lg dark:bg-slate-900 dark:border-slate-600 dark:text-white font-mono text-sm"
-              placeholder="Вставьте ключ из личного кабинета DeepSeek"
-              value={deepseekKey}
-              onChange={e => setDeepseekKey(e.target.value)}
-            />
-            <span className="text-xs text-slate-500">После сохранения ключ хранится на сервере в настройках приложения.</span>
-          </label>
+          <div style={{ marginBottom: 24 }}>
+            <label style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+              <span style={{ fontSize: 13, fontWeight: 600, color: 'rgba(255,255,255,0.65)' }}>Секретный ключ DeepSeek</span>
+              <input
+                type="password"
+                className="input-premium"
+                placeholder="Вставьте ключ из личного кабинета DeepSeek"
+                value={deepseekKey}
+                onChange={e => setDeepseekKey(e.target.value)}
+                style={{ fontFamily: 'monospace' }}
+              />
+              <span style={{ fontSize: 11, color: 'rgba(255,255,255,0.25)' }}>
+                После сохранения ключ хранится на сервере в настройках приложения.
+              </span>
+            </label>
+          </div>
         )}
 
-        <button 
+        <button
           onClick={handleSave}
           disabled={isSaving}
-          className="bg-green-600 text-white px-6 py-2.5 rounded-lg font-semibold hover:bg-green-700 flex items-center gap-2 disabled:opacity-50"
+          className="btn-glow"
+          style={{ display: 'flex', alignItems: 'center', gap: 8, opacity: isSaving ? 0.6 : 1 }}
         >
-          <Save className="w-5 h-5" /> {isSaving ? 'Сохранение…' : 'Сохранить'}
+          <Save size={15} />
+          {isSaving ? 'Сохранение…' : 'Сохранить настройки'}
         </button>
       </div>
     </div>

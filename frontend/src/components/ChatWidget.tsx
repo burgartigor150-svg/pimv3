@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect } from 'react'
-import { MessageCircle, X, Send, Bot, User, Loader2 } from 'lucide-react'
+import { MessageCircle, X, Send, Bot, Loader2, Sparkles } from 'lucide-react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 
@@ -31,7 +31,7 @@ export default function ChatWidget() {
 
   const handleSend = async () => {
     if (!input.trim()) return
-    
+
     const userMessage: Message = { role: 'user', content: input }
     setMessages(prev => [...prev, userMessage])
     setInput('')
@@ -41,12 +41,12 @@ export default function ChatWidget() {
       const response = await fetch('/api/v1/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ 
-          messages: [...messages, userMessage], 
-          current_path: window.location.pathname 
-        })
+        body: JSON.stringify({
+          messages: [...messages, userMessage],
+          current_path: window.location.pathname,
+        }),
       })
-      
+
       if (response.ok) {
         const data = await response.json()
         setMessages(prev => [...prev, { role: 'assistant', content: data.reply }])
@@ -62,44 +62,158 @@ export default function ChatWidget() {
   }
 
   return (
-    <div className="fixed bottom-6 right-6 z-50">
-      {/* Chat Button */}
+    <div style={{ position: 'fixed', bottom: 24, right: 24, zIndex: 9999 }}>
+      {/* Toggle Button */}
       {!isOpen && (
-        <button 
+        <button
           onClick={() => setIsOpen(true)}
-          className="w-14 h-14 bg-indigo-600 hover:bg-indigo-500 rounded-full text-white shadow-xl shadow-indigo-500/30 flex items-center justify-center transition-transform hover:scale-105"
+          style={{
+            width: 52, height: 52,
+            borderRadius: '50%',
+            background: 'linear-gradient(135deg, #6366f1, #a855f7)',
+            border: 'none',
+            cursor: 'pointer',
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            boxShadow: '0 0 32px rgba(99,102,241,0.5), 0 8px 24px rgba(0,0,0,0.4)',
+            transition: 'transform 0.2s, box-shadow 0.2s',
+            color: 'white',
+          }}
+          onMouseEnter={e => {
+            (e.currentTarget as HTMLButtonElement).style.transform = 'scale(1.08)'
+            ;(e.currentTarget as HTMLButtonElement).style.boxShadow = '0 0 48px rgba(99,102,241,0.7), 0 12px 32px rgba(0,0,0,0.5)'
+          }}
+          onMouseLeave={e => {
+            (e.currentTarget as HTMLButtonElement).style.transform = 'scale(1)'
+            ;(e.currentTarget as HTMLButtonElement).style.boxShadow = '0 0 32px rgba(99,102,241,0.5), 0 8px 24px rgba(0,0,0,0.4)'
+          }}
         >
-          <MessageCircle className="w-6 h-6" />
+          <MessageCircle size={22} />
         </button>
       )}
 
       {/* Chat Window */}
       {isOpen && (
-        <div className="w-80 sm:w-96 h-[500px] max-h-[80vh] bg-white dark:bg-slate-900 rounded-2xl shadow-2xl flex flex-col border border-slate-200 dark:border-slate-700 animate-in slide-in-from-bottom-4 duration-300">
+        <div
+          style={{
+            width: 360,
+            height: 500,
+            maxHeight: '80vh',
+            background: '#0f0f1a',
+            border: '1px solid rgba(255,255,255,0.08)',
+            borderRadius: 20,
+            display: 'flex',
+            flexDirection: 'column',
+            overflow: 'hidden',
+            boxShadow: '0 0 60px rgba(99,102,241,0.15), 0 24px 64px rgba(0,0,0,0.6)',
+            animation: 'fadeInUp 0.25s ease',
+          }}
+        >
           {/* Header */}
-          <div className="h-16 border-b border-slate-100 dark:border-slate-800 flex items-center justify-between px-4 bg-gradient-to-r from-indigo-600 to-purple-600 rounded-t-2xl text-white">
-            <div className="flex items-center gap-2">
-              <div className="w-8 h-8 rounded-full bg-white/20 flex items-center justify-center">
-                <Bot className="w-5 h-5" />
+          <div
+            style={{
+              padding: '14px 16px',
+              background: 'linear-gradient(135deg, rgba(99,102,241,0.2), rgba(168,85,247,0.15))',
+              borderBottom: '1px solid rgba(255,255,255,0.07)',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'space-between',
+              flexShrink: 0,
+            }}
+          >
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+              <div
+                style={{
+                  width: 32, height: 32, borderRadius: '50%',
+                  background: 'linear-gradient(135deg, #6366f1, #a855f7)',
+                  display: 'flex', alignItems: 'center', justifyContent: 'center',
+                  boxShadow: '0 0 16px rgba(99,102,241,0.5)',
+                  flexShrink: 0,
+                }}
+              >
+                <Bot size={16} color="white" />
               </div>
               <div>
-                <h3 className="font-bold text-sm leading-tight">Помощник</h3>
-                <p className="text-xs text-indigo-100">Подсказки по интерфейсу</p>
+                <div style={{ fontSize: 13, fontWeight: 700, color: 'rgba(255,255,255,0.9)', letterSpacing: '-0.01em' }}>Помощник PIM</div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 4, marginTop: 1 }}>
+                  <div style={{ width: 6, height: 6, borderRadius: '50%', background: '#10b981' }} />
+                  <span style={{ fontSize: 10, color: 'rgba(255,255,255,0.35)' }}>Онлайн</span>
+                </div>
               </div>
             </div>
-            <button onClick={() => setIsOpen(false)} className="w-8 h-8 flex items-center justify-center hover:bg-white/20 rounded-full transition-colors">
-              <X className="w-5 h-5" />
+            <button
+              onClick={() => setIsOpen(false)}
+              style={{
+                width: 28, height: 28, borderRadius: 8,
+                background: 'rgba(255,255,255,0.05)',
+                border: '1px solid rgba(255,255,255,0.08)',
+                cursor: 'pointer',
+                display: 'flex', alignItems: 'center', justifyContent: 'center',
+                color: 'rgba(255,255,255,0.4)',
+                transition: 'all 0.15s',
+              }}
+              onMouseEnter={e => (e.currentTarget.style.background = 'rgba(255,255,255,0.1)')}
+              onMouseLeave={e => (e.currentTarget.style.background = 'rgba(255,255,255,0.05)')}
+            >
+              <X size={14} />
             </button>
           </div>
 
-          {/* Messages Area */}
-          <div className="flex-1 overflow-y-auto p-4 space-y-4 bg-slate-50 dark:bg-slate-900">
+          {/* Messages */}
+          <div
+            style={{
+              flex: 1,
+              overflowY: 'auto',
+              padding: '16px 14px',
+              display: 'flex',
+              flexDirection: 'column',
+              gap: 12,
+              background: '#03030a',
+            }}
+          >
             {messages.map((msg, idx) => (
-              <div key={idx} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
-                <div className={`max-w-[85%] rounded-2xl p-3 text-sm ${msg.role === 'user' ? 'bg-indigo-600 text-white rounded-br-sm' : 'bg-white dark:bg-slate-800 border dark:border-slate-700 text-slate-800 dark:text-slate-200 rounded-bl-sm shadow-sm'}`}>
+              <div
+                key={idx}
+                style={{
+                  display: 'flex',
+                  justifyContent: msg.role === 'user' ? 'flex-end' : 'flex-start',
+                  alignItems: 'flex-end',
+                  gap: 8,
+                }}
+              >
+                {msg.role === 'assistant' && (
+                  <div
+                    style={{
+                      width: 24, height: 24, borderRadius: '50%',
+                      background: 'linear-gradient(135deg, #6366f1, #a855f7)',
+                      display: 'flex', alignItems: 'center', justifyContent: 'center',
+                      flexShrink: 0, marginBottom: 2,
+                    }}
+                  >
+                    <Sparkles size={12} color="white" />
+                  </div>
+                )}
+                <div
+                  style={{
+                    maxWidth: '82%',
+                    padding: '10px 13px',
+                    borderRadius: msg.role === 'user' ? '16px 16px 4px 16px' : '16px 16px 16px 4px',
+                    background: msg.role === 'user'
+                      ? 'linear-gradient(135deg, #6366f1, #a855f7)'
+                      : 'rgba(255,255,255,0.05)',
+                    border: msg.role === 'user'
+                      ? 'none'
+                      : '1px solid rgba(255,255,255,0.08)',
+                    fontSize: 13,
+                    lineHeight: 1.55,
+                    color: msg.role === 'user' ? 'white' : 'rgba(255,255,255,0.8)',
+                    boxShadow: msg.role === 'user'
+                      ? '0 4px 16px rgba(99,102,241,0.3)'
+                      : 'none',
+                  }}
+                >
                   {msg.role === 'assistant' ? (
-                    <div className="prose prose-sm dark:prose-invert prose-p:leading-snug prose-p:my-1">
-                       <ReactMarkdown remarkPlugins={[remarkGfm]}>{msg.content}</ReactMarkdown>
+                    <div className="prose-chat">
+                      <ReactMarkdown remarkPlugins={[remarkGfm]}>{msg.content}</ReactMarkdown>
                     </div>
                   ) : (
                     msg.content
@@ -107,39 +221,111 @@ export default function ChatWidget() {
                 </div>
               </div>
             ))}
+
             {isLoading && (
-              <div className="flex justify-start">
-                <div className="w-12 h-8 bg-white border rounded-2xl rounded-bl-sm flex items-center justify-center shadow-sm">
-                   <Loader2 className="w-4 h-4 animate-spin text-indigo-500" />
+              <div style={{ display: 'flex', alignItems: 'flex-end', gap: 8 }}>
+                <div
+                  style={{
+                    width: 24, height: 24, borderRadius: '50%',
+                    background: 'linear-gradient(135deg, #6366f1, #a855f7)',
+                    display: 'flex', alignItems: 'center', justifyContent: 'center',
+                    flexShrink: 0,
+                  }}
+                >
+                  <Sparkles size={12} color="white" />
+                </div>
+                <div
+                  style={{
+                    padding: '10px 16px',
+                    background: 'rgba(255,255,255,0.05)',
+                    border: '1px solid rgba(255,255,255,0.08)',
+                    borderRadius: '16px 16px 16px 4px',
+                    display: 'flex', gap: 4, alignItems: 'center',
+                  }}
+                >
+                  {[0, 1, 2].map(i => (
+                    <div
+                      key={i}
+                      style={{
+                        width: 6, height: 6, borderRadius: '50%',
+                        background: '#6366f1',
+                        animation: `bounce-dot 1.2s ease-in-out ${i * 0.2}s infinite`,
+                      }}
+                    />
+                  ))}
                 </div>
               </div>
             )}
             <div ref={messagesEndRef} />
           </div>
 
-          {/* Input Area */}
-          <div className="p-3 border-t dark:border-slate-800 bg-white dark:bg-slate-900 rounded-b-2xl">
-            <div className="flex items-center gap-2">
-              <input 
+          {/* Input */}
+          <div
+            style={{
+              padding: '12px 14px',
+              borderTop: '1px solid rgba(255,255,255,0.06)',
+              background: '#0f0f1a',
+              flexShrink: 0,
+            }}
+          >
+            <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+              <input
                 type="text"
                 value={input}
                 onChange={e => setInput(e.target.value)}
                 onKeyDown={e => e.key === 'Enter' && handleSend()}
-                className="flex-1 border dark:border-slate-700 rounded-full px-4 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 dark:bg-slate-800 dark:text-white"
-                placeholder="Например: как выгрузить товар на Ozon?"
                 disabled={isLoading}
+                placeholder="Например: как выгрузить товар на Ozon?"
+                style={{
+                  flex: 1,
+                  background: 'rgba(255,255,255,0.04)',
+                  border: '1px solid rgba(255,255,255,0.08)',
+                  borderRadius: 10,
+                  padding: '8px 12px',
+                  fontSize: 13,
+                  color: 'rgba(255,255,255,0.85)',
+                  outline: 'none',
+                  transition: 'border-color 0.2s',
+                }}
+                onFocus={e => (e.target.style.borderColor = 'rgba(99,102,241,0.5)')}
+                onBlur={e => (e.target.style.borderColor = 'rgba(255,255,255,0.08)')}
               />
-              <button 
+              <button
                 onClick={handleSend}
                 disabled={!input.trim() || isLoading}
-                className="w-10 h-10 shrink-0 bg-indigo-600 disabled:opacity-50 text-white rounded-full flex items-center justify-center hover:bg-indigo-500 transition-colors"
+                style={{
+                  width: 36, height: 36, borderRadius: 10, flexShrink: 0,
+                  background: !input.trim() || isLoading
+                    ? 'rgba(99,102,241,0.3)'
+                    : 'linear-gradient(135deg, #6366f1, #a855f7)',
+                  border: 'none',
+                  cursor: !input.trim() || isLoading ? 'not-allowed' : 'pointer',
+                  display: 'flex', alignItems: 'center', justifyContent: 'center',
+                  color: 'white',
+                  boxShadow: !input.trim() || isLoading ? 'none' : '0 0 16px rgba(99,102,241,0.4)',
+                  transition: 'all 0.2s',
+                }}
               >
-                <Send className="w-4 h-4 ml-0.5" />
+                {isLoading ? <Loader2 size={15} style={{ animation: 'spin-slow 0.8s linear infinite' }} /> : <Send size={15} />}
               </button>
             </div>
           </div>
         </div>
       )}
+
+      <style>{`
+        @keyframes fadeInUp {
+          from { opacity: 0; transform: translateY(16px) scale(0.97); }
+          to { opacity: 1; transform: translateY(0) scale(1); }
+        }
+        @keyframes bounce-dot {
+          0%, 80%, 100% { transform: scale(0.6); opacity: 0.4; }
+          40% { transform: scale(1); opacity: 1; }
+        }
+        .prose-chat p { margin: 0 0 4px; line-height: 1.55; }
+        .prose-chat strong { color: rgba(255,255,255,0.95); }
+        .prose-chat code { background: rgba(99,102,241,0.2); padding: 1px 5px; border-radius: 4px; font-size: 12px; }
+      `}</style>
     </div>
   )
 }

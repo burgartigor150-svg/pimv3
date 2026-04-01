@@ -47,7 +47,7 @@ export default function SyndicationPage() {
       });
       setTaskId(res.data.task_id);
     } catch (e: any) {
-      alert('Ошибка запуска: ' + (e.response?.data?.detail || e.message));
+      console.error('Ошибка запуска: ' + (e.response?.data?.detail || e.message));
     } finally {
       setIsStarting(false);
     }
@@ -55,7 +55,7 @@ export default function SyndicationPage() {
 
   const handleStartMegamarketRepair = async () => {
     if (!selectedConnObj || selectedConnObj.type !== 'megamarket') {
-      alert('Выберите подключение Megamarket');
+      console.error('Выберите подключение Megamarket');
       return;
     }
     setIsRepairStarting(true);
@@ -66,223 +66,255 @@ export default function SyndicationPage() {
         scan_limit: Number.isNaN(n) ? 150 : n,
       });
       setTaskId(res.data.task_id);
-      alert(
-        `Найдено ошибок в MM: ${res.data.mm_error_cards_found ?? 0}, ` +
-        `сопоставлено локально: ${res.data.matched_local_products ?? 0}, ` +
-        `в автоисправление поставлено: ${res.data.queued ?? 0}`
-      );
     } catch (e: any) {
-      alert('Ошибка запуска автоисправления: ' + (e.response?.data?.detail || e.message));
+      console.error('Ошибка запуска автоисправления: ' + (e.response?.data?.detail || e.message));
     } finally {
       setIsRepairStarting(false);
     }
   };
 
+  const pct = progress ? Math.max(5, (progress.processed / progress.total) * 100) : 0;
+
   return (
-    <div className="space-y-6 animate-in slide-in-from-bottom-4">
-      <div className="flex items-center gap-4">
-         <Link to="/products" className="text-slate-500 hover:text-slate-800">
-            <ArrowLeft className="w-6 h-6" />
-         </Link>
-         <div>
-           <h1 className="text-2xl font-bold text-slate-800 dark:text-white">Массовая выгрузка на маркетплейс</h1>
-           <p className="text-slate-500 dark:text-slate-400 text-sm max-w-2xl">
-             Сюда вы попадаете из каталога с отмеченными товарами. Для каждого SKU ИИ подберёт категорию и поля под выбранный магазин, затем запросы уйдут в фоне. Один запуск — одна цель (один подключённый магазин).
-           </p>
-         </div>
-      </div>
+    <div style={{ minHeight: '100vh', background: '#03030a', padding: '32px 24px' }}>
+      <div className="animate-fade-up" style={{ maxWidth: 900, margin: '0 auto' }}>
 
-      <div className="bg-white dark:bg-slate-800 p-6 rounded-xl border border-slate-200 dark:border-slate-700 shadow-sm">
-        {!taskId && ids.length === 0 ? (
-          <div className="max-w-2xl space-y-4">
-            <div className="p-4 bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800 rounded-lg flex gap-3">
-              <AlertCircle className="w-6 h-6 text-amber-600 shrink-0" />
-              <div>
-                <h3 className="font-bold text-amber-900 dark:text-amber-200 mb-1">Товары не выбраны</h3>
-                <p className="text-sm text-amber-800 dark:text-amber-300/90">
-                  Откройте <Link to="/products" className="underline font-medium">каталог</Link>, отметьте галочками нужные строки и нажмите «Синдицировать» — страница откроется уже со списком.
-                </p>
+        {/* Header */}
+        <div style={{ display: 'flex', alignItems: 'flex-start', gap: 16, marginBottom: 32 }}>
+          <Link to="/products" style={{ color: 'rgba(255,255,255,0.35)', marginTop: 4, display: 'flex', alignItems: 'center' }}>
+            <ArrowLeft size={20} />
+          </Link>
+          <div>
+            <h1 style={{ fontSize: 22, fontWeight: 800, letterSpacing: '-0.03em', color: 'rgba(255,255,255,0.95)', margin: 0 }}>
+              Массовая выгрузка на маркетплейс
+            </h1>
+            <p style={{ color: 'rgba(255,255,255,0.45)', fontSize: 13, marginTop: 6, maxWidth: 620, lineHeight: 1.6 }}>
+              Для каждого SKU ИИ подберёт категорию и поля под выбранный магазин, затем запросы уйдут в фоне. Один запуск — одна цель.
+            </p>
+          </div>
+        </div>
+
+        {/* Main card */}
+        <div style={{ background: '#0f0f1a', border: '1px solid rgba(255,255,255,0.07)', borderRadius: 16, padding: 24 }}>
+
+          {/* State: no ids and no task */}
+          {!taskId && ids.length === 0 && (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 16, maxWidth: 680 }}>
+
+              {/* Warning banner */}
+              <div style={{ background: 'rgba(248,184,29,0.06)', border: '1px solid rgba(248,184,29,0.18)', borderRadius: 12, padding: '14px 18px', display: 'flex', gap: 12, alignItems: 'flex-start' }}>
+                <AlertCircle size={18} style={{ color: '#f59e0b', flexShrink: 0, marginTop: 2 }} />
+                <div>
+                  <p style={{ color: 'rgba(255,255,255,0.85)', fontWeight: 700, fontSize: 13, margin: '0 0 4px' }}>Товары не выбраны</p>
+                  <p style={{ color: 'rgba(255,255,255,0.45)', fontSize: 12, margin: 0, lineHeight: 1.6 }}>
+                    Откройте{' '}
+                    <Link to="/products" style={{ color: '#6366f1', textDecoration: 'underline' }}>каталог</Link>,
+                    {' '}отметьте галочками нужные строки и нажмите «Синдицировать».
+                  </p>
+                </div>
               </div>
-            </div>
-            <div className="p-4 border rounded-lg bg-indigo-50 dark:bg-indigo-950/30 border-indigo-200 dark:border-indigo-900/40">
-              <h3 className="font-bold text-indigo-900 dark:text-indigo-200 mb-2">Исправить ошибки в уже выгруженных карточках Megamarket</h3>
-              <p className="text-sm text-indigo-800/90 dark:text-indigo-300/90 mb-3">
-                Этот режим не требует выбора товаров в каталоге: система проверит уже выгруженные SKU, найдет карточки с async-ошибками и запустит жесткий автоцикл исправления.
-              </p>
-              <p className="text-xs text-indigo-700/90 dark:text-indigo-300/90 mb-3">
-                Для ручной коррекции semantic-связей атрибутов откройте страницу <Link to="/attribute-star-map" className="underline font-semibold">Star Map векторов</Link>.
-              </p>
-              <div className="grid md:grid-cols-3 gap-3 items-end">
-                <label className="flex flex-col">
-                  <span className="text-xs font-medium mb-1 text-slate-700 dark:text-slate-200">Подключение</span>
-                  <select
-                    className="border rounded-lg p-2.5 text-black dark:text-white dark:bg-slate-700"
-                    value={selectedConn}
-                    onChange={e => setSelectedConn(e.target.value)}
+
+              {/* MM repair block */}
+              <div style={{ background: 'rgba(99,102,241,0.06)', border: '1px solid rgba(99,102,241,0.18)', borderRadius: 12, padding: '18px 20px' }}>
+                <p style={{ color: 'rgba(255,255,255,0.9)', fontWeight: 700, fontSize: 14, margin: '0 0 6px' }}>
+                  Исправить ошибки в уже выгруженных карточках Megamarket
+                </p>
+                <p style={{ color: 'rgba(255,255,255,0.45)', fontSize: 12, margin: '0 0 4px', lineHeight: 1.6 }}>
+                  Система проверит уже выгруженные SKU, найдет карточки с async-ошибками и запустит жесткий автоцикл исправления.
+                </p>
+                <p style={{ color: 'rgba(255,255,255,0.35)', fontSize: 11, margin: '0 0 16px', lineHeight: 1.6 }}>
+                  Для ручной коррекции semantic-связей атрибутов откройте{' '}
+                  <Link to="/attribute-star-map" style={{ color: '#6366f1', textDecoration: 'underline' }}>Star Map векторов</Link>.
+                </p>
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 12, alignItems: 'end' }}>
+                  <label style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                    <span style={{ color: 'rgba(255,255,255,0.5)', fontSize: 11, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.06em' }}>Подключение</span>
+                    <select
+                      className="input-premium"
+                      value={selectedConn}
+                      onChange={e => setSelectedConn(e.target.value)}
+                      style={{ color: 'rgba(255,255,255,0.85)' }}
+                    >
+                      {connections.map((c: any) =>
+                        <option key={c.id} value={c.id}>{connectionOptionLabel(c.name, c.type)}</option>
+                      )}
+                    </select>
+                  </label>
+                  <label style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                    <span style={{ color: 'rgba(255,255,255,0.5)', fontSize: 11, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.06em' }}>Сканировать SKU</span>
+                    <input
+                      type="text"
+                      inputMode="numeric"
+                      className="input-premium"
+                      value={scanLimit}
+                      onChange={(e) => setScanLimit(e.target.value)}
+                      placeholder="150"
+                    />
+                    <span style={{ color: 'rgba(255,255,255,0.25)', fontSize: 11 }}>Лимит карточек из MM getError</span>
+                  </label>
+                  <button
+                    onClick={handleStartMegamarketRepair}
+                    disabled={isRepairStarting || !selectedConnObj || selectedConnObj.type !== 'megamarket'}
+                    className="btn-glow"
+                    style={{ opacity: (isRepairStarting || !selectedConnObj || selectedConnObj?.type !== 'megamarket') ? 0.45 : 1 }}
                   >
-                    {connections.map((c: any) =>
-                      <option key={c.id} value={c.id}>{connectionOptionLabel(c.name, c.type)}</option>
-                    )}
-                  </select>
-                </label>
-                <label className="flex flex-col">
-                  <span className="text-xs font-medium mb-1 text-slate-700 dark:text-slate-200">Сколько SKU сканировать</span>
-                  <input
-                    type="text"
-                    inputMode="numeric"
-                    className="border rounded-lg p-2.5 text-black dark:text-white dark:bg-slate-700"
-                    value={scanLimit}
-                    onChange={(e) => setScanLimit(e.target.value)}
-                    placeholder="150"
-                  />
-                  <span className="text-[11px] text-slate-500 dark:text-slate-400 mt-1">
-                    Лимит карточек с ошибками, полученных из MM getError.
-                  </span>
-                </label>
-                <button
-                  onClick={handleStartMegamarketRepair}
-                  disabled={isRepairStarting || !selectedConnObj || selectedConnObj.type !== 'megamarket'}
-                  className="bg-violet-600 text-white px-4 py-2.5 rounded-lg font-medium hover:bg-violet-700 disabled:opacity-50"
+                    {isRepairStarting ? 'Запуск…' : 'Исправить ошибки MM'}
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* State: ids selected, no task yet */}
+          {!taskId && ids.length > 0 && (
+            <div style={{ maxWidth: 520 }}>
+              <div className="animate-fade-up" style={{ background: 'rgba(99,102,241,0.07)', border: '1px solid rgba(99,102,241,0.2)', borderRadius: 12, padding: '16px 20px', marginBottom: 24, display: 'flex', gap: 12, alignItems: 'flex-start' }}>
+                <Sparkles size={18} style={{ color: '#6366f1', flexShrink: 0, marginTop: 2 }} />
+                <div>
+                  <p style={{ color: 'rgba(255,255,255,0.9)', fontWeight: 700, fontSize: 14, margin: '0 0 6px' }}>
+                    Выбрано товаров: <span style={{ color: '#6366f1' }}>{ids.length}</span>
+                  </p>
+                  <p style={{ color: 'rgba(255,255,255,0.45)', fontSize: 12, margin: 0, lineHeight: 1.6 }}>
+                    Система подберёт категорию и сопоставит атрибуты. Процесс идёт в фоне — можно закрыть вкладку.
+                  </p>
+                  {isMegamarketTarget && (
+                    <p style={{ color: 'rgba(255,255,255,0.35)', fontSize: 11, marginTop: 8 }}>
+                      Для Megamarket запуск идет в жестком цикле автоисправления ошибок по каждой карточке.
+                    </p>
+                  )}
+                </div>
+              </div>
+
+              <label style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 24 }}>
+                <span style={{ color: 'rgba(255,255,255,0.5)', fontSize: 11, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.06em' }}>Куда выгружать</span>
+                <select
+                  className="input-premium"
+                  value={selectedConn}
+                  onChange={e => setSelectedConn(e.target.value)}
+                  style={{ color: 'rgba(255,255,255,0.85)' }}
                 >
-                  {isRepairStarting ? 'Запуск…' : 'Исправить ошибки MM'}
-                </button>
-              </div>
-            </div>
-          </div>
-        ) : !taskId ? (
-          <div className="max-w-xl">
-            <div className="mb-6 p-4 bg-indigo-50 dark:bg-indigo-900/20 text-indigo-800 dark:text-indigo-300 rounded-lg flex items-start gap-3">
-              <Sparkles className="w-5 h-5 shrink-0 mt-0.5" />
-              <div>
-                <h3 className="font-bold mb-1">Выбрано товаров: {ids.length}</h3>
-                <p className="text-sm opacity-90">
-                  Для каждого товара система подберёт категорию на выбранной площадке и сопоставит атрибуты с официальной схемой API. Процесс идёт в фоне: можно закрыть вкладку и вернуться позже (статус в Redis).
-                </p>
-                {isMegamarketTarget && (
-                  <p className="text-xs mt-2 opacity-90">
-                    Для Megamarket запуск идет в жестком цикле автоисправления ошибок по каждой карточке.
-                  </p>
-                )}
-              </div>
-            </div>
+                  {connections.map((c: any) =>
+                    <option key={c.id} value={c.id}>{connectionOptionLabel(c.name, c.type)}</option>
+                  )}
+                </select>
+              </label>
 
-            <label className="flex flex-col mb-6">
-              <span className="text-sm font-medium mb-2 text-slate-700 dark:text-slate-200">Куда выгружать</span>
-              <select 
-                className="border rounded-lg p-3 text-black dark:text-white dark:bg-slate-700 focus:ring-2 focus:ring-indigo-500"
-                value={selectedConn} 
-                onChange={e => setSelectedConn(e.target.value)}
+              <button
+                onClick={handleStart}
+                disabled={isStarting || ids.length === 0}
+                className="btn-glow"
+                style={{ display: 'flex', alignItems: 'center', gap: 8, opacity: (isStarting || ids.length === 0) ? 0.5 : 1 }}
               >
-                {connections.map((c: any) => 
-                  <option key={c.id} value={c.id}>{connectionOptionLabel(c.name, c.type)}</option>
-                )}
-              </select>
-            </label>
-
-            <button 
-              onClick={handleStart}
-              disabled={isStarting || ids.length === 0}
-              className="bg-gradient-to-r from-purple-600 to-indigo-600 text-white px-8 py-3 rounded-lg font-medium flex items-center gap-2 hover:shadow-lg transition-all disabled:opacity-50"
-            >
-              {isStarting ? <Loader2 className="w-5 h-5 animate-spin" /> : <Send className="w-5 h-5" />}
-              {isStarting ? 'Запуск…' : (isMegamarketTarget ? 'Запустить жесткий автоцикл MM' : 'Запустить выгрузку')}
-            </button>
-          </div>
-        ) : progress ? (
-          <div className="space-y-6">
-            <div className="flex justify-between items-end mb-2">
-              <div>
-                <h3 className="text-lg font-bold flex items-center gap-2">
-                  {progress.status === 'completed' ? <CheckCircle2 className="text-green-500" /> : <Loader2 className="animate-spin text-indigo-500" />}
-                  Статус: {progress.status === 'completed' ? 'Завершено' : 'Выгрузка...'}
-                </h3>
-              </div>
-              <span className="text-slate-500 font-medium">
-                 Товар: {progress.current_sku}
-              </span>
-            </div>
-            
-            <div className="w-full bg-slate-100 dark:bg-slate-700 rounded-full h-4 overflow-hidden">
-               <div 
-                 className="bg-gradient-to-r from-purple-500 to-indigo-500 h-4 transition-all duration-500"
-                 style={{ width: `${Math.max(5, (progress.processed / progress.total) * 100)}%` }}
-               />
-            </div>
-            
-            <div className="grid grid-cols-3 gap-4 text-center mt-6">
-               <div className="bg-slate-50 dark:bg-slate-900/50 p-4 rounded-lg">
-                 <div className="text-3xl font-bold text-slate-800 dark:text-white">{progress.processed} / {progress.total}</div>
-                 <div className="text-sm text-slate-500">Обработано</div>
-               </div>
-               <div className="bg-green-50 dark:bg-green-900/20 p-4 rounded-lg">
-                 <div className="text-3xl font-bold text-green-600">{progress.success}</div>
-                 <div className="text-sm text-green-600/80">Успешно в API</div>
-               </div>
-               <div className="bg-red-50 dark:bg-red-900/20 p-4 rounded-lg">
-                 <div className="text-3xl font-bold text-red-600">{progress.failed}</div>
-                 <div className="text-sm text-red-600/80">С ошибкой</div>
-               </div>
-            </div>
-
-            {progress.error && (
-               <div className="p-4 bg-red-100 text-red-800 rounded-lg flex gap-2 items-start mt-4">
-                  <AlertCircle className="w-5 h-5 shrink-0 mt-0.5" />
-                  <p className="text-sm font-mono">Последняя ошибка: {progress.error}</p>
-               </div>
-            )}
-
-            <div className="mt-4 border border-slate-200 dark:border-slate-700 rounded-lg overflow-hidden">
-              <div className="px-4 py-2 bg-slate-50 dark:bg-slate-900/40 border-b border-slate-200 dark:border-slate-700">
-                <p className="text-sm font-semibold text-slate-700 dark:text-slate-200">
-                  Логи агента и верификатора
-                </p>
-              </div>
-              <div className="max-h-72 overflow-auto p-3 bg-white dark:bg-slate-900">
-                {Array.isArray(progress.logs) && progress.logs.length > 0 ? (
-                  <pre className="text-xs leading-5 font-mono text-slate-700 dark:text-slate-200 whitespace-pre-wrap break-words">
-                    {progress.logs.join('\n')}
-                  </pre>
-                ) : (
-                  <p className="text-xs text-slate-500 dark:text-slate-400">
-                    Логи пока пусты. Они появятся, когда агент начнёт анализ/проверку карточки.
-                  </p>
-                )}
-              </div>
-            </div>
-
-            <div className="mt-4 border border-slate-200 dark:border-slate-700 rounded-lg overflow-hidden">
-              <div className="px-4 py-2 bg-slate-50 dark:bg-slate-900/40 border-b border-slate-200 dark:border-slate-700">
-                <p className="text-sm font-semibold text-slate-700 dark:text-slate-200">
-                  Структурированные события (telemetry)
-                </p>
-              </div>
-              <div className="max-h-72 overflow-auto p-3 bg-white dark:bg-slate-900">
-                {Array.isArray(progress.events) && progress.events.length > 0 ? (
-                  <pre className="text-xs leading-5 font-mono text-slate-700 dark:text-slate-200 whitespace-pre-wrap break-words">
-                    {progress.events.map((e: any) => JSON.stringify(e)).join('\n')}
-                  </pre>
-                ) : (
-                  <p className="text-xs text-slate-500 dark:text-slate-400">
-                    События появятся после первых шагов агента.
-                  </p>
-                )}
-              </div>
-            </div>
-            
-            {progress.status === 'completed' && (
-              <button 
-                onClick={() => setTaskId('')}
-                className="mt-8 bg-slate-200 dark:bg-slate-700 px-6 py-2 rounded font-medium"
-              >
-                Выполнить новую выгрузку
+                {isStarting ? <Loader2 size={16} className="animate-spin" /> : <Send size={16} />}
+                {isStarting ? 'Запуск…' : (isMegamarketTarget ? 'Запустить жесткий автоцикл MM' : 'Запустить выгрузку')}
               </button>
-            )}
-          </div>
-        ) : (
-          <div className="flex items-center gap-3 text-slate-500 p-8">
-            <Loader2 className="w-6 h-6 animate-spin" /> Подключение к очереди задач...
-          </div>
-        )}
+            </div>
+          )}
+
+          {/* State: task running/done */}
+          {taskId && progress && (
+            <div className="animate-fade-up" style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
+              {/* Status row */}
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                  {progress.status === 'completed'
+                    ? <CheckCircle2 size={20} style={{ color: '#10b981' }} />
+                    : <Loader2 size={20} className="animate-spin" style={{ color: '#6366f1' }} />}
+                  <span style={{ color: 'rgba(255,255,255,0.9)', fontWeight: 700, fontSize: 16 }}>
+                    {progress.status === 'completed' ? 'Завершено' : 'Выгрузка…'}
+                  </span>
+                </div>
+                {progress.current_sku && (
+                  <span style={{ color: 'rgba(255,255,255,0.4)', fontSize: 12 }}>
+                    SKU: {progress.current_sku}
+                  </span>
+                )}
+              </div>
+
+              {/* Progress bar */}
+              <div>
+                <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 6 }}>
+                  <span style={{ color: 'rgba(255,255,255,0.4)', fontSize: 12 }}>Прогресс</span>
+                  <span style={{ color: 'rgba(255,255,255,0.6)', fontSize: 12, fontWeight: 600 }}>{progress.processed} / {progress.total}</span>
+                </div>
+                <div className="progress-track">
+                  <div className="progress-fill" style={{ width: `${pct}%` }} />
+                </div>
+              </div>
+
+              {/* Stats grid */}
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3,1fr)', gap: 12 }}>
+                <div style={{ background: '#141422', border: '1px solid rgba(255,255,255,0.06)', borderRadius: 12, padding: '16px 20px', textAlign: 'center' }}>
+                  <div style={{ fontSize: 28, fontWeight: 800, color: 'rgba(255,255,255,0.9)', letterSpacing: '-0.03em' }}>{progress.processed}</div>
+                  <div style={{ fontSize: 11, color: 'rgba(255,255,255,0.35)', marginTop: 4, textTransform: 'uppercase', letterSpacing: '0.06em' }}>Обработано</div>
+                </div>
+                <div style={{ background: 'rgba(16,185,129,0.06)', border: '1px solid rgba(16,185,129,0.18)', borderRadius: 12, padding: '16px 20px', textAlign: 'center' }}>
+                  <div style={{ fontSize: 28, fontWeight: 800, color: '#10b981', letterSpacing: '-0.03em' }}>{progress.success}</div>
+                  <div style={{ fontSize: 11, color: 'rgba(16,185,129,0.6)', marginTop: 4, textTransform: 'uppercase', letterSpacing: '0.06em' }}>Успешно</div>
+                </div>
+                <div style={{ background: 'rgba(248,113,113,0.06)', border: '1px solid rgba(248,113,113,0.18)', borderRadius: 12, padding: '16px 20px', textAlign: 'center' }}>
+                  <div style={{ fontSize: 28, fontWeight: 800, color: '#f87171', letterSpacing: '-0.03em' }}>{progress.failed}</div>
+                  <div style={{ fontSize: 11, color: 'rgba(248,113,113,0.6)', marginTop: 4, textTransform: 'uppercase', letterSpacing: '0.06em' }}>С ошибкой</div>
+                </div>
+              </div>
+
+              {/* Error banner */}
+              {progress.error && (
+                <div style={{ background: 'rgba(248,113,113,0.07)', border: '1px solid rgba(248,113,113,0.2)', borderRadius: 10, padding: '12px 16px', display: 'flex', gap: 10, alignItems: 'flex-start' }}>
+                  <AlertCircle size={16} style={{ color: '#f87171', flexShrink: 0, marginTop: 2 }} />
+                  <p style={{ color: '#f87171', fontSize: 12, fontFamily: 'monospace', margin: 0 }}>
+                    Последняя ошибка: {progress.error}
+                  </p>
+                </div>
+              )}
+
+              {/* Agent logs */}
+              <div style={{ background: '#141422', border: '1px solid rgba(255,255,255,0.06)', borderRadius: 12, overflow: 'hidden' }}>
+                <div style={{ padding: '10px 16px', borderBottom: '1px solid rgba(255,255,255,0.05)' }}>
+                  <span style={{ color: 'rgba(255,255,255,0.6)', fontSize: 12, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.06em' }}>
+                    Логи агента и верификатора
+                  </span>
+                </div>
+                <pre style={{ fontFamily: 'monospace', fontSize: 12, color: 'rgba(255,255,255,0.6)', background: 'rgba(0,0,0,0.4)', border: 'none', borderRadius: 0, padding: 16, overflowY: 'auto', maxHeight: 260, margin: 0 }}>
+                  {Array.isArray(progress.logs) && progress.logs.length > 0
+                    ? progress.logs.join('\n')
+                    : <span style={{ color: 'rgba(255,255,255,0.2)' }}>Логи пока пусты. Они появятся, когда агент начнёт анализ.</span>}
+                </pre>
+              </div>
+
+              {/* Telemetry events */}
+              <div style={{ background: '#141422', border: '1px solid rgba(255,255,255,0.06)', borderRadius: 12, overflow: 'hidden' }}>
+                <div style={{ padding: '10px 16px', borderBottom: '1px solid rgba(255,255,255,0.05)' }}>
+                  <span style={{ color: 'rgba(255,255,255,0.6)', fontSize: 12, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.06em' }}>
+                    Telemetry events
+                  </span>
+                </div>
+                <pre style={{ fontFamily: 'monospace', fontSize: 12, color: 'rgba(255,255,255,0.6)', background: 'rgba(0,0,0,0.4)', border: 'none', borderRadius: 0, padding: 16, overflowY: 'auto', maxHeight: 260, margin: 0 }}>
+                  {Array.isArray(progress.events) && progress.events.length > 0
+                    ? progress.events.map((e: any) => JSON.stringify(e)).join('\n')
+                    : <span style={{ color: 'rgba(255,255,255,0.2)' }}>События появятся после первых шагов агента.</span>}
+                </pre>
+              </div>
+
+              {progress.status === 'completed' && (
+                <div style={{ paddingTop: 8 }}>
+                  <button onClick={() => setTaskId('')} className="btn-ghost-premium">
+                    Выполнить новую выгрузку
+                  </button>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* State: task id set but no progress yet */}
+          {taskId && !progress && (
+            <div style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '40px 0', color: 'rgba(255,255,255,0.35)' }}>
+              <Loader2 size={20} className="animate-spin" />
+              <span style={{ fontSize: 14 }}>Подключение к очереди задач…</span>
+            </div>
+          )}
+
+        </div>
       </div>
     </div>
   );
