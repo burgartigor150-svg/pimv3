@@ -80,16 +80,6 @@ from backend.services.agent_task_console import (
     answer_agent_clarification,
     rollback_task,
 )
-try:
-    from backend.services.agent_metrics import get_task_metrics, get_agent_dashboard, estimate_task_cost as _estimate_cost
-    from backend.services.agent_conventions import run_conventions_update
-    _AGENT_EXTRAS = True
-except Exception:
-    _AGENT_EXTRAS = False
-    def get_task_metrics(tid): return {}
-    def get_agent_dashboard(): return {}
-    def _estimate_cost(tt, desc): return {}
-    async def run_conventions_update(*a, **kw): return {}
 from backend.services.agent_chat import (
     route_message_with_llm,
     compose_assistant_reply_with_llm,
@@ -1125,97 +1115,191 @@ async def agent_task_rollback(
 
 
 
-@app.get("/api/v1/agent/tasks/{task_id}/diff")
-async def agent_task_diff(task_id: str):
-    """Показать git diff изменений задачи."""
-    import subprocess as _sp
-    task = get_agent_task(task_id)
-    if not task.get("ok"):
-        raise HTTPException(status_code=404, detail="task not found")
-    t = task.get("task", {})
-    commit_hash = str(t.get("commit_hash") or "").strip()
-    if not commit_hash:
-        return {"ok": False, "error": "no commit hash yet"}
-    try:
-        result = _sp.run(
-            ["git", "show", "--stat", commit_hash],
-            cwd="/mnt/data/Pimv3", capture_output=True, text=True, timeout=15
-        )
-        diff = _sp.run(
-            ["git", "show", commit_hash],
-            cwd="/mnt/data/Pimv3", capture_output=True, text=True, timeout=30
-        )
-        return {"ok": True, "stat": result.stdout, "diff": diff.stdout[:50000]}
-    except Exception as e:
-        return {"ok": False, "error": str(e)}
+# ── Cron endpoints ────────────────────────────────────────────────────────────
+@app.get("/api/v1/agent/cron")
+async def agent_cron_list():
+    from backend.services.agent_cron import list_cron_jobs, get_cron_status
+    return {"jobs": list_cron_jobs(), "status": get_cron_status()}
 
-
-@app.post("/api/v1/agent/tasks/{task_id}/explain")
-async def agent_task_explain(task_id: str):
-    """Объяснить изменения задачи на русском через LLM."""
-    import httpx as _hx
-    task = get_agent_task(task_id)
-    if not task.get("ok"):
-        raise HTTPException(status_code=404, detail="task not found")
-    t = task.get("task", {})
-    ai_key = str(os.getenv("DEEPSEEK_API_KEY") or os.getenv("OPENAI_API_KEY") or "")
-    if not ai_key:
-        return {"ok": False, "error": "no ai key"}
-    result_summary = str(t.get("result", ""))[:2000]
-    prompt = (
-        f"Задача: {t.get('title')}\n"
-        f"Тип: {t.get('task_type')}\n"
-        f"Результат: {result_summary}\n\n"
-        "Объясни на русском языке, что было сделано, какие файлы изменены и зачем. "
-        "Ответ в 3-5 предложениях."
+@app.post("/api/v1/agent/cron")
+async def agent_cron_create(body: dict):
+    from backend.services.agent_cron import create_cron_job
+    return create_cron_job(
+        name=str(body.get("name", "")),
+        cron_expr=str(body.get("cron_expr", "0 * * * *")),
+        task_type=str(body.get("task_type", "backend")),
+        title=str(body.get("title", "")),
+        description=str(body.get("description", "")),
+        requested_by=str(body.get("requested_by", "user")),
+        enabled=bool(body.get("enabled", True)),
     )
-    try:
-        async with _hx.AsyncClient(timeout=30) as client:
-            resp = await client.post(
-                "https://api.deepseek.com/v1/chat/completions",
-                headers={"Authorization": f"Bearer {ai_key}"},
-                json={"model": "deepseek-chat", "messages": [{"role": "user", "content": prompt}], "max_tokens": 400},
-            )
-            data = resp.json()
-            explanation = data["choices"][0]["message"]["content"]
-            return {"ok": True, "explanation": explanation}
-    except Exception as e:
-        return {"ok": False, "error": str(e)}
+
+@app.delete("/api/v1/agent/cron/{job_id}")
+async def agent_cron_delete(job_id: str):
+    from backend.services.agent_cron import delete_cron_job
+    return delete_cron_job(job_id)
+
+@app.post("/api/v1/agent/cron/fire")
+async def agent_cron_fire():
+    from backend.services.agent_cron import check_and_fire_cron_jobs
+    fired = check_and_fire_cron_jobs()
+    return {"ok": True, "fired": fired}
 
 
-@app.get("/api/v1/agent/metrics")
-async def agent_metrics_dashboard():
-    """Dashboard агента: сводная статистика."""
-    return get_agent_dashboard()
+# ── TODO scanner ──────────────────────────────────────────────────────────────
+@app.post("/api/v1/agent/scan-todos")
+async def agent_scan_todos(body: dict = None):
+    from backend.services.agent_todo_scanner import scan_todos, get_scan_stats
+    auto_create = bool((body or {}).get("auto_create_tasks", True))
+    result = scan_todos(auto_create_tasks=auto_create)
+    return result
+
+@app.get("/api/v1/agent/scan-todos/stats")
+async def agent_scan_todos_stats():
+    from backend.services.agent_todo_scanner import get_scan_stats
+    return get_scan_stats()
 
 
-@app.get("/api/v1/agent/metrics/{task_id}")
-async def agent_task_metrics(task_id: str):
-    """Метрики конкретной задачи."""
-    return get_task_metrics(task_id)
+# ── Webhook ───────────────────────────────────────────────────────────────────
+@app.post("/api/v1/agent/webhook/github")
+async def agent_github_webhook(request: Request):
+    from backend.services.agent_webhook import handle_webhook, verify_github_signature
+    body_bytes = await request.body()
+    sig = request.headers.get("X-Hub-Signature-256", "")
+    if not verify_github_signature(body_bytes, sig):
+        raise HTTPException(status_code=401, detail="invalid signature")
+    payload = await request.json()
+    event_type = request.headers.get("X-GitHub-Event", "")
+    return handle_webhook(event_type, payload, sig)
+
+@app.get("/api/v1/agent/webhook/stats")
+async def agent_webhook_stats():
+    from backend.services.agent_webhook import get_webhook_stats
+    return get_webhook_stats()
 
 
-@app.post("/api/v1/agent/estimate")
-async def agent_estimate_cost(body: dict):
-    """Оценить стоимость задачи до запуска."""
-    task_type = str(body.get("task_type", "backend"))
-    description = str(body.get("description", ""))
-    return _estimate_cost(task_type, description)
+# ── Priority queue ─────────────────────────────────────────────────────────────
+@app.get("/api/v1/agent/queue")
+async def agent_queue_peek(limit: int = 20):
+    from backend.services.agent_priority_queue import peek_queue, get_queue_stats
+    return {"queue": peek_queue(limit), "stats": get_queue_stats()}
+
+@app.post("/api/v1/agent/queue/{task_id}/priority")
+async def agent_queue_reprioritize(task_id: str, body: dict):
+    from backend.services.agent_priority_queue import requeue_with_priority
+    return requeue_with_priority(task_id, int(body.get("priority", 2)))
 
 
-@app.get("/api/v1/agent/tasks/{task_id}/dependencies")
-async def agent_task_dependencies(task_id: str):
-    """Проверить DAG-зависимости задачи."""
-    from backend.services.agent_task_console import check_task_dependencies
-    return check_task_dependencies(task_id)
+# ── Performance regression ───────────────────────────────────────────────────
+@app.post("/api/v1/agent/perf/check")
+async def agent_perf_check(body: dict = None):
+    from backend.services.agent_perf_regression import run_regression_check
+    threshold = float((body or {}).get("threshold_pct", 20.0))
+    return run_regression_check(threshold_pct=threshold)
+
+@app.get("/api/v1/agent/perf/history")
+async def agent_perf_history(limit: int = 10):
+    from backend.services.agent_perf_regression import get_perf_history
+    return {"history": get_perf_history(limit)}
 
 
-@app.post("/api/v1/agent/conventions/update")
-async def agent_conventions_update():
-    """Принудительно обновить CONVENTIONS.md на основе истории задач."""
+# ── Self-improvement ──────────────────────────────────────────────────────────
+@app.post("/api/v1/agent/self-improve")
+async def agent_self_improve_trigger():
+    from backend.services.agent_self_improve import analyze_and_improve
     ai_key = str(os.getenv("DEEPSEEK_API_KEY") or os.getenv("OPENAI_API_KEY") or "")
     ai_config = {"api_key": ai_key, "base_url": "https://api.deepseek.com/v1", "model": "deepseek-chat"}
-    return await run_conventions_update("/mnt/data/Pimv3", ai_config, force=True)
+    return await analyze_and_improve(ai_config)
+
+@app.get("/api/v1/agent/self-improve/log")
+async def agent_self_improve_log():
+    from backend.services.agent_self_improve import get_improvement_log, get_current_system_prompt
+    return {"log": get_improvement_log(), "current_prompt_len": len(get_current_system_prompt())}
+
+
+# ── Parallel runner ───────────────────────────────────────────────────────────
+@app.post("/api/v1/agent/run-parallel")
+async def agent_run_parallel(body: dict):
+    from backend.services.agent_parallel_runner import run_tasks_parallel
+    task_ids = list(body.get("task_ids", []))
+    ai_key = str(os.getenv("DEEPSEEK_API_KEY") or os.getenv("OPENAI_API_KEY") or "")
+    return await run_tasks_parallel(task_ids, ai_key=ai_key)
+
+@app.post("/api/v1/agent/run-pending")
+async def agent_run_pending(body: dict = None):
+    from backend.services.agent_parallel_runner import run_pending_queue_parallel
+    ai_key = str(os.getenv("DEEPSEEK_API_KEY") or os.getenv("OPENAI_API_KEY") or "")
+    max_batch = int((body or {}).get("max_batch", 5))
+    return await run_pending_queue_parallel(ai_key=ai_key, max_batch=max_batch)
+
+@app.get("/api/v1/agent/parallel/stats")
+async def agent_parallel_stats():
+    from backend.services.agent_parallel_runner import get_parallel_stats
+    return get_parallel_stats()
+
+
+# ── PR description ────────────────────────────────────────────────────────────
+@app.post("/api/v1/agent/tasks/{task_id}/pr-description")
+async def agent_generate_pr_description(task_id: str):
+    from backend.services.agent_pr_description import generate_pr_description
+    task = get_agent_task(task_id)
+    if not task.get("ok"):
+        raise HTTPException(status_code=404, detail="task not found")
+    commit_hash = str(task.get("task", {}).get("commit_hash") or "").strip()
+    if not commit_hash:
+        return {"ok": False, "error": "no commit hash yet"}
+    ai_key = str(os.getenv("DEEPSEEK_API_KEY") or os.getenv("OPENAI_API_KEY") or "")
+    ai_config = {"api_key": ai_key, "base_url": "https://api.deepseek.com/v1", "model": "deepseek-chat"}
+    return await generate_pr_description(task_id, commit_hash, ai_config=ai_config)
+
+
+# ── Alembic safety ────────────────────────────────────────────────────────────
+@app.get("/api/v1/agent/alembic/check")
+async def agent_alembic_check():
+    from backend.services.agent_alembic_safety import check_all_pending_migrations
+    return check_all_pending_migrations()
+
+@app.post("/api/v1/agent/alembic/migrate")
+async def agent_alembic_migrate():
+    from backend.services.agent_alembic_safety import run_migration_with_backup
+    return run_migration_with_backup()
+
+
+# ── Task templates ────────────────────────────────────────────────────────────
+@app.get("/api/v1/agent/templates")
+async def agent_templates_list():
+    from backend.services.agent_task_templates import list_templates
+    return {"templates": list_templates()}
+
+@app.post("/api/v1/agent/templates/{template_id}/create-task")
+async def agent_create_from_template(template_id: str, body: dict):
+    from backend.services.agent_task_templates import create_task_from_template
+    variables = dict(body.get("variables") or {})
+    requested_by = str(body.get("requested_by", "user"))
+    return create_task_from_template(template_id, variables, requested_by=requested_by)
+
+@app.post("/api/v1/agent/templates")
+async def agent_save_template(body: dict):
+    from backend.services.agent_task_templates import save_custom_template
+    return save_custom_template(body)
+
+@app.delete("/api/v1/agent/templates/{template_id}")
+async def agent_delete_template(template_id: str):
+    from backend.services.agent_task_templates import delete_custom_template
+    return delete_custom_template(template_id)
+
+
+# ── Prompt cache ──────────────────────────────────────────────────────────────
+@app.get("/api/v1/agent/prompt-cache/stats")
+async def agent_prompt_cache_stats():
+    from backend.services.agent_prompt_cache import get_cache_stats
+    return get_cache_stats()
+
+@app.delete("/api/v1/agent/prompt-cache")
+async def agent_prompt_cache_clear():
+    from backend.services.agent_prompt_cache import clear_cache
+    deleted = clear_cache()
+    return {"ok": True, "deleted": deleted}
 
 
 @app.get("/api/v1/agent/tasks/{task_id}/stream/log")
