@@ -1,0 +1,44 @@
+name: Deploy
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+
+jobs:
+  deploy:
+    name: Deploy to production
+    runs-on: ubuntu-latest
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    environment: production
+
+    steps:
+      - name: Deploy via SSH
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          username: ${{ secrets.SSH_USER }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          script: |
+            set -e
+            cd /mnt/data/Pimv3
+
+            echo '▶ Pulling latest code...'
+            git pull origin main
+
+            echo '▶ Installing backend dependencies...'
+            backend/venv/bin/pip install -r backend/requirements.txt -q
+
+            echo '▶ Running DB migrations...'
+            cd backend && ../backend/venv/bin/python3 -m alembic upgrade head 2>/dev/null || echo 'Migration skipped' && cd ..
+
+            echo '▶ Building frontend...'
+            cd frontend && npm ci --silent && npm run build && cd ..
+
+            echo '▶ Restarting services...'
+            sudo systemctl restart pimv3-backend.service
+            sudo systemctl restart pim-celery.service
+            sudo systemctl restart pimv3-agent-worker.service
+
+            echo '✓ Deploy complete'
