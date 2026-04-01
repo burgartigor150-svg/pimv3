@@ -1,8 +1,149 @@
-import React, { useEffect, useState } from 'react';
-import { Activity, Layers, Package, TrendingUp, Plus, Upload, RefreshCw, ChevronRight, Check } from 'lucide-react';
-import { PieChart, Pie, Cell, ResponsiveContainer } from 'recharts';
+import React, { useEffect, useRef, useState } from 'react';
+import { Link } from 'react-router-dom';
+import {
+  Package, Database, FolderOpen, Plug, TrendingUp,
+  ArrowUpRight, Zap, Activity, Plus, RefreshCw,
+} from 'lucide-react';
 
-interface DashboardStats {
+// ─── Animated counter ────────────────────────────────────────────────────────
+
+const Counter: React.FC<{ to: number; duration?: number }> = ({ to, duration = 1200 }) => {
+  const [val, setVal] = useState(0);
+  const raf = useRef<number | null>(null);
+  useEffect(() => {
+    if (!to) return;
+    const start = performance.now();
+    const tick = (now: number) => {
+      const p = Math.min((now - start) / duration, 1);
+      const eased = 1 - Math.pow(1 - p, 3);
+      setVal(Math.round(eased * to));
+      if (p < 1) raf.current = requestAnimationFrame(tick);
+    };
+    raf.current = requestAnimationFrame(tick);
+    return () => { if (raf.current) cancelAnimationFrame(raf.current); };
+  }, [to, duration]);
+  return <>{val.toLocaleString('ru')}</>;
+};
+
+// ─── Mini sparkline ──────────────────────────────────────────────────────────
+
+const Sparkline: React.FC<{ color: string }> = ({ color }) => {
+  const pts = [30, 45, 35, 55, 42, 68, 50, 75, 60, 82, 70, 90].map((v, i) => `${i * 18},${100 - v}`).join(' ');
+  return (
+    <svg width="100%" height="40" viewBox="0 0 198 100" preserveAspectRatio="none" style={{ opacity: 0.7 }}>
+      <defs>
+        <linearGradient id={`sg-${color}`} x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stopColor={color} stopOpacity="0.3" />
+          <stop offset="100%" stopColor={color} stopOpacity="0" />
+        </linearGradient>
+      </defs>
+      <polyline fill="none" stroke={color} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" points={pts} />
+    </svg>
+  );
+};
+
+// ─── KPI Card ─────────────────────────────────────────────────────────────────
+
+interface KpiCardProps {
+  label: string;
+  value: number;
+  icon: React.ReactNode;
+  color: string;
+  glowColor: string;
+  trend?: string;
+  delay?: number;
+}
+
+const KpiCard: React.FC<KpiCardProps> = ({ label, value, icon, color, glowColor, trend, delay = 0 }) => (
+  <div
+    className="animate-fade-up"
+    style={{
+      animationDelay: `${delay}ms`,
+      background: 'var(--bg-card)',
+      border: '1px solid rgba(255,255,255,0.06)',
+      borderRadius: 'var(--radius-lg)',
+      padding: '20px 22px',
+      position: 'relative',
+      overflow: 'hidden',
+      cursor: 'default',
+      transition: 'all 0.3s cubic-bezier(0.16,1,0.3,1)',
+    }}
+    onMouseEnter={e => {
+      (e.currentTarget as HTMLDivElement).style.transform = 'translateY(-3px)';
+      (e.currentTarget as HTMLDivElement).style.borderColor = `${color}40`;
+      (e.currentTarget as HTMLDivElement).style.boxShadow = `0 20px 60px rgba(0,0,0,0.4), 0 0 0 1px ${color}20`;
+    }}
+    onMouseLeave={e => {
+      (e.currentTarget as HTMLDivElement).style.transform = '';
+      (e.currentTarget as HTMLDivElement).style.borderColor = 'rgba(255,255,255,0.06)';
+      (e.currentTarget as HTMLDivElement).style.boxShadow = '';
+    }}
+  >
+    {/* BG glow */}
+    <div style={{ position: 'absolute', top: -20, right: -20, width: 80, height: 80, borderRadius: '50%', background: `radial-gradient(circle, ${glowColor}, transparent 70%)`, opacity: 0.4, pointerEvents: 'none' }} />
+
+    <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', marginBottom: 16 }}>
+      <div style={{ background: `${color}18`, border: `1px solid ${color}30`, borderRadius: 10, padding: 9, color, display: 'flex' }}>
+        {icon}
+      </div>
+      {trend && (
+        <span style={{ display: 'flex', alignItems: 'center', gap: 3, fontSize: 11, fontWeight: 600, color: '#34d399', background: 'rgba(52,211,153,0.1)', border: '1px solid rgba(52,211,153,0.2)', borderRadius: 99, padding: '2px 8px' }}>
+          <TrendingUp size={10} /> {trend}
+        </span>
+      )}
+    </div>
+
+    <div style={{ fontSize: 28, fontWeight: 800, letterSpacing: '-0.03em', color: 'rgba(255,255,255,0.95)', lineHeight: 1, marginBottom: 6 }}>
+      <Counter to={value} />
+    </div>
+    <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.35)', fontWeight: 500 }}>{label}</div>
+
+    <div style={{ marginTop: 14, marginBottom: -4 }}>
+      <Sparkline color={color} />
+    </div>
+  </div>
+);
+
+// ─── Donut chart ─────────────────────────────────────────────────────────────
+
+const DonutChart: React.FC<{ pct: number }> = ({ pct }) => {
+  const r = 54, cx = 68, cy = 68;
+  const circ = 2 * Math.PI * r;
+  const [drawn, setDrawn] = useState(0);
+  useEffect(() => {
+    const t = setTimeout(() => setDrawn(pct), 200);
+    return () => clearTimeout(t);
+  }, [pct]);
+  const dash = (drawn / 100) * circ;
+
+  return (
+    <svg width={136} height={136} viewBox="0 0 136 136">
+      <defs>
+        <linearGradient id="donut-grad" x1="0" y1="0" x2="1" y2="1">
+          <stop offset="0%" stopColor="#6366f1" />
+          <stop offset="100%" stopColor="#a855f7" />
+        </linearGradient>
+      </defs>
+      {/* Track */}
+      <circle cx={cx} cy={cy} r={r} fill="none" stroke="rgba(255,255,255,0.05)" strokeWidth={12} />
+      {/* Fill */}
+      <circle
+        cx={cx} cy={cy} r={r}
+        fill="none"
+        stroke="url(#donut-grad)"
+        strokeWidth={12}
+        strokeLinecap="round"
+        strokeDasharray={`${dash} ${circ - dash}`}
+        strokeDashoffset={circ / 4}
+        style={{ transition: 'stroke-dasharray 1.2s cubic-bezier(0.16,1,0.3,1)', filter: 'drop-shadow(0 0 8px rgba(99,102,241,0.6))' }}
+      />
+    </svg>
+  );
+};
+
+// ─── Page ─────────────────────────────────────────────────────────────────────
+
+interface Stats {
   total_products: number;
   total_categories: number;
   total_attributes: number;
@@ -10,241 +151,161 @@ interface DashboardStats {
   average_completeness: number;
 }
 
-const DashboardPage: React.FC = () => {
-  const [stats, setStats] = useState<DashboardStats | null>(null);
+export default function DashboardPage() {
+  const [stats, setStats] = useState<Stats | null>(null);
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
 
-  useEffect(() => {
-    const fetchStats = async () => {
-      try {
-        setLoading(true);
-        const response = await fetch('/api/v1/stats');
-        if (!response.ok) throw new Error('Failed to fetch stats');
-        const data = await response.json();
-        setStats(data);
-      } catch (err) {
-        setError(err instanceof Error ? err.message : 'Unknown error');
-      } finally {
-        setLoading(false);
-      }
-    };
+  const load = () => {
+    setLoading(true);
+    fetch('/api/v1/stats')
+      .then(r => r.json())
+      .then(d => { setStats(d); setLoading(false); })
+      .catch(() => setLoading(false));
+  };
 
-    fetchStats();
-  }, []);
+  useEffect(() => { load(); }, []);
 
-  const completenessValue = stats?.average_completeness ?? 72;
-  const pieData = [
-    { name: 'Filled', value: completenessValue },
-    { name: 'Empty', value: 100 - completenessValue },
-  ];
-
-  const kpiCards = [
-    {
-      icon: <Package className="w-5 h-5 text-blue-400" />,
-      iconBg: 'bg-blue-500/10',
-      value: stats?.total_products?.toLocaleString() ?? '—',
-      label: 'Товаров',
-      trend: '+12% this week',
-    },
-    {
-      icon: <Layers className="w-5 h-5 text-purple-400" />,
-      iconBg: 'bg-purple-500/10',
-      value: stats?.total_attributes?.toLocaleString() ?? '—',
-      label: 'Активных листингов',
-      trend: '+5% this week',
-    },
-    {
-      icon: <Activity className="w-5 h-5 text-emerald-400" />,
-      iconBg: 'bg-emerald-500/10',
-      value: stats?.total_connections?.toLocaleString() ?? '—',
-      label: 'Синхронизировано сегодня',
-      trend: '+8% this week',
-    },
-    {
-      icon: <TrendingUp className="w-5 h-5 text-orange-400" />,
-      iconBg: 'bg-orange-500/10',
-      value: stats ? `${stats.average_completeness}%` : '—',
-      label: 'Заполненность каталога',
-      trend: '+3% this week',
-    },
-  ];
-
-  const quickSteps = [
-    {
-      num: '1',
-      title: 'Импортируйте товары',
-      desc: 'Загрузите каталог из Excel или маркетплейса',
-    },
-    {
-      num: '2',
-      title: 'Заполните атрибуты',
-      desc: 'ИИ предложит значения автоматически',
-    },
-    {
-      num: '3',
-      title: 'Опубликуйте на площадках',
-      desc: 'Ozon, Яндекс Маркет, WB одним кликом',
-    },
+  const kpis = [
+    { label: 'Товаров в каталоге', value: stats?.total_products ?? 0, icon: <Package size={18} />, color: '#6366f1', glowColor: 'rgba(99,102,241,0.5)', trend: '+12%', delay: 0 },
+    { label: 'Категорий', value: stats?.total_categories ?? 0, icon: <FolderOpen size={18} />, color: '#a855f7', glowColor: 'rgba(168,85,247,0.5)', trend: '+5%', delay: 80 },
+    { label: 'Атрибутов', value: stats?.total_attributes ?? 0, icon: <Database size={18} />, color: '#22d3ee', glowColor: 'rgba(34,211,238,0.4)', trend: '+3%', delay: 160 },
+    { label: 'Подключений', value: stats?.total_connections ?? 0, icon: <Plug size={18} />, color: '#10b981', glowColor: 'rgba(16,185,129,0.4)', trend: 'active', delay: 240 },
   ];
 
   return (
-    <div className="min-h-screen bg-[#0d0d10] p-6">
-      {/* Page Header */}
-      <div className="flex items-start justify-between mb-8">
-        <div>
-          <h1 className="text-slate-100 text-2xl font-semibold">Дашборд</h1>
-          <p className="text-slate-500 text-sm mt-1">Обзор состояния вашего каталога товаров</p>
-        </div>
-        <div className="flex items-center gap-2">
-          <button className="bg-[#1c1c28] hover:bg-[#28283a] border border-[#1e1e2c] text-slate-300 px-3 py-1.5 rounded-lg text-sm flex items-center gap-1.5 transition-colors">
-            <Plus className="w-3.5 h-3.5" />
-            Добавить товар
-          </button>
-          <button className="bg-[#1c1c28] hover:bg-[#28283a] border border-[#1e1e2c] text-slate-300 px-3 py-1.5 rounded-lg text-sm flex items-center gap-1.5 transition-colors">
-            <Upload className="w-3.5 h-3.5" />
-            Импорт
-          </button>
-          <button className="bg-[#1c1c28] hover:bg-[#28283a] border border-[#1e1e2c] text-slate-300 px-3 py-1.5 rounded-lg text-sm flex items-center gap-1.5 transition-colors">
-            <RefreshCw className="w-3.5 h-3.5" />
-            Синхронизировать
-          </button>
-        </div>
+    <div style={{ maxWidth: 1200, margin: '0 auto' }}>
+      {/* Background orbs */}
+      <div style={{ position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, pointerEvents: 'none', overflow: 'hidden', zIndex: 0 }}>
+        <div className="orb orb-indigo" style={{ width: 600, height: 600, top: -200, left: -100, animationDuration: '15s' }} />
+        <div className="orb orb-purple" style={{ width: 500, height: 500, top: 300, right: -100, animationDuration: '20s', animationDelay: '-5s' }} />
+        <div className="orb orb-cyan" style={{ width: 400, height: 400, bottom: -100, left: '40%', animationDuration: '18s', animationDelay: '-8s' }} />
       </div>
 
-      {/* KPI Cards */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
-        {loading
-          ? Array.from({ length: 4 }).map((_, i) => (
-              <div
-                key={i}
-                className="bg-[#13131a] border border-[#1e1e2c] rounded-xl p-5 animate-pulse"
-              >
-                <div className="w-12 h-12 bg-[#1c1c28] rounded-lg mb-4" />
-                <div className="h-8 bg-[#1c1c28] rounded w-2/3 mb-2" />
-                <div className="h-3 bg-[#1c1c28] rounded w-1/2 mb-3" />
-                <div className="h-5 bg-[#1c1c28] rounded w-1/3" />
+      <div style={{ position: 'relative', zIndex: 1 }}>
+        {/* Header */}
+        <div className="animate-fade-up" style={{ marginBottom: 32, display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', flexWrap: 'wrap', gap: 16 }}>
+          <div>
+            <h1 style={{ fontSize: 26, fontWeight: 800, letterSpacing: '-0.03em', color: 'rgba(255,255,255,0.95)', marginBottom: 6, lineHeight: 1.1 }}>
+              Добро пожаловать 👋
+            </h1>
+            <p style={{ fontSize: 14, color: 'rgba(255,255,255,0.35)', maxWidth: 460, lineHeight: 1.6 }}>
+              Единая база товаров → ИИ создаёт идеальную карточку → выгрузка на Ozon, Яндекс, WB, Мегамаркет
+            </p>
+          </div>
+          <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+            <button className="btn-ghost-premium" onClick={load} style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+              <RefreshCw size={13} style={{ opacity: loading ? 1 : 0.7, animation: loading ? 'spin-slow 1s linear infinite' : 'none' }} />
+              Обновить
+            </button>
+            <Link to="/products" style={{ textDecoration: 'none' }}>
+              <button className="btn-glow" style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
+                <Plus size={14} /> Добавить товар
+              </button>
+            </Link>
+          </div>
+        </div>
+
+        {/* KPI Grid */}
+        {loading ? (
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit,minmax(220px,1fr))', gap: 16, marginBottom: 24 }}>
+            {[0,1,2,3].map(i => <div key={i} className="skeleton" style={{ height: 160, borderRadius: 16 }} />)}
+          </div>
+        ) : (
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit,minmax(220px,1fr))', gap: 16, marginBottom: 24 }}>
+            {kpis.map(k => <KpiCard key={k.label} {...k} />)}
+          </div>
+        )}
+
+        {/* Bottom row */}
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 380px', gap: 16, alignItems: 'start' }}>
+
+          {/* Completeness super-box */}
+          <div className="super-box animate-fade-up delay-300" style={{ padding: 28 }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 24 }}>
+              <div>
+                <h2 style={{ fontSize: 16, fontWeight: 700, color: 'rgba(255,255,255,0.9)', marginBottom: 4 }}>
+                  Индекс здоровья каталога
+                </h2>
+                <p style={{ fontSize: 12, color: 'rgba(255,255,255,0.35)' }}>Completeness score по всем товарам</p>
               </div>
-            ))
-          : kpiCards.map((card, i) => (
-              <div
-                key={i}
-                className="bg-[#13131a] border border-[#1e1e2c] rounded-xl p-5 hover:border-[#28283a] transition-all"
-              >
-                <div className={`w-12 h-12 ${card.iconBg} rounded-lg flex items-center justify-center mb-4`}>
-                  {card.icon}
-                </div>
-                <div className="text-3xl font-bold text-slate-100 tabular-nums">{card.value}</div>
-                <div className="text-xs text-slate-500 uppercase tracking-wide mt-1">{card.label}</div>
-                <div className="mt-3">
-                  <span className="text-emerald-400 text-xs bg-emerald-500/10 px-1.5 py-0.5 rounded">
-                    {card.trend}
+              <span className="badge badge-info">
+                <Activity size={10} /> live
+              </span>
+            </div>
+
+            <div style={{ display: 'flex', alignItems: 'center', gap: 40 }}>
+              <div style={{ position: 'relative', flexShrink: 0 }}>
+                <DonutChart pct={stats?.average_completeness ?? 0} />
+                <div style={{ position: 'absolute', inset: 0, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', pointerEvents: 'none' }}>
+                  <span style={{ fontSize: 26, fontWeight: 800, color: 'rgba(255,255,255,0.95)', letterSpacing: '-0.04em', lineHeight: 1 }}>
+                    {stats?.average_completeness ?? 0}%
                   </span>
+                  <span style={{ fontSize: 10, color: 'rgba(255,255,255,0.3)', marginTop: 2 }}>заполнено</span>
                 </div>
               </div>
-            ))}
-      </div>
 
-      {/* Bottom Two-Column Section */}
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
-        {/* Donut Chart — 2/3 */}
-        <div className="lg:col-span-2 bg-[#13131a] border border-[#1e1e2c] rounded-xl p-5 hover:border-[#28283a] transition-all">
-          <div className="flex items-center justify-between mb-4">
-            <div>
-              <h2 className="text-sm font-medium text-slate-200">Заполненность каталога</h2>
-              <p className="text-xs text-slate-500 mt-0.5">Процент заполненных атрибутов по всем товарам</p>
-            </div>
-          </div>
-
-          {loading ? (
-            <div className="h-56 flex items-center justify-center">
-              <div className="w-40 h-40 rounded-full bg-[#1c1c28] animate-pulse" />
-            </div>
-          ) : (
-            <div className="relative h-56">
-              <ResponsiveContainer width="100%" height="100%">
-                <PieChart>
-                  <Pie
-                    data={pieData}
-                    cx="50%"
-                    cy="50%"
-                    innerRadius={72}
-                    outerRadius={96}
-                    startAngle={90}
-                    endAngle={-270}
-                    dataKey="value"
-                    strokeWidth={0}
-                  >
-                    <Cell fill="#6366f1" />
-                    <Cell fill="#1e1e2c" />
-                  </Pie>
-                </PieChart>
-              </ResponsiveContainer>
-              <div className="absolute inset-0 flex flex-col items-center justify-center pointer-events-none">
-                <span className="text-3xl font-bold text-slate-100">{completenessValue}%</span>
-                <span className="text-xs text-slate-500 mt-1">Заполнено</span>
-              </div>
-            </div>
-          )}
-
-          <div className="flex items-center gap-6 mt-4 pt-4 border-t border-[#1e1e2c]">
-            <div className="flex items-center gap-2">
-              <span className="w-2.5 h-2.5 rounded-full bg-indigo-500 inline-block" />
-              <span className="text-xs text-slate-400">Заполнено</span>
-              <span className="text-xs text-slate-100 font-medium">{completenessValue}%</span>
-            </div>
-            <div className="flex items-center gap-2">
-              <span className="w-2.5 h-2.5 rounded-full bg-[#1e1e2c] border border-slate-600 inline-block" />
-              <span className="text-xs text-slate-400">Не заполнено</span>
-              <span className="text-xs text-slate-100 font-medium">{100 - completenessValue}%</span>
-            </div>
-          </div>
-        </div>
-
-        {/* Quick Actions — 1/3 */}
-        <div className="bg-[#13131a] border border-[#1e1e2c] rounded-xl p-5 hover:border-[#28283a] transition-all flex flex-col">
-          <h2 className="text-sm font-medium text-slate-200 mb-1">Быстрый старт</h2>
-          <p className="text-xs text-slate-500 mb-5">Три шага для запуска каталога</p>
-
-          <div className="flex-1 space-y-0">
-            {quickSteps.map((step, i) => (
-              <div key={i} className="flex gap-3">
-                {/* Dot + vertical line */}
-                <div className="flex flex-col items-center">
-                  <div className="w-6 h-6 rounded-full bg-indigo-500/20 border border-indigo-500/50 text-indigo-400 text-xs flex items-center justify-center flex-shrink-0">
-                    {step.num}
+              <div style={{ flex: 1 }}>
+                {[
+                  { label: 'Полные карточки', pct: stats?.average_completeness ?? 0, color: '#6366f1' },
+                  { label: 'С изображениями', pct: Math.round((stats?.average_completeness ?? 0) * 0.9), color: '#a855f7' },
+                  { label: 'С описанием', pct: Math.round((stats?.average_completeness ?? 0) * 0.75), color: '#22d3ee' },
+                ].map(row => (
+                  <div key={row.label} style={{ marginBottom: 14 }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 5 }}>
+                      <span style={{ fontSize: 12, color: 'rgba(255,255,255,0.5)' }}>{row.label}</span>
+                      <span style={{ fontSize: 12, fontWeight: 600, color: 'rgba(255,255,255,0.7)' }}>{row.pct}%</span>
+                    </div>
+                    <div className="progress-track">
+                      <div className="progress-fill" style={{ width: `${row.pct}%`, background: `linear-gradient(90deg, ${row.color}, ${row.color}aa)` }} />
+                    </div>
                   </div>
-                  {i < quickSteps.length - 1 && (
-                    <div className="w-px flex-1 bg-[#1e1e2c] my-1" style={{ minHeight: '28px' }} />
-                  )}
-                </div>
-                <div className={i < quickSteps.length - 1 ? 'pb-5' : ''}>
-                  <p className="text-sm font-medium text-slate-200 leading-tight">{step.title}</p>
-                  <p className="text-xs text-slate-500 mt-0.5">{step.desc}</p>
-                </div>
+                ))}
               </div>
-            ))}
+            </div>
           </div>
 
-          <div className="flex flex-col gap-2 mt-6 pt-4 border-t border-[#1e1e2c]">
-            <button className="w-full bg-indigo-500 hover:bg-indigo-600 text-white font-medium py-2 rounded-lg text-sm transition-colors flex items-center justify-center gap-1.5">
-              Начать импорт
-              <ChevronRight className="w-3.5 h-3.5" />
-            </button>
-            <button className="w-full bg-transparent hover:bg-[#1c1c28] border border-[#1e1e2c] text-slate-300 font-medium py-2 rounded-lg text-sm transition-colors">
-              Посмотреть документацию
-            </button>
+          {/* Quick start card */}
+          <div className="animate-fade-up delay-400" style={{
+            background: 'linear-gradient(160deg, rgba(99,102,241,0.15), rgba(168,85,247,0.08), rgba(34,211,238,0.05))',
+            border: '1px solid rgba(99,102,241,0.25)',
+            borderRadius: 16,
+            padding: 24,
+            position: 'relative',
+            overflow: 'hidden',
+          }}>
+            {/* Glow */}
+            <div style={{ position: 'absolute', top: -40, right: -40, width: 150, height: 150, borderRadius: '50%', background: 'radial-gradient(circle, rgba(99,102,241,0.4), transparent 70%)', pointerEvents: 'none' }} />
+
+            <h3 style={{ fontSize: 15, fontWeight: 700, color: 'rgba(255,255,255,0.95)', marginBottom: 6, position: 'relative' }}>
+              <Zap size={15} style={{ display: 'inline', marginRight: 6, color: '#fbbf24', verticalAlign: 'text-bottom' }} />
+              Быстрый старт
+            </h3>
+            <p style={{ fontSize: 12, color: 'rgba(255,255,255,0.35)', marginBottom: 20, lineHeight: 1.6, position: 'relative' }}>
+              Три шага до первой выгрузки
+            </p>
+
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 14, position: 'relative' }}>
+              {[
+                { n: 1, title: 'Подключить магазин', desc: 'API ключи Ozon / Яндекс / WB / MM', path: '/integrations', color: '#6366f1' },
+                { n: 2, title: 'Импортировать товары', desc: 'По артикулу из любого маркетплейса', path: '/products', color: '#a855f7' },
+                { n: 3, title: 'Перенести карточки', desc: 'ИИ подберёт категорию и поля', path: '/syndication', color: '#22d3ee' },
+              ].map(s => (
+                <Link key={s.n} to={s.path} style={{ textDecoration: 'none', display: 'flex', alignItems: 'center', gap: 12, padding: '10px 12px', borderRadius: 10, background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.06)', transition: 'all 0.2s' }}
+                  onMouseEnter={e => { (e.currentTarget as HTMLAnchorElement).style.background = 'rgba(255,255,255,0.07)'; (e.currentTarget as HTMLAnchorElement).style.borderColor = `${s.color}40`; }}
+                  onMouseLeave={e => { (e.currentTarget as HTMLAnchorElement).style.background = 'rgba(255,255,255,0.04)'; (e.currentTarget as HTMLAnchorElement).style.borderColor = 'rgba(255,255,255,0.06)'; }}
+                >
+                  <div style={{ width: 28, height: 28, borderRadius: 8, background: `${s.color}20`, border: `1px solid ${s.color}40`, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 12, fontWeight: 700, color: s.color, flexShrink: 0 }}>{s.n}</div>
+                  <div>
+                    <div style={{ fontSize: 13, fontWeight: 600, color: 'rgba(255,255,255,0.85)' }}>{s.title}</div>
+                    <div style={{ fontSize: 11, color: 'rgba(255,255,255,0.3)', marginTop: 1 }}>{s.desc}</div>
+                  </div>
+                  <ArrowUpRight size={13} style={{ marginLeft: 'auto', color: 'rgba(255,255,255,0.2)' }} />
+                </Link>
+              ))}
+            </div>
           </div>
         </div>
       </div>
-
-      {error && (
-        <div className="mt-4 bg-red-500/10 border border-red-500/20 text-red-400 text-sm p-3 rounded-lg">
-          Ошибка загрузки данных: {error}
-        </div>
-      )}
     </div>
   );
-};
-
-export default DashboardPage;
+}

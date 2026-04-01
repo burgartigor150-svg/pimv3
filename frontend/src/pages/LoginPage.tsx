@@ -1,154 +1,163 @@
-import axios from 'axios'
 import React, { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Mail, Lock, Check, Zap } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
+import axios from 'axios';
+import { Mail, Lock, ArrowRight, Zap, Check } from 'lucide-react';
 
-const LoginPage: React.FC = () => {
-  const navigate = useNavigate();
-  const { login } = useAuth();
+const FEATURES = [
+  'Импорт карточек из Ozon, Яндекс, WB, Мегамаркет',
+  'ИИ-нормализация и автозаполнение атрибутов',
+  'Массовая выгрузка на любые площадки',
+  'Автономный агент-разработчик для PIM',
+];
 
+export const LoginPage: React.FC = () => {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
+  const { login } = useAuth();
+  const navigate = useNavigate();
 
-  const handleSubmit = async (e: React.FormEvent<HTMLFormElement>) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    setError(null);
+    setError('');
     setLoading(true);
     try {
-      const formData = new URLSearchParams();
-      formData.append('username', email);
-      formData.append('password', password);
-      const res = await axios.post('/api/v1/auth/login', formData, {
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded' }
+      const fd = new URLSearchParams();
+      fd.append('username', email);
+      fd.append('password', password);
+      const res = await axios.post('/api/v1/auth/login', fd, {
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
       });
       login(res.data.access_token, res.data.role, email);
-      navigate('/dashboard');
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Неверный логин или пароль');
+      navigate('/');
+    } catch (err: any) {
+      setError(err.response?.status === 401 ? 'Неверный email или пароль' : 'Ошибка подключения к серверу');
     } finally {
       setLoading(false);
     }
   };
 
-  const features = [
-    'Импорт карточек из любого маркетплейса',
-    'ИИ-нормализация атрибутов',
-    'Автоматический перенос на площадки',
-    'Агент-разработчик для PIM-системы',
-  ];
-
   return (
-    <div className="bg-[#0d0d10] lg:grid lg:grid-cols-2 h-screen">
-      {/* Left Panel */}
-      <div className="bg-[#13131a] border-r border-[#1e1e2c] hidden lg:flex flex-col justify-between p-12">
+    <div style={{ minHeight: '100vh', display: 'grid', gridTemplateColumns: '1fr 1fr', background: 'var(--bg-void)', position: 'relative', overflow: 'hidden' }}>
+      {/* Ambient orbs */}
+      <div className="orb orb-indigo" style={{ width: 700, height: 700, top: -200, left: -200, position: 'fixed', zIndex: 0 }} />
+      <div className="orb orb-purple" style={{ width: 500, height: 500, bottom: -100, right: -100, position: 'fixed', zIndex: 0 }} />
+
+      {/* Left panel */}
+      <div style={{ position: 'relative', zIndex: 1, display: 'flex', flexDirection: 'column', justifyContent: 'space-between', padding: '48px 56px', borderRight: '1px solid rgba(255,255,255,0.05)' }}>
         {/* Logo */}
-        <div className="flex items-center gap-3">
-          <div className="w-9 h-9 bg-emerald-500 rounded-lg flex items-center justify-center flex-shrink-0">
-            <Zap className="w-5 h-5 text-white" />
+        <div className="animate-fade-in" style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+          <div style={{ width: 36, height: 36, borderRadius: 10, background: 'linear-gradient(135deg,#6366f1,#a855f7)', display: 'flex', alignItems: 'center', justifyContent: 'center', boxShadow: '0 0 24px rgba(99,102,241,0.5)' }}>
+            <Zap size={18} color="white" />
           </div>
-          <span className="text-slate-100 text-lg font-semibold tracking-tight">PIM.Giper.fm</span>
-        </div>
-
-        {/* Tagline + features */}
-        <div className="space-y-8">
-          <p className="text-slate-400 text-lg leading-relaxed max-w-sm">
-            Умный каталог товаров для Ozon, Яндекс Маркет, Wildberries и Мегамаркет
-          </p>
-
-          <ul className="space-y-3">
-            {features.map((feat, i) => (
-              <li key={i} className="flex items-center gap-3">
-                <span className="w-5 h-5 rounded-full bg-emerald-500/15 border border-emerald-500/30 flex items-center justify-center flex-shrink-0">
-                  <Check className="w-3 h-3 text-emerald-400" />
-                </span>
-                <span className="text-sm text-slate-300">{feat}</span>
-              </li>
-            ))}
-          </ul>
-        </div>
-
-        {/* Version badge */}
-        <div>
-          <span className="inline-flex items-center px-2 py-0.5 rounded text-xs text-slate-500 bg-[#1c1c28] border border-[#1e1e2c]">
-            v3.0
+          <span style={{ fontSize: 20, fontWeight: 800, letterSpacing: '-0.03em', color: 'rgba(255,255,255,0.95)' }}>
+            PIM<span style={{ background: 'linear-gradient(135deg,#818cf8,#c084fc)', WebkitBackgroundClip: 'text', WebkitTextFillColor: 'transparent' }}>.giper.fm</span>
           </span>
+        </div>
+
+        {/* Main text */}
+        <div className="animate-fade-up delay-150">
+          <div className="badge badge-purple" style={{ marginBottom: 20, display: 'inline-flex' }}>
+            <Zap size={9} /> Product Intelligence Platform
+          </div>
+          <h1 style={{ fontSize: 40, fontWeight: 900, letterSpacing: '-0.04em', color: 'rgba(255,255,255,0.95)', lineHeight: 1.1, marginBottom: 16 }}>
+            Умный каталог<br />
+            <span style={{ background: 'linear-gradient(135deg,#818cf8 20%,#c084fc 60%,#22d3ee)', WebkitBackgroundClip: 'text', WebkitTextFillColor: 'transparent', backgroundSize: '200% 200%', animation: 'gradient-shift 4s ease infinite' }}>
+              для маркетплейсов
+            </span>
+          </h1>
+          <p style={{ fontSize: 16, color: 'rgba(255,255,255,0.4)', lineHeight: 1.7, maxWidth: 380 }}>
+            Агрегируйте данные из всех площадок, обогащайте карточки с помощью ИИ и выгружайте без ручного переноса полей.
+          </p>
+        </div>
+
+        {/* Features */}
+        <div className="animate-fade-up delay-300" style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+          {FEATURES.map(f => (
+            <div key={f} style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+              <div style={{ width: 20, height: 20, borderRadius: '50%', background: 'rgba(52,211,153,0.15)', border: '1px solid rgba(52,211,153,0.3)', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
+                <Check size={10} color="#34d399" />
+              </div>
+              <span style={{ fontSize: 13, color: 'rgba(255,255,255,0.55)' }}>{f}</span>
+            </div>
+          ))}
+        </div>
+
+        {/* Version */}
+        <div className="animate-fade-in delay-400" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          <span style={{ fontSize: 11, color: 'rgba(255,255,255,0.15)' }}>v3.0</span>
+          <span style={{ fontSize: 11, color: 'rgba(255,255,255,0.08)' }}>·</span>
+          <span style={{ fontSize: 11, color: 'rgba(255,255,255,0.15)' }}>Production</span>
         </div>
       </div>
 
-      {/* Right Panel */}
-      <div className="flex items-center justify-center p-8 h-full">
-        <div className="bg-[#13131a] border border-[#1e1e2c] rounded-2xl p-8 w-full max-w-sm">
-          {/* Mobile logo */}
-          <div className="flex items-center gap-2.5 mb-6 lg:hidden">
-            <div className="w-8 h-8 bg-emerald-500 rounded-lg flex items-center justify-center">
-              <Zap className="w-4 h-4 text-white" />
-            </div>
-            <span className="text-slate-100 font-semibold">PIM.Giper.fm</span>
-          </div>
-
-          <h1 className="text-slate-100 text-xl font-semibold mb-1">Войти в систему</h1>
-          <p className="text-slate-500 text-sm mb-6">Введите ваши учётные данные</p>
-
-          <form onSubmit={handleSubmit} className="space-y-4" noValidate>
-            {/* Email */}
-            <div>
-              <label htmlFor="email" className="block text-sm text-slate-400 mb-1.5">
-                Email
-              </label>
-              <div className="relative">
-                <Mail className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-600 pointer-events-none" />
-                <input
-                  id="email"
-                  type="email"
-                  autoComplete="email"
-                  required
-                  value={email}
-                  onChange={(e) => setEmail(e.target.value)}
-                  placeholder="you@company.ru"
-                  className="bg-[#0d0d10] border border-[#28283a] rounded-lg pl-9 pr-3 py-2.5 text-slate-100 w-full focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500/30 outline-none text-sm placeholder:text-slate-600 transition-colors"
-                />
-              </div>
+      {/* Right panel - form */}
+      <div style={{ position: 'relative', zIndex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 48 }}>
+        <div className="animate-scale-in" style={{ width: '100%', maxWidth: 380 }}>
+          {/* Card */}
+          <div style={{ background: 'rgba(255,255,255,0.03)', backdropFilter: 'blur(20px)', border: '1px solid rgba(255,255,255,0.08)', borderRadius: 20, padding: '36px 32px' }}>
+            <div style={{ marginBottom: 28 }}>
+              <h2 style={{ fontSize: 22, fontWeight: 800, letterSpacing: '-0.03em', color: 'rgba(255,255,255,0.95)', marginBottom: 6 }}>Войти в систему</h2>
+              <p style={{ fontSize: 13, color: 'rgba(255,255,255,0.35)' }}>Введите ваши данные для доступа</p>
             </div>
 
-            {/* Password */}
-            <div>
-              <label htmlFor="password" className="block text-sm text-slate-400 mb-1.5">
-                Пароль
-              </label>
-              <div className="relative">
-                <Lock className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-600 pointer-events-none" />
-                <input
-                  id="password"
-                  type="password"
-                  autoComplete="current-password"
-                  required
-                  value={password}
-                  onChange={(e) => setPassword(e.target.value)}
-                  placeholder="••••••••"
-                  className="bg-[#0d0d10] border border-[#28283a] rounded-lg pl-9 pr-3 py-2.5 text-slate-100 w-full focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500/30 outline-none text-sm placeholder:text-slate-600 transition-colors"
-                />
-              </div>
-            </div>
-
-            {/* Error */}
             {error && (
-              <div className="bg-red-500/10 border border-red-500/20 text-red-400 text-sm p-3 rounded-lg">
+              <div style={{ background: 'rgba(248,113,113,0.08)', border: '1px solid rgba(248,113,113,0.2)', borderRadius: 10, padding: '12px 14px', marginBottom: 20, fontSize: 13, color: '#f87171' }}>
                 {error}
               </div>
             )}
 
-            {/* Submit */}
-            <button
-              type="submit"
-              disabled={loading}
-              className="w-full bg-indigo-500 hover:bg-indigo-600 text-white font-medium py-2.5 rounded-lg transition-all active:scale-95 disabled:opacity-50 mt-2 text-sm"
-            >
-              {loading ? 'Входим…' : 'Войти'}
-            </button>
-          </form>
+            <form onSubmit={handleSubmit} style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+              <div>
+                <label style={{ display: 'block', fontSize: 12, fontWeight: 600, color: 'rgba(255,255,255,0.45)', marginBottom: 8, letterSpacing: '0.02em' }}>EMAIL</label>
+                <div style={{ position: 'relative' }}>
+                  <Mail size={15} style={{ position: 'absolute', left: 12, top: '50%', transform: 'translateY(-50%)', color: 'rgba(255,255,255,0.2)' }} />
+                  <input
+                    type="email" required value={email} onChange={e => setEmail(e.target.value)}
+                    placeholder="admin@company.com"
+                    className="input-premium"
+                    style={{ paddingLeft: 38 }}
+                  />
+                </div>
+              </div>
+
+              <div>
+                <label style={{ display: 'block', fontSize: 12, fontWeight: 600, color: 'rgba(255,255,255,0.45)', marginBottom: 8, letterSpacing: '0.02em' }}>ПАРОЛЬ</label>
+                <div style={{ position: 'relative' }}>
+                  <Lock size={15} style={{ position: 'absolute', left: 12, top: '50%', transform: 'translateY(-50%)', color: 'rgba(255,255,255,0.2)' }} />
+                  <input
+                    type="password" required value={password} onChange={e => setPassword(e.target.value)}
+                    placeholder="••••••••"
+                    className="input-premium"
+                    style={{ paddingLeft: 38 }}
+                  />
+                </div>
+              </div>
+
+              <button
+                type="submit"
+                disabled={loading}
+                className="btn-glow"
+                style={{ marginTop: 8, padding: '12px 20px', borderRadius: 10, fontSize: 14, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8, width: '100%', opacity: loading ? 0.7 : 1 }}
+              >
+                {loading ? (
+                  <>
+                    <div style={{ width: 16, height: 16, borderRadius: '50%', border: '2px solid rgba(255,255,255,0.3)', borderTopColor: 'white', animation: 'spin-slow 0.8s linear infinite' }} />
+                    Входим...
+                  </>
+                ) : (
+                  <>Войти <ArrowRight size={15} /></>
+                )}
+              </button>
+            </form>
+          </div>
+
+          {/* Bottom hint */}
+          <p style={{ textAlign: 'center', fontSize: 12, color: 'rgba(255,255,255,0.15)', marginTop: 20 }}>
+            Нет доступа? Обратитесь к администратору
+          </p>
         </div>
       </div>
     </div>
