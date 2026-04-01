@@ -121,13 +121,13 @@ app = FastAPI(title="PIM V3 API")
 
 @app.get("/api/v1/health")
 async def health_check():
+    """Проверка работоспособности backend."""
+    return {"status": "ok", "service": "pimv3-backend", "timestamp": time.time()}
 
 @app.get("/api/v1/version")
 async def get_version():
     """Возвращает текущую версию бэкенда для мониторинга."""
     return {"version": "1.0.0", "service": "pimv3-backend", "timestamp": time.time()}
-    """Проверка работоспособности backend."""
-    return {"status": "ok", "service": "pimv3-backend", "timestamp": time.time()}
 
 app.add_middleware(
     CORSMiddleware,
