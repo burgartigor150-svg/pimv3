@@ -1,311 +1,274 @@
-import React, { useState, useCallback } from 'react';
-import { BrowserRouter, Routes, Route, NavLink, useLocation, Navigate } from 'react-router-dom';
+import React, { useState, useEffect, useCallback } from 'react';
+import { BrowserRouter, Routes, Route, NavLink, useLocation, Navigate, useNavigate } from 'react-router-dom';
 import {
-  LayoutDashboard,
-  Package,
-  Sliders,
-  Share2,
-  Plug,
-  Map,
-  Bot,
-  Terminal,
-  MessageSquare,
-  Sparkles,
-  Clock,
-  Users,
-  Settings,
-  ShieldCheck,
-  ChevronLeft,
-  ChevronRight,
-  Bell,
-  LogOut,
-  Zap,
+  LayoutDashboard, Package, Sliders, Share2, Plug, Map,
+  Bot, Terminal, MessageSquare, Sparkles, Clock, Users,
+  Settings, ShieldCheck, ChevronLeft, ChevronRight,
+  Bell, LogOut, Zap, Activity, Search,
 } from 'lucide-react';
 import { useAuth } from './context/AuthContext';
+import { ToastProvider } from './components/Toast';
+
+// ─── Pages ───────────────────────────────────────────────────────────────────
 import LoginPage from './pages/LoginPage';
 import DashboardPage from './pages/DashboardPage';
 import ProductsPage from './pages/ProductsPage';
-import AgentDashboard from './pages/AgentDashboard';
+import ProductDetailsPage from './pages/ProductDetailsPage';
 import AttributesPage from './pages/AttributesPage';
 import IntegrationsPage from './pages/IntegrationsPage';
 import SyndicationPage from './pages/SyndicationPage';
 import AttributeStarMapPage from './pages/AttributeStarMapPage';
 import AgentTaskConsolePage from './pages/AgentTaskConsolePage';
 import AgentAssistantPage from './pages/AgentAssistantPage';
+import AgentDashboard from './pages/AgentDashboard';
 import SelfImproveConsolePage from './pages/SelfImproveConsolePage';
 import AdminDialogConsolePage from './pages/AdminDialogConsolePage';
 import SettingsPage from './pages/SettingsPage';
 import UsersPage from './pages/UsersPage';
-import ProductDetailsPage from './pages/ProductDetailsPage';
-import { ToastProvider } from './components/Toast';
 
+// ─── Nav groups ───────────────────────────────────────────────────────────────
 
-// ─── Placeholder ──────────────────────────────────────────────────────────────
-
-const PlaceholderPage: React.FC<{ title: string }> = ({ title }) => (
-  <div className="flex flex-col items-center justify-center h-full min-h-[60vh] text-center px-6">
-    <div className="w-14 h-14 rounded-2xl bg-[rgb(var(--bg-elevated))] border border-[rgb(var(--border-subtle))] flex items-center justify-center mb-4">
-      <Zap className="w-6 h-6 text-[rgb(var(--text-faint))]" />
-    </div>
-    <h2 className="text-[rgb(var(--text-primary))] text-lg font-semibold mb-1">{title}</h2>
-    <p className="text-[rgb(var(--text-muted))] text-sm max-w-xs">
-      Эта страница находится в разработке
-    </p>
-  </div>
-);
-
-// ─── Nav structure ────────────────────────────────────────────────────────────
-
-interface NavItem {
-  path: string;
-  label: string;
-  icon: React.ReactNode;
-}
-
-interface NavGroup {
-  label: string;
-  items: NavItem[];
-}
-
-const NAV_GROUPS: NavGroup[] = [
+const NAV_GROUPS = [
   {
-    label: 'КАТАЛОГ',
+    label: 'Каталог',
     items: [
-      { path: '/dashboard',    label: 'Dashboard',    icon: <LayoutDashboard className="w-4 h-4 flex-shrink-0" /> },
-      { path: '/products',     label: 'Products',     icon: <Package          className="w-4 h-4 flex-shrink-0" /> },
-      { path: '/attributes',   label: 'Attributes',   icon: <Sliders          className="w-4 h-4 flex-shrink-0" /> },
-      { path: '/syndication',  label: 'Syndication',  icon: <Share2           className="w-4 h-4 flex-shrink-0" /> },
+      { path: '/dashboard', label: 'Дашборд', icon: <LayoutDashboard size={16} /> },
+      { path: '/products', label: 'Товары', icon: <Package size={16} /> },
+      { path: '/attributes', label: 'Атрибуты', icon: <Sliders size={16} /> },
+      { path: '/syndication', label: 'Выгрузка', icon: <Share2 size={16} /> },
     ],
   },
   {
-    label: 'МАРКЕТПЛЕЙСЫ',
+    label: 'Маркетплейсы',
     items: [
-      { path: '/integrations', label: 'Integrations', icon: <Plug             className="w-4 h-4 flex-shrink-0" /> },
-      { path: '/star-map',     label: 'Star Map',     icon: <Map              className="w-4 h-4 flex-shrink-0" /> },
+      { path: '/integrations', label: 'Подключения', icon: <Plug size={16} /> },
+      { path: '/star-map', label: 'Star Map', icon: <Map size={16} /> },
     ],
   },
   {
-    label: 'АГЕНТ',
+    label: 'Агент',
     items: [
-      { path: '/agent-dashboard', label: 'Agent Dashboard', icon: <Bot           className="w-4 h-4 flex-shrink-0" /> },
-      { path: '/agent-console',   label: 'Agent Console',   icon: <Terminal      className="w-4 h-4 flex-shrink-0" /> },
-      { path: '/agent-assistant', label: 'Agent Assistant', icon: <MessageSquare className="w-4 h-4 flex-shrink-0" /> },
-      { path: '/self-improve',    label: 'Self-Improve',    icon: <Sparkles      className="w-4 h-4 flex-shrink-0" /> },
-      { path: '/agent-cron',      label: 'Cron',            icon: <Clock         className="w-4 h-4 flex-shrink-0" /> },
+      { path: '/agent-dashboard', label: 'Метрики', icon: <Activity size={16} /> },
+      { path: '/agent-console', label: 'Консоль', icon: <Terminal size={16} /> },
+      { path: '/agent-assistant', label: 'Ассистент', icon: <MessageSquare size={16} /> },
+      { path: '/self-improve', label: 'Self-Improve', icon: <Sparkles size={16} /> },
+      { path: '/agent-cron', label: 'Расписание', icon: <Clock size={16} /> },
     ],
   },
   {
-    label: 'СИСТЕМА',
+    label: 'Система',
     items: [
-      { path: '/users',         label: 'Users',         icon: <Users       className="w-4 h-4 flex-shrink-0" /> },
-      { path: '/settings',      label: 'Settings',      icon: <Settings    className="w-4 h-4 flex-shrink-0" /> },
-      { path: '/admin-console', label: 'Admin Console', icon: <ShieldCheck className="w-4 h-4 flex-shrink-0" /> },
+      { path: '/users', label: 'Пользователи', icon: <Users size={16} /> },
+      { path: '/settings', label: 'Настройки', icon: <Settings size={16} /> },
+      { path: '/admin-console', label: 'Консоль', icon: <ShieldCheck size={16} /> },
     ],
   },
 ];
 
-// ─── Hooks ────────────────────────────────────────────────────────────────────
-
-function usePageMeta(): { title: string; sectionLabel: string } {
-  const { pathname } = useLocation();
-  for (const group of NAV_GROUPS) {
-    for (const item of group.items) {
-      if (item.path === pathname) {
-        return { title: item.label, sectionLabel: group.label };
-      }
-    }
-  }
-  return { title: '', sectionLabel: '' };
-}
-
 // ─── Sidebar ──────────────────────────────────────────────────────────────────
 
-interface SidebarProps {
-  collapsed: boolean;
-  onToggle: () => void;
-}
-
-const Sidebar: React.FC<SidebarProps> = ({ collapsed, onToggle }) => {
+const Sidebar: React.FC<{ collapsed: boolean; onToggle: () => void }> = ({ collapsed, onToggle }) => {
   const { user, logout } = useAuth();
-  const email: string = (user as { email?: string } | null)?.email ?? '';
+  const location = useLocation();
 
   return (
     <aside
-      className="flex flex-col h-full bg-[rgb(var(--bg-card))] border-r border-[rgb(var(--border-subtle))] transition-[width] duration-200 ease-in-out overflow-hidden"
-      style={{ width: collapsed ? '56px' : '220px', minWidth: collapsed ? '56px' : '220px' }}
+      style={{
+        width: collapsed ? 56 : 220,
+        transition: 'width 0.3s cubic-bezier(0.16,1,0.3,1)',
+        background: 'rgba(255,255,255,0.02)',
+        borderRight: '1px solid rgba(255,255,255,0.06)',
+        display: 'flex',
+        flexDirection: 'column',
+        height: '100vh',
+        position: 'sticky',
+        top: 0,
+        flexShrink: 0,
+        overflow: 'hidden',
+        backdropFilter: 'blur(20px)',
+      }}
     >
-      {/* Logo + toggle */}
-      <div className="flex items-center h-14 px-3 border-b border-[rgb(var(--border-subtle))] flex-shrink-0">
-        <div className="flex items-center gap-2.5 flex-1 min-w-0">
-          <div className="w-7 h-7 bg-emerald-500 rounded-lg flex items-center justify-center flex-shrink-0">
-            <Zap className="w-4 h-4 text-white" />
-          </div>
-          {!collapsed && (
-            <span className="text-[rgb(var(--text-primary))] font-semibold text-sm tracking-tight truncate slide-in">
-              PIM
+      {/* Logo */}
+      <div style={{ padding: '20px 14px 16px', display: 'flex', alignItems: 'center', justifyContent: collapsed ? 'center' : 'space-between' }}>
+        {!collapsed && (
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10, overflow: 'hidden' }}>
+            <div style={{
+              width: 28, height: 28, borderRadius: 8, flexShrink: 0,
+              background: 'linear-gradient(135deg, #6366f1, #a855f7)',
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+              boxShadow: '0 0 16px rgba(99,102,241,0.5)',
+            }}>
+              <Zap size={14} color="white" />
+            </div>
+            <span style={{ fontWeight: 700, fontSize: 15, color: 'rgba(255,255,255,0.95)', whiteSpace: 'nowrap', letterSpacing: '-0.02em' }}>
+              PIM<span style={{ background: 'linear-gradient(135deg,#818cf8,#c084fc)', WebkitBackgroundClip: 'text', WebkitTextFillColor: 'transparent' }}>.giper</span>
             </span>
-          )}
-        </div>
-        <button
-          onClick={onToggle}
-          className="flex-shrink-0 w-6 h-6 flex items-center justify-center rounded-md text-[rgb(var(--text-faint))] hover:text-[rgb(var(--text-muted))] hover:bg-[rgb(var(--bg-elevated))] transition-all ml-1"
-          title={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
-        >
-          {collapsed
-            ? <ChevronRight className="w-3.5 h-3.5" />
-            : <ChevronLeft  className="w-3.5 h-3.5" />
-          }
-        </button>
+          </div>
+        )}
+        {collapsed && (
+          <div style={{
+            width: 28, height: 28, borderRadius: 8,
+            background: 'linear-gradient(135deg, #6366f1, #a855f7)',
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            boxShadow: '0 0 16px rgba(99,102,241,0.5)',
+          }}>
+            <Zap size={14} color="white" />
+          </div>
+        )}
+        {!collapsed && (
+          <button
+            onClick={onToggle}
+            style={{ background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(255,255,255,0.08)', borderRadius: 6, padding: 4, cursor: 'pointer', color: 'rgba(255,255,255,0.4)', display: 'flex', transition: 'all 0.2s' }}
+          >
+            <ChevronLeft size={14} />
+          </button>
+        )}
       </div>
 
-      {/* Nav groups */}
-      <nav className="flex-1 overflow-y-auto overflow-x-hidden py-3 space-y-4">
-        {NAV_GROUPS.map((group, groupIndex) => (
-          <div key={group.label}>
-            {collapsed ? (
-              groupIndex > 0 && (
-                <div className="mx-3 mb-2 border-t border-[rgb(var(--border-subtle))]" />
-              )
-            ) : (
-              <p className="px-3 mb-1 text-[10px] font-semibold uppercase tracking-widest text-[rgb(var(--text-faint))]">
+      {collapsed && (
+        <button
+          onClick={onToggle}
+          style={{ margin: '0 auto 12px', background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.08)', borderRadius: 6, padding: '4px', cursor: 'pointer', color: 'rgba(255,255,255,0.35)', display: 'flex' }}
+        >
+          <ChevronRight size={13} />
+        </button>
+      )}
+
+      {/* Nav */}
+      <nav style={{ flex: 1, overflowY: 'auto', overflowX: 'hidden', padding: '0 0 8px' }}>
+        {NAV_GROUPS.map((group) => (
+          <div key={group.label} style={{ marginBottom: 4 }}>
+            {!collapsed && (
+              <div style={{ fontSize: 10, fontWeight: 700, letterSpacing: '0.08em', textTransform: 'uppercase', color: 'rgba(255,255,255,0.2)', padding: '12px 16px 4px' }}>
                 {group.label}
-              </p>
+              </div>
             )}
-            <ul className="space-y-0.5 px-2">
-              {group.items.map((item) => (
-                <li key={item.path}>
-                  <NavLink
-                    to={item.path}
-                    title={collapsed ? item.label : undefined}
-                    className={({ isActive }: { isActive: boolean }) =>
-                      [
-                        'flex items-center gap-2.5 rounded-lg text-sm font-medium transition-all duration-150',
-                        collapsed ? 'justify-center px-0 py-2' : 'px-2.5 py-2',
-                        isActive
-                          ? 'bg-[rgb(var(--accent))]/10 text-[rgb(var(--accent))] border-l-2 border-[rgb(var(--accent))]'
-                          : 'text-[rgb(var(--text-muted))] hover:text-[rgb(var(--text-primary))] hover:bg-[rgb(var(--bg-elevated))]',
-                      ].join(' ')
-                    }
-                  >
-                    {item.icon}
-                    {!collapsed && (
-                      <span className="truncate">{item.label}</span>
-                    )}
-                  </NavLink>
-                </li>
-              ))}
-            </ul>
+            {collapsed && <div style={{ height: 1, background: 'rgba(255,255,255,0.04)', margin: '6px 8px' }} />}
+            {group.items.map((item) => {
+              const active = location.pathname.startsWith(item.path);
+              return (
+                <NavLink
+                  key={item.path}
+                  to={item.path}
+                  title={collapsed ? item.label : undefined}
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: collapsed ? 0 : 10,
+                    padding: collapsed ? '9px 0' : '8px 16px',
+                    justifyContent: collapsed ? 'center' : 'flex-start',
+                    textDecoration: 'none',
+                    fontSize: 13,
+                    fontWeight: active ? 600 : 400,
+                    color: active ? '#818cf8' : 'rgba(255,255,255,0.45)',
+                    background: active ? 'rgba(99,102,241,0.1)' : 'transparent',
+                    borderLeft: active ? '2px solid #6366f1' : '2px solid transparent',
+                    transition: 'all 0.18s',
+                    whiteSpace: 'nowrap',
+                    overflow: 'hidden',
+                    boxShadow: active ? 'inset 4px 0 12px rgba(99,102,241,0.08)' : 'none',
+                  }}
+                >
+                  <span style={{ flexShrink: 0, opacity: active ? 1 : 0.7 }}>{item.icon}</span>
+                  {!collapsed && <span style={{ overflow: 'hidden', textOverflow: 'ellipsis' }}>{item.label}</span>}
+                </NavLink>
+              );
+            })}
           </div>
         ))}
       </nav>
 
-      {/* User info + logout */}
-      <div className="flex-shrink-0 border-t border-[rgb(var(--border-subtle))] p-2">
-        {!collapsed ? (
-          <div className="flex items-center gap-2 px-2 py-2 rounded-lg hover:bg-[rgb(var(--bg-elevated))] transition-all group">
-            <div className="w-7 h-7 rounded-full bg-[rgb(var(--accent))]/20 flex items-center justify-center flex-shrink-0 text-[rgb(var(--accent))] text-xs font-semibold">
-              {email.charAt(0).toUpperCase() || 'U'}
-            </div>
-            <span className="flex-1 text-xs text-[rgb(var(--text-muted))] truncate min-w-0">
-              {email || 'user'}
-            </span>
-            <button
-              onClick={logout}
-              className="opacity-0 group-hover:opacity-100 text-[rgb(var(--text-faint))] hover:text-red-400 transition-all flex-shrink-0"
-              title="Выйти"
-            >
-              <LogOut className="w-3.5 h-3.5" />
-            </button>
-          </div>
-        ) : (
+      {/* User */}
+      <div style={{ borderTop: '1px solid rgba(255,255,255,0.05)', padding: collapsed ? '12px 0' : '12px 12px' }}>
+        {collapsed ? (
           <button
             onClick={logout}
-            className="w-full flex items-center justify-center py-2 rounded-lg text-[rgb(var(--text-faint))] hover:text-red-400 hover:bg-[rgb(var(--bg-elevated))] transition-all"
             title="Выйти"
+            style={{ width: '100%', display: 'flex', justifyContent: 'center', background: 'none', border: 'none', cursor: 'pointer', color: 'rgba(255,255,255,0.3)', padding: '6px 0' }}
           >
-            <LogOut className="w-4 h-4" />
+            <LogOut size={15} />
           </button>
+        ) : (
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+            <div style={{ width: 28, height: 28, borderRadius: '50%', background: 'linear-gradient(135deg,#6366f1,#a855f7)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 11, fontWeight: 700, color: 'white', flexShrink: 0 }}>
+              {(user?.email?.[0] ?? 'U').toUpperCase()}
+            </div>
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div style={{ fontSize: 12, fontWeight: 500, color: 'rgba(255,255,255,0.8)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{user?.email ?? 'User'}</div>
+              <div style={{ fontSize: 10, color: 'rgba(255,255,255,0.3)' }}>{(user as any)?.role ?? 'admin'}</div>
+            </div>
+            <button onClick={logout} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'rgba(255,255,255,0.25)', display: 'flex', padding: 4, borderRadius: 6, transition: 'all 0.2s' }}>
+              <LogOut size={14} />
+            </button>
+          </div>
         )}
       </div>
     </aside>
   );
 };
 
-// ─── Top header bar ───────────────────────────────────────────────────────────
+// ─── Top Header ───────────────────────────────────────────────────────────────
 
 const TopHeader: React.FC = () => {
-  const { user } = useAuth();
-  const { title, sectionLabel } = usePageMeta();
-  const email: string = (user as { email?: string } | null)?.email ?? '';
+  const location = useLocation();
+  const allItems = NAV_GROUPS.flatMap(g => g.items.map(i => ({ ...i, group: g.label })));
+  const current = allItems.find(i => location.pathname.startsWith(i.path));
 
   return (
-    <header className="h-14 flex items-center justify-between px-5 border-b border-[rgb(var(--border-subtle))] bg-[rgb(var(--bg-card))] flex-shrink-0">
-      {/* Breadcrumb */}
-      <div className="flex items-center gap-1.5 text-sm">
-        <span className="text-[rgb(var(--text-faint))]">PIM</span>
-        {sectionLabel && (
-          <>
-            <ChevronRight className="w-3.5 h-3.5 text-[rgb(var(--text-faint))]" />
-            <span className="text-[rgb(var(--text-faint))]">{sectionLabel}</span>
-          </>
-        )}
-        {title && (
-          <>
-            <ChevronRight className="w-3.5 h-3.5 text-[rgb(var(--text-faint))]" />
-            <span className="text-[rgb(var(--text-primary))] font-medium">{title}</span>
-          </>
-        )}
+    <header style={{
+      height: 52,
+      borderBottom: '1px solid rgba(255,255,255,0.05)',
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'space-between',
+      padding: '0 24px',
+      background: 'rgba(255,255,255,0.01)',
+      backdropFilter: 'blur(20px)',
+      flexShrink: 0,
+      position: 'sticky',
+      top: 0,
+      zIndex: 10,
+    }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+        <span style={{ fontSize: 12, color: 'rgba(255,255,255,0.2)' }}>PIM</span>
+        {current && <>
+          <span style={{ fontSize: 12, color: 'rgba(255,255,255,0.1)' }}>/</span>
+          <span style={{ fontSize: 12, color: 'rgba(255,255,255,0.2)' }}>{current.group}</span>
+          <span style={{ fontSize: 12, color: 'rgba(255,255,255,0.1)' }}>/</span>
+          <span style={{ fontSize: 12, fontWeight: 600, color: 'rgba(255,255,255,0.7)' }}>{current.label}</span>
+        </>}
       </div>
-
-      {/* Right side */}
-      <div className="flex items-center gap-2">
-        <button
-          className="w-8 h-8 flex items-center justify-center rounded-lg text-[rgb(var(--text-muted))] hover:text-[rgb(var(--text-primary))] hover:bg-[rgb(var(--bg-elevated))] transition-all relative"
-          title="Уведомления"
-        >
-          <Bell className="w-4 h-4" />
-          <span className="absolute top-1.5 right-1.5 w-1.5 h-1.5 rounded-full bg-[rgb(var(--accent))]" />
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+        <button style={{ background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.07)', borderRadius: 8, padding: '6px 12px', color: 'rgba(255,255,255,0.3)', fontSize: 12, cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 6 }}>
+          <Search size={13} /> Поиск...
+          <span style={{ fontSize: 10, background: 'rgba(255,255,255,0.05)', padding: '1px 5px', borderRadius: 4, color: 'rgba(255,255,255,0.2)' }}>⌘K</span>
         </button>
-        <div className="w-7 h-7 rounded-full bg-[rgb(var(--accent))]/20 flex items-center justify-center text-[rgb(var(--accent))] text-xs font-semibold flex-shrink-0">
-          {email.charAt(0).toUpperCase() || 'U'}
-        </div>
+        <button style={{ background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.07)', borderRadius: 8, padding: 7, cursor: 'pointer', color: 'rgba(255,255,255,0.35)', display: 'flex', position: 'relative' }}>
+          <Bell size={15} />
+          <span style={{ position: 'absolute', top: 5, right: 5, width: 6, height: 6, borderRadius: '50%', background: '#6366f1', border: '1px solid #03030a' }} />
+        </button>
       </div>
     </header>
   );
 };
 
-// ─── App shell (authenticated layout) ────────────────────────────────────────
-
-const STORAGE_KEY = 'pim_sidebar_collapsed';
+// ─── Shell ────────────────────────────────────────────────────────────────────
 
 const AppShell: React.FC = () => {
-  const [collapsed, setCollapsed] = useState<boolean>(() => {
-    try {
-      return localStorage.getItem(STORAGE_KEY) === 'true';
-    } catch {
-      return false;
-    }
-  });
-
-  const toggle = useCallback(() => {
-    setCollapsed((prev) => {
-      const next = !prev;
-      try { localStorage.setItem(STORAGE_KEY, String(next)); } catch { /* noop */ }
-      return next;
-    });
-  }, []);
+  const [collapsed, setCollapsed] = useState(() => localStorage.getItem('pim_sb') === '1');
+  const toggle = useCallback(() => setCollapsed(v => { localStorage.setItem('pim_sb', v ? '0' : '1'); return !v; }), []);
 
   return (
-    <div className="flex h-screen overflow-hidden bg-[rgb(var(--bg-base))]">
+    <div style={{ display: 'flex', height: '100vh', background: 'var(--bg-void)', overflow: 'hidden' }}>
       <Sidebar collapsed={collapsed} onToggle={toggle} />
-      <div className="flex flex-col flex-1 min-w-0 overflow-hidden">
+      <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden', minWidth: 0 }}>
         <TopHeader />
-        <main className="flex-1 overflow-y-auto bg-[rgb(var(--bg-base))]">
+        <main style={{ flex: 1, overflowY: 'auto', padding: 28 }}>
           <Routes>
             <Route index element={<Navigate to="/dashboard" replace />} />
             <Route path="/dashboard"       element={<DashboardPage />} />
             <Route path="/products"        element={<ProductsPage />} />
-            <Route path="/products/:id"     element={<ProductDetailsPage />} />
+            <Route path="/products/:id"    element={<ProductDetailsPage />} />
             <Route path="/attributes"      element={<AttributesPage />} />
             <Route path="/syndication"     element={<SyndicationPage />} />
             <Route path="/integrations"    element={<IntegrationsPage />} />
@@ -314,7 +277,7 @@ const AppShell: React.FC = () => {
             <Route path="/agent-console"   element={<AgentTaskConsolePage />} />
             <Route path="/agent-assistant" element={<AgentAssistantPage />} />
             <Route path="/self-improve"    element={<SelfImproveConsolePage />} />
-            <Route path="/agent-cron"      element={<PlaceholderPage title="Cron" />} />
+            <Route path="/agent-cron"      element={<div style={{padding:40,color:'rgba(255,255,255,0.3)',textAlign:'center'}}>Cron — coming soon</div>} />
             <Route path="/users"           element={<UsersPage />} />
             <Route path="/settings"        element={<SettingsPage />} />
             <Route path="/admin-console"   element={<AdminDialogConsolePage />} />
@@ -326,23 +289,22 @@ const AppShell: React.FC = () => {
   );
 };
 
-// ─── Root App ─────────────────────────────────────────────────────────────────
+// ─── Root ─────────────────────────────────────────────────────────────────────
 
 const App: React.FC = () => {
-  const { user, isAuthenticated } = useAuth();
-
+  const { user } = useAuth();
   return (
     <BrowserRouter>
       <Routes>
         {!user ? (
           <>
             <Route path="/login" element={<LoginPage />} />
-            <Route path="*"     element={<Navigate to="/login" replace />} />
+            <Route path="*" element={<Navigate to="/login" replace />} />
           </>
         ) : (
           <>
             <Route path="/login" element={<Navigate to="/dashboard" replace />} />
-            <Route path="/*"    element={<AppShell />} />
+            <Route path="/*" element={<AppShell />} />
           </>
         )}
       </Routes>
@@ -350,9 +312,10 @@ const App: React.FC = () => {
   );
 };
 
-const AppWithToast: React.FC = () => (
+const Root: React.FC = () => (
   <ToastProvider>
     <App />
   </ToastProvider>
 );
-export default AppWithToast;
+
+export default Root;

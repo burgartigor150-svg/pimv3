@@ -544,6 +544,9 @@ async def generate_product_promo(
     db: AsyncSession = Depends(get_db),
     ai_key: str = Depends(get_deepseek_key),
     current_user: models.User = Depends(get_current_user)
+s.User = Depends(get_current_user),
+):
+    return set_task_control_state(task_id, "resumed")
 ):
     product_res = await db.execute(select(models.Product).where(models.Product.id == req.product_id))
     product = product_res.scalars().first()
@@ -1055,6 +1058,10 @@ async def agent_task_metrics(
         "task_id": task_id,
         "status": task_info["task"].get("status", "unknown"),
         "title": task_info["task"].get("title", ""),
+        "kpis": kpis,
+        "logs": logs,
+        "events": events
+    }
         "kpis": kpis,
         "events_count": len(events),
         "recent_events": events[-10:],  # Последние 10 событий
