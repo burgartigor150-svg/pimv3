@@ -1131,6 +1131,27 @@ async def agent_task_checkpoint(task_id: str):
     return resume_from_checkpoint(task_id)
 
 
+@app.get("/api/v1/agent/tasks/{task_id}/pipeline")
+async def agent_task_pipeline_status(task_id: str):
+    """Получить статус multi-agent pipeline задачи."""
+    import redis as _rl
+    r = _rl.Redis.from_url(os.getenv("REDIS_URL", "redis://localhost:6379/0"), decode_responses=True)
+    try:
+        raw = r.hgetall(f"agent_task:{task_id}") or {}
+        return {
+            "ok": True,
+            "task_id": task_id,
+            "pipeline_stage": raw.get("pipeline_stage", "not_started"),
+            "pipeline_progress": raw.get("pipeline_progress", "0"),
+            "pipeline_analysis": json.loads(raw.get("pipeline_analysis", "null") or "null"),
+            "status": raw.get("status", "unknown"),
+        }
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+    finally:
+        r.close()
+
+
 @app.get("/api/v1/agent/tasks/{task_id}/stream")
 async def agent_task_stream(task_id: str):
     """SSE stream событий ReAct-агента для задачи."""
