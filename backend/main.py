@@ -175,6 +175,47 @@ async def system_status():
         status["details"]["celery_error"] = str(e)
     
     return status
+
+
+@app.get("/api/v1/migrations/status")
+async def get_migration_status(current_user: models.User = Depends(get_current_user)):
+    """Возвращает текущий статус миграций Alembic (текущая ревизия)."""
+    import subprocess
+    import os
+    
+    # Определяем путь к alembic.ini (предполагаем, что он в корне бэкенда)
+    backend_dir = os.path.dirname(os.path.abspath(__file__))
+    alembic_ini_path = os.path.join(backend_dir, "alembic.ini")
+    
+    try:
+        # Выполняем команду alembic current для получения текущей ревизии
+        result = subprocess.run(
+            ["alembic", "-c", alembic_ini_path, "current", "--verbose"],
+            capture_output=True,
+            text=True,
+            cwd=backend_dir,
+            timeout=10
+        )
+        if result.returncode == 0:
+            output = result.stdout.strip()
+            if output:
+                return {
+                    "status": "ok",
+                    "current_revision": output.split(" ")[0] if " " in output else output,
+                    "details": output
+                }
+            else:
+                return {"status": "ok", "current_revision": "None", "details": "No migrations applied."}
+        else:
+            error_msg = result.stderr.strip() or result.stdout.strip()
+            return {
+                "status": "error",
+                "error": f"Alembic command failed: {error_msg}"
+            }
+    except subprocess.TimeoutExpired:
+        return {"status": "error", "error": "Alembic command timed out."}
+    except Exception as e:
+        return {"status": "error", "error": str(e)}
     """Проверка работоспособности backend."""
     return {"status": "ok", "service": "pimv3-backend", "timestamp": time.time()}
 
