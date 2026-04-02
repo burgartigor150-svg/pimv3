@@ -1479,15 +1479,13 @@ async def agent_task_create(
         task_type=req.task_type,
         title=req.title,
         description=req.description,
-        context=getattr(req, 'context', None),
-        user_id=current_user.id,
         requested_by=current_user.email,
         namespace=getattr(req, 'namespace', None),
         docs_urls=getattr(req, 'docs_urls', None),
         local_paths=getattr(req, 'local_paths', None),
         validation_query=getattr(req, 'validation_query', None),
         web_query=getattr(req, 'web_query', None),
-        max_web_results=getattr(req, 'max_web_results', None)
+        max_web_results=getattr(req, 'max_web_results', None) or 5,
     )
     task_id = (created.get("task") or {}).get("task_id") or ""
     if task_id:
