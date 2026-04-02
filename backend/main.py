@@ -228,6 +228,22 @@ async def iteration_4_ready():
 
 @app.get("/api/v1/iteration-4-status")
 async def iteration_4_status():
+
+@app.get("/api/v1/iteration-4/dev-status")
+async def iteration_4_dev_status():
+    """Development status endpoint for iteration 4 to confirm backend can handle requests without timeouts."""
+    return {
+        "iteration": 4,
+        "status": "developing",
+        "timestamp": time.time(),
+        "message": "Backend is actively being developed for iteration 4 tasks.",
+        "features": [
+            "Health checks operational",
+            "AI service integrations",
+            "Task automation"
+        ],
+        "notes": "Lightweight endpoint added to prevent timeouts."
+    }
     """Endpoint for iteration 4 to confirm backend is running and ready for new tasks."""
     return {
         "iteration": 4,
@@ -980,8 +996,7 @@ async def ai_chat(req: schemas.ChatRequest, db: AsyncSession = Depends(get_db), 
         raise HTTPException(status_code=504, detail="LLM chat request timed out after 30 seconds")
     return {"reply": reply}
 
-@app.get("/api/v1/iteration-3/health")
-async def iteration_3_health():
+
 
 @app.get("/api/v1/iteration-3/dev-status")
 async def iteration_3_dev_status():
