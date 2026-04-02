@@ -214,8 +214,7 @@ async def get_migration_status(current_user: models.User = Depends(get_current_u
         return {"status": "error", "error": "Alembic command timed out."}
     except Exception as e:
         return {"status": "error", "error": str(e)}
-    """Проверка работоспособности backend."""
-    return {"status": "ok", "service": "pimv3-backend", "timestamp": time.time()}
+
 
 @app.get("/api/v1/version")
 async def get_version():
@@ -232,8 +231,6 @@ async def get_uptime():
         return {"uptime_seconds": 0, "message": "Start time not recorded"}
     uptime = time.time() - start_time
     return {"uptime_seconds": uptime, "uptime_human": str(timedelta(seconds=int(uptime)))}
-    """Возвращает текущую версию бэкенда для мониторинга."""
-    return {"version": "1.0.0", "service": "pimv3-backend", "timestamp": time.time()}
 
 app.add_middleware(
     CORSMiddleware,
@@ -1051,7 +1048,7 @@ async def agent_task_get(
     task_id: str,
     current_user: models.User = Depends(get_current_user),
 ):
-    return get_agent_task(task_id)ask_id)
+    return get_agent_task(task_id)
 
 
 @app.get("/api/v1/agent-tasks")
@@ -1068,17 +1065,18 @@ async def get_agent_tasks(
 
 @app.get("/api/v1/agent-tasks/context7-connected")
 async def agent_context7_connected(current_user: models.User = Depends(get_current_user)):
-    """Возвращает статус подключения к MCP серверу context7."""
-    return context7_is_connected()services.agent_task_console import context7_is_connected
-    return {"connected": context7_is_connected()}_is_connected()}_is_connected()}татус подключения к MCP-серверу context7 для документации."""
-"""Возвращает статус подключения к Context7 MCP серверу."""
+    """Возвращает статус подключения к Context7 MCP серверу для документации."""
+    from backend.services.agent_task_console import context7_is_connected
     connected = context7_is_connected()
-    return {"connected": connected}
+    return {"connected": connected}rn {"connected": connected}
     return {"connected": context7_is_connected()}
 
 
 @app.get("/api/v1/agent-tasks/{task_id}/metrics")
-async def agent_task_metrics(
+async def get_agent_task_metrics(task_id: str, current_user: models.User = Depends(get_current_user)):
+    """Возвращает метрики для агентской задачи."""
+    from backend.services.agent_task_console import get_agent_task_metrics as _get_metrics
+    return _get_metrics(task_id)ync def agent_task_metrics(
     task_id: str,
     current_user: models.User = Depends(get_current_user)
 ):
