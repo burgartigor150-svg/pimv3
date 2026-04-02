@@ -839,7 +839,7 @@ async def create_connection(conn: schemas.MarketplaceConnectionCreate, db: Async
     return db_conn
 
 @app.patch("/api/v1/connections/{connection_id}", response_model=schemas.MarketplaceConnection)
-async def update_connection(connection_id: uuid.UUID, conn: schemas.MarketplaceConnectionUpdate, db: AsyncSession = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+async def update_connection(connection_id: uuid.UUID, conn: schemas.MarketplaceConnectionCreate, db: AsyncSession = Depends(get_db), current_user: models.User = Depends(get_current_user)):
     """Обновляет существующее подключение к маркетплейсу."""
     result = await db.execute(select(models.MarketplaceConnection).where(models.MarketplaceConnection.id == connection_id))
     db_conn = result.scalars().first()
@@ -1094,7 +1094,6 @@ async def ai_chat(req: schemas.ChatRequest, db: AsyncSession = Depends(get_db), 
     return {"reply": reply}
 @app.get("/api/v1/stats")
 async def get_stats(db: AsyncSession = Depends(get_db), current_user: models.User = Depends(get_current_user)):
-t_user: models.User = Depends(get_current_user)):
     """Возвращает статистику продуктов и атрибутов."""
     from sqlalchemy import func
     product_count = await db.scalar(select(func.count()).select_from(models.Product))
@@ -1504,6 +1503,7 @@ async def agent_task_create(
 
 
 
+@app.get("/api/v1/agent-tasks")
 async def get_agent_tasks(
     skip: int = 0,
     limit: int = 100,
@@ -1511,7 +1511,7 @@ async def get_agent_tasks(
 ):
     """Возвращает список агентских задач с пагинацией."""
     from backend.services.agent_task_console import list_agent_tasks
-    result = list_agent_tasks(skip=skip, limit=limit)
+    result = list_agent_tasks(limit=limit)
     return result
 
 

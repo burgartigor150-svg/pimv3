@@ -16,192 +16,10 @@ import logging
 import os
 import re
 from difflib import SequenceMatcher
+from abc import ABC, abstractmethod
 from typing import Dict, Any, Optional, List
 
 
-class YandexMarketAdapter(BaseAdapter):
-    """Адаптер для интеграции с API Яндекс.Маркет."""
-    
-    def __init__(self, api_key: str, client_id: str, store_id: str, warehouse_id: Optional[str] = None):
-        self.api_key = api_key
-        self.client_id = client_id
-        self.store_id = store_id
-        self.warehouse_id = warehouse_id
-        self.base_url = "https://api.partner.market.yandex.ru"
-    
-    async def test_connection(self) -> Dict[str, Any]:
-        """Тестирует подключение к API Яндекс.Маркет, запрашивая информацию о магазине."""
-        import httpx
-        headers = {
-            "Authorization": f"OAuth {self.api_key}",
-            "Client-Id": self.client_id
-        }
-        try:
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                # Пример запроса для проверки подключения: получение информации о кампаниях
-                response = await client.get(f"{self.base_url}/campaigns", headers=headers)
-                response.raise_for_status()
-                data = response.json()
-                return {"status": "success", "campaigns": data.get("campaigns", [])}
-        except Exception as e:
-            raise Exception(f"Ошибка подключения к Яндекс.Маркет: {str(e)}")
-    
-    async def pull_product(self, query: str) -> Dict[str, Any]:
-        """Получает данные товара по артикулу или запросу."""
-        # Заглушка для первой итерации: вернуть пример данных
-        return {
-            "name": "Пример товара из Яндекс.Маркет",
-            "title": "Товар по запросу: " + query,
-            "attributes": {},
-            "images": []
-        }
-from abc import ABC, abstractmethod
-from urllib.parse import urlparse
-
-_log = logging.getLogger("pim.adapters")
-
-
-# Частый сбой: WAF отдаёт HTML 403 на User-Agent вида python-httpx/… (другой проект может ходить через requests/curl).
-_MM_DEFAULT_UA = (
-    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) "
-    "Chrome/131.0.0.0 Safari/537.36"
-)
-
-
-def megamarket_httpx_client(timeout: float = 60.0) -> httpx.AsyncClient:
-    """Клиент для partner.megamarket.ru. Заголовки только на каждый запрос (без дубля User-Agent)."""
-    proxy = (
-        os.getenv("MEGAMARKET_HTTPS_PROXY", "").strip()
-        or os.getenv("MEGAMARKET_HTTP_PROXY", "").strip()
-        or os.getenv("HTTPS_PROXY", "").strip()
-        or os.getenv("HTTP_PROXY", "").strip()
-    )
-    return httpx.AsyncClient(timeout=timeout, proxy=proxy or None)
-
-
-def megamarket_request_headers(token: str, *, for_post: bool = False) -> Dict[str, str]:
-    """Общие заголовки для вызовов MM (token = X-Merchant-Token)."""
-    ua = os.getenv("MEGAMARKET_USER_AGENT", "").strip() or _MM_DEFAULT_UA
-    h: Dict[str, str] = {
-        "X-Merchant-Token": token,
-        "Content-Type": "application/json",
-        "User-Agent": ua,
-        "Accept": "application/json, text/plain, */*",
-        "Accept-Language": "ru-RU,ru;q=0.9,en;q=0.8",
-    }
-    if for_post:
-        h["Origin"] = "https://partner.megamarket.ru"
-        h["Referer"] = "https://partner.megamarket.ru/"
-    return h
-
-
-def _mm_unwrap_pim_proxy_photo_url(p_str: str) -> str:
-    """В mapped_payload иногда лежит .../api/v1/media/proxy/<b64> с localhost — для MM нужен исходный https URL."""
-    marker = "/api/v1/media/proxy/"
-    if marker not in p_str:
-        return p_str
-    try:
-        tail = p_str.split(marker, 1)[1].split("?", 1)[0]
-        raw = base64.urlsafe_b64decode(tail.encode()).decode()
-        if raw.startswith("http"):
-            return raw
-    except Exception:
-        pass
-    return p_str
-
-
-def _mm_public_base_ok_for_proxy_in_json() -> bool:
-    """
-    В теле card/save нельзя отдавать URL с 127.0.0.1 / private IP — у Мегамаркета WAF часто даёт HTML 403 на такой POST.
-    Прокси PIM к Ozon подставляем только если PUBLIC_API_BASE_URL — публичный https-хост.
-    """
-    raw = os.getenv("PUBLIC_API_BASE_URL", "").strip().rstrip("/")
-    if not raw:
-        return False
-    p = urlparse(raw)
-    if (p.scheme or "").lower() != "https":
-        return False
-    host = (p.hostname or "").lower()
-    if host in ("localhost", "127.0.0.1", "::1"):
-        return False
-    try:
-        ip = ipaddress.ip_address(host)
-        if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved:
-            return False
-    except ValueError:
-        pass
-    return True
-
-
-def format_megamarket_error_message(status_code: int, body: str, max_plain: int = 320) -> str:
-    b = (body or "").strip()
-    if not b:
-        return f"пустой ответ (HTTP {status_code})"
-    low = b.lower()
-    if b.startswith("<") or "<html" in low:
-        if status_code == 403 or "forbidden" in low:
-            return "HTTP 403 HTML (WAF/edge); проверьте токен и merchantId в подключении."
-        return f"HTTP {status_code} HTML: {b[:80]}…"
-    return b[:max_plain]
-
-
-def _normalize_ozon_probe(value: Any) -> str:
-    text = str(value or "").strip().lower().replace("ё", "е")
-    return re.sub(r"\s+", " ", text)
-
-
-def _ozon_pick_dictionary_match(user_text: str, entries: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
-    probe = _normalize_ozon_probe(user_text)
-    if not probe:
-        return None
-    best_score = 0.0
-    best: Optional[Dict[str, Any]] = None
-    for e in entries:
-        if not isinstance(e, dict):
-            continue
-        val = str(e.get("value") or e.get("name") or "").strip()
-        if not val:
-            continue
-        cand = _normalize_ozon_probe(val)
-        if not cand:
-            continue
-        seq = SequenceMatcher(None, probe, cand).ratio()
-        if probe in cand or cand in probe:
-            seq = max(seq, 0.82)
-        probe_tokens = set(probe.replace("/", " ").split())
-        cand_tokens = set(cand.replace("/", " ").split())
-        token_score = (
-            len(probe_tokens & cand_tokens) / max(len(probe_tokens), len(cand_tokens))
-            if probe_tokens and cand_tokens
-            else 0.0
-        )
-        score = seq * 0.7 + token_score * 0.3
-        if score > best_score:
-            best_score = score
-            try:
-                eid = e.get("id")
-                if eid is None:
-                    continue
-                best = {"dictionary_value_id": int(eid), "value": val}
-            except (TypeError, ValueError):
-                continue
-    if best and best_score >= 0.48:
-        return best
-    return None
-
-
-def _ozon_product_info_items(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
-    if not isinstance(payload, dict):
-        return []
-    res = payload.get("result")
-    if isinstance(res, dict):
-        items = res.get("items")
-        if isinstance(items, list):
-            return [x for x in items if isinstance(x, dict)]
-    items = payload.get("items")
-    if isinstance(items, list):
-        return [x for x in items if isinstance(x, dict)]
-    return []
 
 
 class MarketplaceAdapter(ABC):
@@ -2240,3 +2058,188 @@ def get_adapter(
         return MegamarketAdapter(api_key, client_id, store_id, warehouse_id)
     else:
         raise ValueError(f"Unknown connection type: {connection_type}")
+
+
+class YandexMarketAdapter(MarketplaceAdapter):
+    """Адаптер для интеграции с API Яндекс.Маркет."""
+    
+    def __init__(self, api_key: str, client_id: str, store_id: str, warehouse_id: Optional[str] = None):
+        self.api_key = api_key
+        self.client_id = client_id
+        self.store_id = store_id
+        self.warehouse_id = warehouse_id
+        self.base_url = "https://api.partner.market.yandex.ru"
+    
+    async def test_connection(self) -> Dict[str, Any]:
+        """Тестирует подключение к API Яндекс.Маркет, запрашивая информацию о магазине."""
+        import httpx
+        headers = {
+            "Authorization": f"OAuth {self.api_key}",
+            "Client-Id": self.client_id
+        }
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                # Пример запроса для проверки подключения: получение информации о кампаниях
+                response = await client.get(f"{self.base_url}/campaigns", headers=headers)
+                response.raise_for_status()
+                data = response.json()
+                return {"status": "success", "campaigns": data.get("campaigns", [])}
+        except Exception as e:
+            raise Exception(f"Ошибка подключения к Яндекс.Маркет: {str(e)}")
+    
+    async def pull_product(self, query: str) -> Dict[str, Any]:
+        """Получает данные товара по артикулу или запросу."""
+        # Заглушка для первой итерации: вернуть пример данных
+        return {
+            "name": "Пример товара из Яндекс.Маркет",
+            "title": "Товар по запросу: " + query,
+            "attributes": {},
+            "images": []
+        }
+from abc import ABC, abstractmethod
+from urllib.parse import urlparse
+
+_log = logging.getLogger("pim.adapters")
+
+
+# Частый сбой: WAF отдаёт HTML 403 на User-Agent вида python-httpx/… (другой проект может ходить через requests/curl).
+_MM_DEFAULT_UA = (
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/131.0.0.0 Safari/537.36"
+)
+
+
+def megamarket_httpx_client(timeout: float = 60.0) -> httpx.AsyncClient:
+    """Клиент для partner.megamarket.ru. Заголовки только на каждый запрос (без дубля User-Agent)."""
+    proxy = (
+        os.getenv("MEGAMARKET_HTTPS_PROXY", "").strip()
+        or os.getenv("MEGAMARKET_HTTP_PROXY", "").strip()
+        or os.getenv("HTTPS_PROXY", "").strip()
+        or os.getenv("HTTP_PROXY", "").strip()
+    )
+    return httpx.AsyncClient(timeout=timeout, proxy=proxy or None)
+
+
+def megamarket_request_headers(token: str, *, for_post: bool = False) -> Dict[str, str]:
+    """Общие заголовки для вызовов MM (token = X-Merchant-Token)."""
+    ua = os.getenv("MEGAMARKET_USER_AGENT", "").strip() or _MM_DEFAULT_UA
+    h: Dict[str, str] = {
+        "X-Merchant-Token": token,
+        "Content-Type": "application/json",
+        "User-Agent": ua,
+        "Accept": "application/json, text/plain, */*",
+        "Accept-Language": "ru-RU,ru;q=0.9,en;q=0.8",
+    }
+    if for_post:
+        h["Origin"] = "https://partner.megamarket.ru"
+        h["Referer"] = "https://partner.megamarket.ru/"
+    return h
+
+
+def _mm_unwrap_pim_proxy_photo_url(p_str: str) -> str:
+    """В mapped_payload иногда лежит .../api/v1/media/proxy/<b64> с localhost — для MM нужен исходный https URL."""
+    marker = "/api/v1/media/proxy/"
+    if marker not in p_str:
+        return p_str
+    try:
+        tail = p_str.split(marker, 1)[1].split("?", 1)[0]
+        raw = base64.urlsafe_b64decode(tail.encode()).decode()
+        if raw.startswith("http"):
+            return raw
+    except Exception:
+        pass
+    return p_str
+
+
+def _mm_public_base_ok_for_proxy_in_json() -> bool:
+    """
+    В теле card/save нельзя отдавать URL с 127.0.0.1 / private IP — у Мегамаркета WAF часто даёт HTML 403 на такой POST.
+    Прокси PIM к Ozon подставляем только если PUBLIC_API_BASE_URL — публичный https-хост.
+    """
+    raw = os.getenv("PUBLIC_API_BASE_URL", "").strip().rstrip("/")
+    if not raw:
+        return False
+    p = urlparse(raw)
+    if (p.scheme or "").lower() != "https":
+        return False
+    host = (p.hostname or "").lower()
+    if host in ("localhost", "127.0.0.1", "::1"):
+        return False
+    try:
+        ip = ipaddress.ip_address(host)
+        if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved:
+            return False
+    except ValueError:
+        pass
+    return True
+
+
+def format_megamarket_error_message(status_code: int, body: str, max_plain: int = 320) -> str:
+    b = (body or "").strip()
+    if not b:
+        return f"пустой ответ (HTTP {status_code})"
+    low = b.lower()
+    if b.startswith("<") or "<html" in low:
+        if status_code == 403 or "forbidden" in low:
+            return "HTTP 403 HTML (WAF/edge); проверьте токен и merchantId в подключении."
+        return f"HTTP {status_code} HTML: {b[:80]}…"
+    return b[:max_plain]
+
+
+def _normalize_ozon_probe(value: Any) -> str:
+    text = str(value or "").strip().lower().replace("ё", "е")
+    return re.sub(r"\s+", " ", text)
+
+
+def _ozon_pick_dictionary_match(user_text: str, entries: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    probe = _normalize_ozon_probe(user_text)
+    if not probe:
+        return None
+    best_score = 0.0
+    best: Optional[Dict[str, Any]] = None
+    for e in entries:
+        if not isinstance(e, dict):
+            continue
+        val = str(e.get("value") or e.get("name") or "").strip()
+        if not val:
+            continue
+        cand = _normalize_ozon_probe(val)
+        if not cand:
+            continue
+        seq = SequenceMatcher(None, probe, cand).ratio()
+        if probe in cand or cand in probe:
+            seq = max(seq, 0.82)
+        probe_tokens = set(probe.replace("/", " ").split())
+        cand_tokens = set(cand.replace("/", " ").split())
+        token_score = (
+            len(probe_tokens & cand_tokens) / max(len(probe_tokens), len(cand_tokens))
+            if probe_tokens and cand_tokens
+            else 0.0
+        )
+        score = seq * 0.7 + token_score * 0.3
+        if score > best_score:
+            best_score = score
+            try:
+                eid = e.get("id")
+                if eid is None:
+                    continue
+                best = {"dictionary_value_id": int(eid), "value": val}
+            except (TypeError, ValueError):
+                continue
+    if best and best_score >= 0.48:
+        return best
+    return None
+
+
+def _ozon_product_info_items(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
+    if not isinstance(payload, dict):
+        return []
+    res = payload.get("result")
+    if isinstance(res, dict):
+        items = res.get("items")
+        if isinstance(items, list):
+            return [x for x in items if isinstance(x, dict)]
+    items = payload.get("items")
+    if isinstance(items, list):
+        return [x for x in items if isinstance(x, dict)]
+    return []
