@@ -267,7 +267,11 @@ async def iteration_3_ready():
         "endpoints": [
             "/api/v1/health",
             "/api/v1/iteration-3-status",
-            "/api/v1/iteration-3-ready"
+            "/api/v1/iteration-3-ready",
+            "/api/v1/iteration-3/health",
+            "/api/v1/iteration-3/dev-status"
+        ]
+    }pi/v1/iteration-3-ready"
         ]
     }
 
@@ -348,6 +352,23 @@ async def iteration_5_ready():
 
 @app.get("/api/v1/iteration-5/health")
 async def iteration_5_health():
+
+
+@app.get("/api/v1/iteration-5/dev-status")
+async def iteration_5_dev_status():
+    """Development status endpoint for iteration 5 to confirm backend can handle requests without timeouts."""
+    return {
+        "iteration": 5,
+        "status": "developing",
+        "timestamp": time.time(),
+        "message": "Backend is actively being developed for iteration 5 tasks.",
+        "features": [
+            "Health checks operational",
+            "AI service integrations",
+            "Task automation"
+        ],
+        "notes": "Lightweight endpoint added to prevent timeouts."
+    }
     """Health check endpoint specifically for iteration 5 to confirm backend is running smoothly."""
     import subprocess
     import sys
@@ -1067,6 +1088,19 @@ async def ai_chat(req: schemas.ChatRequest, db: AsyncSession = Depends(get_db), 
 
 @app.get("/api/v1/iteration-3/dev-status")
 async def iteration_3_dev_status():
+    """Development status endpoint for iteration 3 to confirm backend can handle requests without timeouts."""
+    return {
+        "iteration": 3,
+        "status": "developing",
+        "timestamp": time.time(),
+        "message": "Backend is actively being developed for iteration 3 tasks.",
+        "features": [
+            "Health checks operational",
+            "AI service integrations",
+            "Task automation"
+        ],
+        "notes": "Lightweight endpoint added to prevent timeouts."
+    }
 
 @app.get("/api/v1/iteration-3/health")
 async def iteration_3_health():
@@ -1102,6 +1136,16 @@ async def iteration_3_health():
         "checks": {
             "database": db_status,
             "redis": redis_status,
+            "python_version": python_version
+        },
+        "endpoints": [
+            "/api/v1/health",
+            "/api/v1/iteration-3-status",
+            "/api/v1/iteration-3-ready",
+            "/api/v1/iteration-3/health",
+            "/api/v1/iteration-3/dev-status"
+        ]
+    }redis_status,
             "python_version": python_version
         },
         "endpoints": [
