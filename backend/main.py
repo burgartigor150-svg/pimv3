@@ -349,7 +349,48 @@ async def iteration_5_ready():
 
 @app.get("/api/v1/iteration-5/health")
 async def iteration_5_health():
-    pass
+    """Health check endpoint specifically for iteration 5 to confirm backend is running smoothly."""
+    # Check database connectivity
+    db_status = "unknown"
+    try:
+        async with engine.connect() as conn:
+            await conn.execute(text("SELECT 1"))
+            db_status = "connected"
+    except Exception as e:
+        db_status = f"error: {str(e)}"
+    
+    # Check Redis connectivity
+    redis_status = "unknown"
+    try:
+        if redis_client.ping():
+            redis_status = "connected"
+        else:
+            redis_status = "error: ping failed"
+    except Exception as e:
+        redis_status = f"error: {str(e)}"
+    
+    # Check Python version and environment
+    import sys
+    python_version = sys.version.split()[0]
+    
+    return {
+        "iteration": 5,
+        "status": "healthy",
+        "timestamp": time.time(),
+        "message": "Backend is operational and ready for iteration 5 tasks.",
+        "checks": {
+            "database": db_status,
+            "redis": redis_status,
+            "python_version": python_version
+        },
+        "endpoints": [
+            "/api/v1/health",
+            "/api/v1/iteration-5-status",
+            "/api/v1/iteration-5-ready",
+            "/api/v1/iteration-5/health",
+            "/api/v1/iteration-5/dev-status"
+        ]
+    }
 
 
 @app.get("/api/v1/iteration-5/dev-status")
@@ -367,9 +408,6 @@ async def iteration_5_dev_status():
         ],
         "notes": "Lightweight endpoint added to prevent timeouts."
     }
-    """Health check endpoint specifically for iteration 5 to confirm backend is running smoothly."""
-    import subprocess
-    import sys
     
     # Check database connectivity
     db_status = "unknown"
@@ -1086,7 +1124,9 @@ async def ai_chat(req: schemas.ChatRequest, db: AsyncSession = Depends(get_db), 
     setting = setting_res.scalars().first()
     extra_instructions = setting.value if setting else ""
     
-    reply = await chat_with_copilot([m.model_dump() for m in req.messages], ai_key, req.current_path, extra_instructions)
+    reply = await chat_with_copilot([m.model_dump() for m in req.messages], ai_key, extra_instructions)
+    
+    return {"reply": reply}q.current_path, extra_instructions)
     try:
         reply = await asyncio.wait_for(chat_with_copilot([m.model_dump() for m in req.messages], ai_key, req.current_path, extra_instructions), timeout=30.0)
     except asyncio.TimeoutError:
