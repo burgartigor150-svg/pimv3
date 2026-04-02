@@ -1039,7 +1039,9 @@ async def agent_task_create(
     created = create_agent_task(
         task_type=req.task_type,
         title=req.title,
-        description=req.description,
+        description=req.description
+    )
+    return {"task_id": created.get("task_id")}iption=req.description,
         context=req.context,
         user_id=current_user.id
     )
