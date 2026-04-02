@@ -36,6 +36,8 @@ class Product(Base):
     attributes_data = Column(JSONB, default={}) # Stores key-value based on attribute codes
     images = Column(JSONB, default=[]) # List of image URLs
     completeness_score = Column(Integer, default=0)
+    rich_content = Column(JSONB, nullable=True)  # Rich content blocks for product page
+    landing_json = Column(JSONB, nullable=True)  # Landing page sections
 
     category = relationship("Category", back_populates="products", lazy="selectin")
 

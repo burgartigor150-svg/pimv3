@@ -3,6 +3,7 @@ import { useParams, useNavigate } from "react-router-dom";
 import { api } from "../lib/api";
 import { useToast } from "../components/Toast";
 import ContentStudio from "../components/ContentStudio";
+import RichContentEditor from "../components/RichContentEditor";
 import {
   ArrowLeft,
   Save,
@@ -183,6 +184,7 @@ const TABS = [
   { key: "studio", label: "Студия", Icon: Sparkles },
   { key: "syndication", label: "Синдикация", Icon: Send },
   { key: "history", label: "История", Icon: History },
+  { key: "rich", label: "Rich & Лендинг", Icon: FileText },
 ];
 
 // ─── Component ────────────────────────────────────────────────────────────────
@@ -1291,6 +1293,12 @@ export default function ProductDetailsPage() {
       {activeTab === "studio" && product && (
         <div style={{ padding: "0 16px 24px" }}>
           <ContentStudio product={product} />
+        </div>
+      )}
+
+      {activeTab === "rich" && product && (
+        <div style={{ padding: "0 16px 24px" }}>
+          <RichContentEditor product={product} />
         </div>
       )}
     </div>

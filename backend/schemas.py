@@ -71,11 +71,15 @@ class ProductUpdate(BaseModel):
     description_html: Optional[str] = None
     attributes_data: Optional[Dict[str, Any]] = None
     images: Optional[list] = None
+    rich_content: Optional[list] = None
+    landing_json: Optional[Dict[str, Any]] = None
 
 class Product(ProductBase):
     id: UUID
     completeness_score: int = 0
     category: Optional[Category] = None
+    rich_content: Optional[list] = None
+    landing_json: Optional[Dict[str, Any]] = None
     model_config = ConfigDict(from_attributes=True)
 
 class AIExtractRequest(BaseModel):

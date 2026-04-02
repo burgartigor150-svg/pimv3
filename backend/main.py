@@ -720,7 +720,7 @@ async def _verify_postgres_schema() -> None:
 
 
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, HTMLResponse
 
 @app.exception_handler(RequestValidationError)
 async def validation_exception_handler(request, exc):
@@ -1238,6 +1238,133 @@ async def ai_chat(req: schemas.ChatRequest, db: AsyncSession = Depends(get_db), 
     except asyncio.TimeoutError:
         raise HTTPException(status_code=504, detail="LLM chat request timed out after 30 seconds")
     return {"reply": reply}
+
+# ─── Rich Content & Landing Page ────────────────────────────────────────────
+
+@app.get("/api/v1/products/{product_id}/rich-content")
+async def get_rich_content(
+    product_id: str,
+    db: AsyncSession = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    result = await db.execute(select(models.Product).where(models.Product.id == product_id))
+    product = result.scalars().first()
+    if not product:
+        raise HTTPException(status_code=404, detail="Product not found")
+    return {"rich_content": product.rich_content or [], "landing_json": product.landing_json or {}}
+
+
+@app.put("/api/v1/products/{product_id}/rich-content")
+async def save_rich_content(
+    product_id: str,
+    body: dict,
+    db: AsyncSession = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    result = await db.execute(select(models.Product).where(models.Product.id == product_id))
+    product = result.scalars().first()
+    if not product:
+        raise HTTPException(status_code=404, detail="Product not found")
+    if "rich_content" in body:
+        product.rich_content = body["rich_content"]
+    if "landing_json" in body:
+        product.landing_json = body["landing_json"]
+    db.add(product)
+    await db.commit()
+    return {"ok": True}
+
+
+@app.post("/api/v1/products/{product_id}/ai-generate-rich")
+async def ai_generate_rich_content(
+    product_id: str,
+    db: AsyncSession = Depends(get_db),
+    ai_key: str = Depends(get_deepseek_key),
+    current_user: models.User = Depends(get_current_user),
+):
+    result = await db.execute(select(models.Product).where(models.Product.id == product_id))
+    product = result.scalars().first()
+    if not product:
+        raise HTTPException(status_code=404, detail="Product not found")
+
+    from backend.services.ai_service import get_client_and_model
+    import json as _json, asyncio as _asyncio
+
+    client, model = get_client_and_model(ai_key)
+    attrs = product.attributes_data or {}
+    name = product.name or ""
+    product_info = "Товар: " + name + "\nАтрибуты: " + _json.dumps(attrs, ensure_ascii=False)[:3000]
+
+    RICH_SYSTEM = (
+        "Создай rich content для товара — JSON-массив из 6-8 блоков.\n"
+        "Типы: hero({title,subtitle,badge}), text({html}), "
+        "features({title,items:[{icon,title,desc}]}), "
+        "specs({title,rows:[[name,val]]}), "
+        "callout({style:info|success|warning,title,text}).\n"
+        "Верни ТОЛЬКО JSON-массив."
+    )
+    LANDING_SYSTEM = (
+        "Создай landing page JSON для товара.\n"
+        'Структура: {"hero":{headline,subheadline,cta,badge},'
+        '"usp":[{icon,title,desc}],"features":[{title,desc,highlight}],'
+        '"specs_preview":[[k,v]],"faq":[{q,a}],'
+        '"cta_section":{headline,subheadline,button,urgency}}.\n'
+        "Верни ТОЛЬКО JSON."
+    )
+
+    rich_resp, landing_resp = await _asyncio.gather(
+        client.chat.completions.create(
+            model=model,
+            messages=[{"role": "system", "content": RICH_SYSTEM}, {"role": "user", "content": product_info}],
+            max_tokens=2500, temperature=0.3,
+        ),
+        client.chat.completions.create(
+            model=model,
+            messages=[{"role": "system", "content": LANDING_SYSTEM}, {"role": "user", "content": product_info}],
+            max_tokens=2500, temperature=0.3,
+        ),
+    )
+
+    def safe_parse(raw, fallback):
+        import re
+        try:
+            return _json.loads(raw)
+        except Exception:
+            for pat in [r'\[.*\]', r'\{.*\}']:
+                m = re.search(pat, raw, re.DOTALL)
+                if m:
+                    try:
+                        return _json.loads(m.group(0))
+                    except Exception:
+                        pass
+        return fallback
+
+    rich_parsed = safe_parse(rich_resp.choices[0].message.content or "[]", [])
+    landing_parsed = safe_parse(landing_resp.choices[0].message.content or "{}", {})
+
+    if isinstance(rich_parsed, dict):
+        rich_parsed = list(rich_parsed.values())
+
+    product.rich_content = rich_parsed
+    product.landing_json = landing_parsed
+    db.add(product)
+    await db.commit()
+
+    return {"rich_content": rich_parsed, "landing_json": landing_parsed}
+
+
+@app.get("/api/v1/products/{product_id}/landing-preview", response_class=HTMLResponse)
+async def landing_preview(product_id: str, db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(models.Product).where(models.Product.id == product_id))
+    product = result.scalars().first()
+    if not product:
+        raise HTTPException(status_code=404, detail="Not found")
+
+    import json as _json
+    from backend.services.landing_render import render_landing
+    html = render_landing(product)
+    return html
+
+
 @app.get("/api/v1/stats")
 async def get_stats(db: AsyncSession = Depends(get_db), current_user: models.User = Depends(get_current_user)):
     """Возвращает статистику продуктов и атрибутов."""
