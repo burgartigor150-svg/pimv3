@@ -1,3 +1,8 @@
+## 2026-04-02 — Тест агента - создай hello функцию
+- Task: 2c87bfba-8b91-44fa-ba15-f8a77e3c6a7a
+- Files: []
+- Функция hello() уже существует в проекте в файле backend/tests/test_agent_hello.py. Функция возвращает строку "Hello from Claude agent" и содержит тесты для проверки её работы. Я проверил, что функция
+
 ## 2026-04-02 — Создать файл backend/test_agent_hello.py
 - Task: 2c87bfba-8b91-44fa-ba15-f8a77e3c6a7a:sub:Создать файл backend
 - Files: []
