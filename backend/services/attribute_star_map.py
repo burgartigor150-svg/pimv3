@@ -869,3 +869,182 @@ def get_attribute_star_map_build_status(task_id: str) -> Dict[str, Any]:
         return {"ok": False, "error": "task not found"}
     return {"ok": True, **job}
 
+
+
+# ─── Product attribute resolver ──────────────────────────────────────────────
+
+def resolve_product_attributes(
+    product_attrs: dict,
+    mm_category_id: str,
+    *,
+    score_threshold: float = 0.45,
+) -> dict:
+    """
+    Для конкретного товара и целевой категории MM возвращает готовый маппинг:
+      { "MM-атрибут": <готовое значение или {"id": ..., "name": ...} для словарных полей> }
+
+    Алгоритм:
+    1. Берём все edges из снапшота где to_category_id == mm_category_id
+    2. Для каждого edge ищем значение в product_attrs по from_name (+ нормализация)
+    3. Если у edge есть value_mappings — ищем точное совпадение значения с oz_value
+    4. Если mm_dictionary есть но value_mappings нет — fuzzy-match по словарю
+    5. Если атрибут не словарный — берём значение как есть
+    """
+    snap = _read_json(_STAR_MAP_SNAPSHOT, {})
+    edges = [
+        e for e in (snap.get("edges") or [])
+        if str(e.get("to_category_id") or "") == str(mm_category_id)
+        and float(e.get("score") or 0) >= score_threshold
+    ]
+
+    if not edges:
+        return {}
+
+    # Нормализованный индекс атрибутов товара
+    norm_attrs: dict[str, tuple[str, any]] = {}
+    for k, v in (product_attrs or {}).items():
+        norm_attrs[_norm(str(k))] = (k, v)
+
+    def _find_source_value(from_name: str):
+        """Ищет значение в атрибутах товара по имени атрибута-источника."""
+        fn = _norm(from_name)
+        # Точное совпадение
+        if fn in norm_attrs:
+            return norm_attrs[fn][1]
+        # Частичное совпадение
+        best_score, best_val = 0.0, None
+        for nk, (ok, ov) in norm_attrs.items():
+            s = _sim(fn, nk)
+            if s > best_score:
+                best_score, best_val = s, ov
+        if best_score >= 0.72:
+            return best_val
+        return None
+
+    def _match_dict_value(raw_value: any, value_mappings: list, mm_dictionary: list):
+        """
+        Сопоставляет сырое значение с словарём MM.
+        Сначала по value_mappings (готовые пары от AI), потом fuzzy по словарю.
+        """
+        if raw_value is None:
+            return None
+        raw_str = str(raw_value).strip()
+        raw_n = _norm(raw_str)
+
+        # 1. Готовые value_mappings от AI
+        for vm in (value_mappings or []):
+            if _norm(str(vm.get("oz_value") or "")) == raw_n:
+                return {"id": vm.get("mm_id"), "name": vm.get("mm_name")}
+
+        # 2. Fuzzy по именам словаря
+        if not mm_dictionary:
+            return None
+        best_s, best_opt = 0.0, None
+        for opt in mm_dictionary:
+            opt_name = str(opt.get("name") or "")
+            s = _sim(raw_n, _norm(opt_name))
+            if s > best_s:
+                best_s, best_opt = s, opt
+        if best_s >= 0.72:
+            return {"id": best_opt.get("id"), "name": best_opt.get("name")}
+
+        # 3. Substring match
+        for opt in mm_dictionary:
+            opt_n = _norm(str(opt.get("name") or ""))
+            if raw_n in opt_n or opt_n in raw_n:
+                return {"id": opt.get("id"), "name": opt.get("name")}
+
+        return None
+
+    result: dict = {}
+    seen_mm_attrs: set = set()
+
+    # Сортируем по score — берём лучший edge для каждого MM-атрибута
+    edges_sorted = sorted(edges, key=lambda e: float(e.get("score") or 0), reverse=True)
+
+    for edge in edges_sorted:
+        to_name = str(edge.get("to_name") or "").strip()
+        if not to_name or to_name in seen_mm_attrs:
+            continue
+
+        from_name = str(edge.get("from_name") or "").strip()
+        raw_val = _find_source_value(from_name)
+        if raw_val is None:
+            continue
+
+        mm_dict = edge.get("mm_dictionary") or []
+        value_maps = edge.get("value_mappings") or []
+
+        if mm_dict:
+            # Словарное поле — нужно точное значение из словаря
+            matched = _match_dict_value(raw_val, value_maps, mm_dict)
+            if matched:
+                result[to_name] = matched
+                seen_mm_attrs.add(to_name)
+        else:
+            # Свободное поле — берём значение напрямую
+            result[to_name] = raw_val
+            seen_mm_attrs.add(to_name)
+
+    return result
+
+
+def enrich_star_map_value_mappings(ai_key: str, *, limit_edges: int = 200) -> dict:
+    """
+    Пробегает по всем edges со словарями в снапшоте у которых нет value_mappings,
+    запускает AI для каждого и дописывает результат обратно в снапшот.
+    Вызывать однократно после автосборки.
+    """
+    import openai as _openai
+
+    snap = _read_json(_STAR_MAP_SNAPSHOT, {})
+    edges = snap.get("edges") or []
+    needs_vm = [
+        e for e in edges
+        if (e.get("mm_dictionary") or [])
+        and not (e.get("value_mappings") or [])
+        and e.get("from_attribute_id")
+    ]
+
+    if not needs_vm:
+        return {"ok": True, "enriched": 0, "message": "Все edges уже имеют value_mappings"}
+
+    to_process = needs_vm[:limit_edges]
+    client = _openai.OpenAI(api_key=ai_key, base_url="https://api.deepseek.com")
+    enriched = 0
+
+    for edge in to_process:
+        oz_name = str(edge.get("from_name") or "")
+        mm_name = str(edge.get("to_name") or "")
+        mm_dict = edge.get("mm_dictionary") or []
+        is_suggest = edge.get("mm_is_suggest")
+        restrict = "" if is_suggest else "ВАЖНО: isSuggest=false — только значения из словаря MM, никаких выдумок."
+
+        prompt = f"""Атрибут Ozon "{oz_name}" соответствует атрибуту Megamarket "{mm_name}".
+Словарь Megamarket: {[{"id": o.get("id"), "name": o.get("name")} for o in mm_dict[:80]]}
+{restrict}
+
+Сопоставь возможные значения Ozon с вариантами из словаря MM.
+Верни JSON массив: [{{"oz_value": "...", "mm_id": "...", "mm_name": "..."}}]
+Только реальные смысловые совпадения. Если совпадений нет — верни []."""
+
+        try:
+            resp = client.chat.completions.create(
+                model="deepseek-chat",
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.1,
+                max_tokens=1500,
+            )
+            raw = resp.choices[0].message.content.strip()
+            import re as _re, json as _json
+            m = _re.search(r"\[.*\]", raw, _re.DOTALL)
+            if m:
+                vms = _json.loads(m.group())
+                edge["value_mappings"] = vms
+                enriched += 1
+        except Exception:
+            pass
+
+    snap["edges"] = edges
+    _write_json(_STAR_MAP_SNAPSHOT, snap)
+    return {"ok": True, "enriched": enriched, "total_needed": len(needs_vm)}
