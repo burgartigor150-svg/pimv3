@@ -271,8 +271,6 @@ async def iteration_3_ready():
             "/api/v1/iteration-3/health",
             "/api/v1/iteration-3/dev-status"
         ]
-    }pi/v1/iteration-3-ready"
-        ]
     }
 
 @app.get("/api/v1/iteration-4-ready")
@@ -299,7 +297,7 @@ async def iteration_4_ready():
 
 @app.get("/api/v1/iteration-4-status")
 async def iteration_4_status():
-
+    return {}
 @app.get("/api/v1/iteration-4/dev-status")
 async def iteration_4_dev_status():
     """Development status endpoint for iteration 4 to confirm backend can handle requests without timeouts."""
@@ -352,6 +350,7 @@ async def iteration_5_ready():
 
 @app.get("/api/v1/iteration-5/health")
 async def iteration_5_health():
+    pass
 
 
 @app.get("/api/v1/iteration-5/dev-status")
@@ -868,6 +867,17 @@ async def ai_extract(req: schemas.AIExtractRequest, db: AsyncSession = Depends(g
         raise HTTPException(status_code=504, detail="LLM request timed out after 30 seconds")
     return {"extracted_data": extracted}
 
+
+@app.get("/api/v1/iteration-1/test-ready")
+async def iteration_1_test_ready():
+    """Simple test endpoint for iteration 1 to verify backend can handle new requests."""
+    return {
+        "iteration": 1,
+        "status": "ready",
+        "timestamp": time.time(),
+        "message": "Backend is ready for iteration 1 test tasks.",
+        "endpoint": "/api/v1/iteration-1/test-ready"
+    }
 @app.post("/api/v1/ai/generate-promo")
 async def generate_product_promo(
     req: schemas.AIGenerateRequest,
@@ -1083,152 +1093,6 @@ async def ai_chat(req: schemas.ChatRequest, db: AsyncSession = Depends(get_db), 
     except asyncio.TimeoutError:
         raise HTTPException(status_code=504, detail="LLM chat request timed out after 30 seconds")
     return {"reply": reply}
-
-
-
-@app.get("/api/v1/iteration-3/dev-status")
-async def iteration_3_dev_status():
-    """Development status endpoint for iteration 3 to confirm backend can handle requests without timeouts."""
-    return {
-        "iteration": 3,
-        "status": "developing",
-        "timestamp": time.time(),
-        "message": "Backend is actively being developed for iteration 3 tasks.",
-        "features": [
-            "Health checks operational",
-            "AI service integrations",
-            "Task automation"
-        ],
-        "notes": "Lightweight endpoint added to prevent timeouts."
-    }
-
-@app.get("/api/v1/iteration-3/health")
-async def iteration_3_health():
-    """Health check endpoint specifically for iteration 3 to confirm backend is running smoothly with dependency checks."""
-    # Check database connectivity
-    db_status = "unknown"
-    try:
-        async with engine.connect() as conn:
-            await conn.execute(text("SELECT 1"))
-            db_status = "connected"
-    except Exception as e:
-        db_status = f"error: {str(e)}"
-    
-    # Check Redis connectivity
-    redis_status = "unknown"
-    try:
-        if redis_client.ping():
-            redis_status = "connected"
-        else:
-            redis_status = "error: ping failed"
-    except Exception as e:
-        redis_status = f"error: {str(e)}"
-    
-    # Check Python version and environment
-    import sys
-    python_version = sys.version.split()[0]
-    
-    return {
-        "iteration": 3,
-        "status": "healthy",
-        "timestamp": time.time(),
-        "message": "Backend is operational and ready for iteration 3 tasks.",
-        "checks": {
-            "database": db_status,
-            "redis": redis_status,
-            "python_version": python_version
-        },
-        "endpoints": [
-            "/api/v1/health",
-            "/api/v1/iteration-3-status",
-            "/api/v1/iteration-3-ready",
-            "/api/v1/iteration-3/health",
-            "/api/v1/iteration-3/dev-status"
-        ]
-    }redis_status,
-            "python_version": python_version
-        },
-        "endpoints": [
-            "/api/v1/health",
-            "/api/v1/iteration-3-status",
-            "/api/v1/iteration-3-ready",
-            "/api/v1/iteration-3/dev-status",
-            "/api/v1/iteration-3/health"
-        ]
-    }
-    """Development status endpoint for iteration 3 to confirm backend can handle requests without timeouts."""
-    return {
-        "iteration": 3,
-        "status": "developing",
-        "timestamp": time.time(),
-        "message": "Backend is actively being developed for iteration 3 tasks.",
-        "features": [
-            "Health checks operational",
-            "AI service integrations",
-            "Task automation"
-        ],
-        "notes": "Previous timeout error resolved by adding lightweight endpoint."
-    }
-
-@app.get("/api/v1/iteration-5/dev-status")
-async def iteration_5_dev_status():
-    """Development status endpoint for iteration 5 to confirm backend can handle requests without timeouts."""
-    return {
-        "iteration": 5,
-        "status": "developing",
-        "timestamp": time.time(),
-        "message": "Backend is actively being developed for iteration 5 tasks.",
-        "features": [
-            "Health checks operational",
-            "AI service integrations",
-            "Task automation"
-        ],
-        "notes": "Lightweight endpoint added to prevent timeouts."
-    }
-    """Health check endpoint specifically for iteration 3 to confirm backend is running smoothly."""
-    import subprocess
-    import sys
-    
-    # Check database connectivity
-    db_status = "unknown"
-    try:
-        async with engine.connect() as conn:
-            await conn.execute(text("SELECT 1"))
-            db_status = "connected"
-    except Exception as e:
-        db_status = f"error: {str(e)}"
-    
-    # Check Redis connectivity
-    redis_status = "unknown"
-    try:
-        if redis_client.ping():
-            redis_status = "connected"
-        else:
-            redis_status = "error: ping failed"
-    except Exception as e:
-        redis_status = f"error: {str(e)}"
-    
-    # Check Python version and environment
-    python_version = sys.version.split()[0]
-    
-    return {
-        "iteration": 3,
-        "status": "healthy",
-        "timestamp": time.time(),
-        "message": "Backend is operational and ready for iteration 3 tasks.",
-        "checks": {
-            "database": db_status,
-            "redis": redis_status,
-            "python_version": python_version
-        },
-        "endpoints": [
-            "/api/v1/health",
-            "/api/v1/iteration-3-status",
-            "/api/v1/iteration-3-ready",
-            "/api/v1/iteration-3/health"
-        ]
-    }
-
 @app.get("/api/v1/stats")
 async def get_stats(db: AsyncSession = Depends(get_db), current_user: models.User = Depends(get_current_user)):
     from sqlalchemy import func
@@ -1237,7 +1101,7 @@ async def get_stats(db: AsyncSession = Depends(get_db), current_user: models.Use
     total_attributes = (await db.execute(select(func.count(models.Attribute.id)))).scalar() or 0
     total_connections = (await db.execute(select(func.count(models.MarketplaceConnection.id)))).scalar() or 0
     
-    avg_score = (await db.execute(select(func.avg(models.Product.completeness_score)))).scalar() or 0.0ore)))).scalar() or 0.0
+    avg_score = (await db.execute(select(func.avg(models.Product.completeness_score)))).scalar() or 0.0
     
     return {
         "total_products": total_products,
@@ -1345,7 +1209,7 @@ async def import_marketplace_product(req: schemas.ImportRequest, db: AsyncSessio
         return db_product
     except Exception as e:
         log.error(f"Import failed for connection {db_conn.id}: {e}")
-        raise HTTPException(status_code=500, detail=f"Ошибка импорта: {str(e)}")r.pull_product(req.query)
+        raise HTTPException(status_code=500, detail=f"Ошибка импорта: {str(e)}")
     
     if not pulled_data:
         raise HTTPException(404, "Товар не найден на маркетплейсе по этому артикулу/запросу.")
@@ -1476,15 +1340,7 @@ async def import_marketplace_product(req: schemas.ImportRequest, db: AsyncSessio
                 description=attr.get("description", "")
             )
             db.add(db_attr)
-    await db.commit()  # Commit new attributes before proceeding  db_attr = models.Attribute(
-                code=attr["code"],
-                name=attr.get("name", attr["code"]).capitalize(),
-                type=attr.get("type", "string"),
-                is_required=False,
-                category_id=parent_id,
-                connection_id=db_conn.id if attr.get("is_marketplace_specific") else None
-            )
-            db.add(db_attr)
+    await db.commit()  # Commit new attributes before proceeding
     await db.commit()
 
     score = calculate_completeness(new_attrs, [a for a in active_attrs if a.is_required])
@@ -1601,11 +1457,7 @@ async def knowledge_bootstrap_core_docs(
 async def knowledge_bootstrap_project_core(current_user: models.User = Depends(get_current_user)):
     _require_admin(current_user)
     await bootstrap_project_knowledge()
-    return {"ok": True}sync def knowledge_bootstrap_project_core(
-    current_user: models.User = Depends(get_current_user),
-):
-    _require_admin(current_user)
-    return bootstrap_project_knowledge(namespace="docs:project-core")
+    return {"ok": True}
 
 
 @app.post("/api/v1/agent-tasks/create")
@@ -1633,7 +1485,7 @@ async def agent_task_create(
         if task_id:
             # Здесь можно поставить задачу в очередь, если требуется, но для минимального исправления просто возвращаем created
             pass
-    return created    _queue_task_for_dispatch(task_id)
+    _queue_task_for_dispatch(task_id)
     return created
 
 
@@ -1658,27 +1510,25 @@ async def agent_context7_connected(current_user: models.User = Depends(get_curre
     """Возвращает статус подключения к Context7 MCP серверу для документации."""
     from backend.services.agent_task_console import context7_is_connected
     connected = context7_is_connected()
-    return {"connected": connected}rn {"connected": connected}
-    return {"connected": context7_is_connected()}
+    return {"connected": connected}
 
 
 @app.get("/api/v1/agent-tasks/{task_id}/metrics")
 async def get_agent_task_metrics(task_id: str, current_user: models.User = Depends(get_current_user)):
     """Возвращает метрики для агентской задачи."""
     from backend.services.agent_task_console import get_agent_task_metrics as _get_metrics
-    return _get_metrics(task_id)ync def agent_task_metrics(
+    return _get_metrics(task_id)
+
+
+@app.get("/api/v1/agent-tasks/{task_id}/metrics2-removed")
+async def _metrics2_removed(
     task_id: str,
-    current_user: models.User = Depends(get_current_user)
+    current_user: models.User = Depends(get_current_user),
 ):
-    from backend.services.agent_metrics import get_task_metrics
-    metrics = get_task_metrics(task_id)
-    if metrics is None:
-        raise HTTPException(status_code=404, detail="Task metrics not found")
-    return metricss(get_current_user),
-):
-    from backend.services.agent_metrics import get_task_metrics
-    metrics = get_task_metrics(task_id)
-    return metricsef agent_task_metrics(
+    """removed duplicate"""
+    pass
+
+async def _agent_task_metrics_dup(
     task_id: str,
     current_user: models.User = Depends(get_current_user),
 ):
