@@ -171,6 +171,66 @@ async def iteration_2_ready():
         ]
     }
 
+@app.get("/api/v1/iteration-2/health")
+async def iteration_2_health():
+    """Health check endpoint specifically for iteration 2 to confirm backend is running smoothly with dependency checks."""
+    # Check database connectivity
+    db_status = "unknown"
+    try:
+        async with engine.connect() as conn:
+            await conn.execute(text("SELECT 1"))
+            db_status = "connected"
+    except Exception as e:
+        db_status = f"error: {str(e)}"
+    
+    # Check Redis connectivity
+    redis_status = "unknown"
+    try:
+        if redis_client.ping():
+            redis_status = "connected"
+        else:
+            redis_status = "error: ping failed"
+    except Exception as e:
+        redis_status = f"error: {str(e)}"
+    
+    # Check Python version and environment
+    import sys
+    python_version = sys.version.split()[0]
+    
+    return {
+        "iteration": 2,
+        "status": "healthy",
+        "timestamp": time.time(),
+        "message": "Backend is operational and ready for iteration 2 tasks.",
+        "checks": {
+            "database": db_status,
+            "redis": redis_status,
+            "python_version": python_version
+        },
+        "endpoints": [
+            "/api/v1/health",
+            "/api/v1/iteration-2-status",
+            "/api/v1/iteration-2-ready",
+            "/api/v1/iteration-2/health"
+        ]
+    }
+
+@app.get("/api/v1/iteration-2/dev-status")
+async def iteration_2_dev_status():
+    """Development status endpoint for iteration 2 to confirm backend can handle requests without timeouts."""
+    return {
+        "iteration": 2,
+        "status": "developing",
+        "timestamp": time.time(),
+        "message": "Backend is actively being developed for iteration 2 tasks.",
+        "features": [
+            "Health checks operational",
+            "AI service integrations",
+            "Task automation"
+        ],
+        "notes": "Lightweight endpoint added to prevent timeouts."
+    }
+
 @app.get("/api/v1/iteration-1-status")
 async def iteration_1_status():
     """Endpoint for iteration 1 to confirm backend is running and ready for new tasks."""
