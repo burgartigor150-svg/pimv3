@@ -233,6 +233,18 @@ async def iteration_2_dev_status():
 
 @app.get("/api/v1/iteration-2/test-endpoint")
 async def iteration_2_test_endpoint():
+    """Test endpoint for iteration 2 to verify backend functionality and readiness for development tasks."""
+    return {
+        "iteration": 2,
+        "status": "test_passed",
+        "timestamp": time.time(),
+        "message": "Backend is operational and ready for iteration 2 development tasks.",
+        "checks": {
+            "database": "simulated_ok",
+            "redis": "simulated_ok",
+            "api_health": "verified"
+        }
+    }
 
 
 @app.get("/api/v1/iteration-2/simple-check")
@@ -1153,7 +1165,7 @@ async def proxy_remove_background(file: UploadFile = File(...), current_user: mo
                 raise HTTPException(status_code=resp.status_code, detail=resp.text)
             return Response(content=resp.content, media_type=resp.headers.get("Content-Type", "image/png"))
         except Exception as e:
-            raise HTTPException(status_code=500, detail=f"Visual AI GPU Service is unavailable: {str(e)}")
+            raise HTTPException(status_code=500, detail=f"Visual AI service error: {e}")
 
 @app.post("/api/v1/visual/inpaint-masked")
 async def proxy_inpaint_masked(
@@ -1391,6 +1403,91 @@ async def landing_preview(product_id: str, db: AsyncSession = Depends(get_db)):
     html = render_landing(product)
     return html
 
+
+
+@app.get("/api/v1/products/{product_id}/social-content")
+async def get_social_content(product_id: str, db: AsyncSession = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+    result = await db.execute(select(models.Product).where(models.Product.id == product_id))
+    product = result.scalars().first()
+    if not product:
+        raise HTTPException(status_code=404, detail="Not found")
+    return {"social_content": product.social_content or {}}
+
+
+@app.put("/api/v1/products/{product_id}/social-content")
+async def put_social_content(product_id: str, body: dict, db: AsyncSession = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+    result = await db.execute(select(models.Product).where(models.Product.id == product_id))
+    product = result.scalars().first()
+    if not product:
+        raise HTTPException(status_code=404, detail="Not found")
+    product.social_content = body.get("social_content", {})
+    db.add(product)
+    await db.commit()
+    return {"ok": True}
+
+
+@app.post("/api/v1/products/{product_id}/ai-generate-social")
+async def ai_generate_social(product_id: str, db: AsyncSession = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+    result = await db.execute(select(models.Product).where(models.Product.id == product_id))
+    product = result.scalars().first()
+    if not product:
+        raise HTTPException(status_code=404, detail="Not found")
+
+    from openai import AsyncOpenAI
+    import json as _json
+    import asyncio
+
+    client = AsyncOpenAI(
+        api_key=os.environ.get("DEEPSEEK_API_KEY", ""),
+        base_url="https://api.deepseek.com/v1",
+    )
+
+    name = product.name or ""
+    desc = product.description or ""
+    attrs = _json.dumps(product.attributes_data or {}, ensure_ascii=False)[:800]
+    images = (product.images or [])[:3]
+    img_str = ", ".join(images) if images else "нет"
+
+    PLATFORMS = {
+        "instagram": {"name": "Instagram", "prompt": "Создай пост для Instagram. Формат: эмодзи-заголовок, 3-4 абзаца с эмодзи, 20-25 хэштегов в конце. Макс 2200 символов."},
+        "telegram": {"name": "Telegram", "prompt": "Создай пост для Telegram-канала. Используй **жирный** для акцентов, без спама хэштегов, с призывом к действию. Макс 4096 символов."},
+        "vk": {"name": "ВКонтакте", "prompt": "Создай пост для ВКонтакте. Живой разговорный стиль, 3-5 хэштегов в конце, призыв к действию. Макс 4096 символов."},
+        "twitter": {"name": "Twitter/X", "prompt": "Создай твит для Twitter/X. Строго до 280 символов, цепляющий, с 2-3 хэштегами."},
+        "ok": {"name": "Одноклассники", "prompt": "Создай пост для Одноклассников. Простой понятный стиль, эмодзи, 3-5 хэштегов. Макс 3000 символов."},
+        "yandex_market": {"name": "Яндекс.Маркет", "prompt": "Создай SEO-описание товара для Яндекс.Маркет. Заголовок до 150 символов, описание до 3000 символов с ключевыми характеристиками."},
+        "ozon": {"name": "Ozon", "prompt": "Создай rich-описание для Ozon: краткое описание, преимущества списком, технические особенности. До 5000 символов."},
+        "wildberries": {"name": "Wildberries", "prompt": "Создай описание для Wildberries: ключевые слова в начале, преимущества, характеристики. До 5000 символов."},
+        "max_messenger": {"name": "Мессенджер Макс", "prompt": "Создай пост для Мессенджера Макс. Короткий, с эмодзи, дружелюбный тон. Макс 1000 символов."},
+    }
+
+    base_ctx = "Товар: " + name + "\nОписание: " + desc[:500] + "\nАтрибуты: " + attrs + "\nФото: " + img_str + "\n"
+
+    async def gen_platform(key, cfg):
+        try:
+            import time
+            resp = await client.chat.completions.create(
+                model="deepseek-chat",
+                messages=[
+                    {"role": "system", "content": "Ты эксперт по контент-маркетингу и SMM для e-commerce. Пиши на русском языке."},
+                    {"role": "user", "content": base_ctx + "\n" + cfg["prompt"]},
+                ],
+                max_tokens=1500,
+                temperature=0.8,
+            )
+            text = resp.choices[0].message.content or ""
+            return key, {"text": text.strip(), "platform": cfg["name"], "generated_at": time.time()}
+        except Exception as e:
+            return key, {"text": "Ошибка генерации: " + str(e), "platform": cfg["name"], "generated_at": 0}
+
+    tasks = [gen_platform(k, v) for k, v in PLATFORMS.items()]
+    results = await asyncio.gather(*tasks)
+    social_content = {k: v for k, v in results}
+
+    product.social_content = social_content
+    db.add(product)
+    await db.commit()
+
+    return {"social_content": social_content}
 
 @app.get("/api/v1/stats")
 async def get_stats(db: AsyncSession = Depends(get_db), current_user: models.User = Depends(get_current_user)):

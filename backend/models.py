@@ -38,6 +38,7 @@ class Product(Base):
     completeness_score = Column(Integer, default=0)
     rich_content = Column(JSONB, nullable=True)  # Rich content blocks for product page
     landing_json = Column(JSONB, nullable=True)  # Landing page sections
+    social_content = Column(JSONB, nullable=True)  # Social media posts per platform
 
     category = relationship("Category", back_populates="products", lazy="selectin")
 

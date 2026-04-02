@@ -73,6 +73,7 @@ class ProductUpdate(BaseModel):
     images: Optional[list] = None
     rich_content: Optional[list] = None
     landing_json: Optional[Dict[str, Any]] = None
+    social_content: Optional[Dict[str, Any]] = None
 
 class Product(ProductBase):
     id: UUID
@@ -80,6 +81,7 @@ class Product(ProductBase):
     category: Optional[Category] = None
     rich_content: Optional[list] = None
     landing_json: Optional[Dict[str, Any]] = None
+    social_content: Optional[Dict[str, Any]] = None
     model_config = ConfigDict(from_attributes=True)
 
 class AIExtractRequest(BaseModel):
