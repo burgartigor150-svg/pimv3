@@ -142,19 +142,39 @@ async def health_check():
 
 @app.get("/api/v1/iteration-2-status")
 async def iteration_2_status():
+    """Endpoint for iteration 2 to confirm backend is running and ready for new tasks."""
+    return {
+        "iteration": 2,
+        "status": "backend operational",
+        "timestamp": time.time(),
+        "message": "Backend is healthy and ready for further development tasks."
+    }
+
+@app.get("/api/v1/iteration-4-status")
+async def iteration_4_status():
+    """Endpoint for iteration 4 to confirm backend is running and ready for new tasks."""
+    return {
+        "iteration": 4,
+        "status": "backend operational",
+        "timestamp": time.time(),
+        "message": "Backend is healthy and ready for further development tasks."
+    }
+
+@app.get("/api/v1/iteration-5-status")
+async def iteration_5_status():
+    """Endpoint for iteration 5 to confirm backend is running and ready for new tasks."""
+    return {
+        "iteration": 5,
+        "status": "backend operational",
+        "timestamp": time.time(),
+        "message": "Backend is healthy and ready for further development tasks."
+    }
 
 @app.get("/api/v1/iteration-3-status")
 async def iteration_3_status():
     """Endpoint for iteration 3 to confirm backend is running and ready for new tasks."""
     return {
         "iteration": 3,
-        "status": "backend operational",
-        "timestamp": time.time(),
-        "message": "Backend is healthy and ready for further development tasks."
-    }
-    """Endpoint for iteration 2 to confirm backend is running and ready for new tasks."""
-    return {
-        "iteration": 2,
         "status": "backend operational",
         "timestamp": time.time(),
         "message": "Backend is healthy and ready for further development tasks."
@@ -838,6 +858,33 @@ async def get_users(
     result = await db.execute(query)
     users = result.scalars().all()
     return users
+
+
+@app.get("/api/v1/users/stats")
+async def get_users_stats(db: AsyncSession = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+    """Возвращает статистику по пользователям: общее количество, распределение по ролям, последняя активность."""
+    from sqlalchemy import func, desc
+    total_users = (await db.execute(select(func.count(models.User.id)))).scalar() or 0
+    roles_result = await db.execute(
+        select(models.User.role, func.count(models.User.id)).group_by(models.User.role)
+    )
+    role_counts = {}
+    for role, count in roles_result:
+        role_counts[role] = count
+    recent_users_result = await db.execute(
+        select(models.User.email, models.User.role, models.User.created_at)
+        .order_by(desc(models.User.created_at))
+        .limit(10)
+    )
+    recent_users = [
+        {"email": email, "role": role, "created_at": created_at.isoformat() if created_at else None}
+        for email, role, created_at in recent_users_result
+    ]
+    return {
+        "total_users": total_users,
+        "roles_distribution": role_counts,
+        "recent_users": recent_users
+    }
 async def get_users_stats(db: AsyncSession = Depends(get_db), current_user: models.User = Depends(get_current_user)):
     """Возвращает статистику по пользователям: общее количество, распределение по ролям, последняя активность."""
     from sqlalchemy import func, desc
