@@ -120,6 +120,19 @@ VISUAL_AI_BASE = os.getenv("VISUAL_AI_SERVICE_URL", "http://127.0.0.1:8001").rst
 
 app = FastAPI(title="PIM V3 API")
 
+
+@app.get("/")
+async def root():
+    """Root endpoint returning API status and version."""
+    return {
+        "status": "online",
+        "service": "PIM V3 API",
+        "version": "3.0",
+        "documentation": "/docs",
+        "health_check": "/api/v1/health",
+        "uptime": "/api/v1/uptime"
+    }
+
 @app.get("/api/v1/health")
 async def health_check():
     return {"status": "ok"}
@@ -786,6 +799,24 @@ async def get_stats(db: AsyncSession = Depends(get_db), current_user: models.Use
     }
 
 @app.get("/api/v1/users/stats")
+
+@app.get("/api/v1/users")
+async def get_users(
+    role: Optional[str] = None,
+    limit: int = 50,
+    offset: int = 0,
+    db: AsyncSession = Depends(get_db),
+    current_user: models.User = Depends(get_current_user)
+):
+    """Возвращает список пользователей с пагинацией и фильтрацией по роли."""
+    from sqlalchemy import or_
+    query = select(models.User)
+    if role:
+        query = query.where(models.User.role == role)
+    query = query.offset(offset).limit(limit)
+    result = await db.execute(query)
+    users = result.scalars().all()
+    return users
 async def get_users_stats(db: AsyncSession = Depends(get_db), current_user: models.User = Depends(get_current_user)):
     """Возвращает статистику по пользователям: общее количество, распределение по ролям, последняя активность."""
     from sqlalchemy import func, desc
