@@ -675,10 +675,15 @@ async def run_agent_task(task_id: str, ai_key: str = "") -> Dict[str, Any]:
             _append_team_message(task_id, "project_manager", "Не могу выполнить задачу: не настроен AI ключ.", kind="error")
             return {"ok": False, "error": "ai_key_missing", "task_id": task_id}
         if not _git_is_clean(workspace_root):
-            _set_task(task_id, {"status": "failed", "stage": "failed_dirty_worktree", "updated_at_ts": int(time.time())})
-            _append_log(task_id, "Execution blocked: git working tree is not clean")
-            _append_team_message(task_id, "project_manager", "Остановлено: рабочее дерево git не чистое.", kind="error")
-            return {"ok": False, "error": "dirty_worktree", "task_id": task_id}
+            # Auto-commit leftover changes from previous agent runs before blocking
+            _append_log(task_id, "Working tree dirty — auto-committing leftover changes")
+            _run([_GIT_BIN, "add", "-A"], cwd=workspace_root)
+            _run([_GIT_BIN, "commit", "-m", f"chore: auto-commit leftover changes before task {task_id[:8]}"], cwd=workspace_root)
+            if not _git_is_clean(workspace_root):
+                _set_task(task_id, {"status": "failed", "stage": "failed_dirty_worktree", "updated_at_ts": int(time.time())})
+                _append_log(task_id, "Execution blocked: git working tree is not clean after auto-commit")
+                _append_team_message(task_id, "project_manager", "Остановлено: рабочее дерево git не чистое.", kind="error")
+                return {"ok": False, "error": "dirty_worktree", "task_id": task_id}
 
         # [FIX-4] Захватываем Redis-лок — один агент работает с git одновременно
         _lock_wait = 0
