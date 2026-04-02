@@ -1489,12 +1489,9 @@ async def agent_task_create(
         web_query=getattr(req, 'web_query', None),
         max_web_results=getattr(req, 'max_web_results', None)
     )
-    if req.auto_run and created.get("ok"):
-        task_id = created.get("task", {}).get("task_id")
-        if task_id:
-            # Здесь можно поставить задачу в очередь, если требуется, но для минимального исправления просто возвращаем created
-            pass
-    _queue_task_for_dispatch(task_id)
+    task_id = (created.get("task") or {}).get("task_id") or ""
+    if task_id:
+        _queue_task_for_dispatch(task_id)
     return created
 
 
@@ -2002,6 +1999,7 @@ async def agent_chat_message(
             ai_key=ai_key,
             user_message=req.message,
             context={"intent": "smalltalk", "action": "no_task_started"},
+            history=merged_history,
         )
         history_out = merged_history + [
             {"role": "user", "content": req.message},
@@ -2022,6 +2020,7 @@ async def agent_chat_message(
                 "intent": "clarify",
                 "clarification_question": inferred.get("clarification_question") or "Уточни, пожалуйста, что именно нужно сделать первым?",
             },
+            history=merged_history,
         )
         history_out = merged_history + [
             {"role": "user", "content": req.message},

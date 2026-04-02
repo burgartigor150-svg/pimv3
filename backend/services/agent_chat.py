@@ -343,32 +343,73 @@ async def compose_assistant_reply_with_llm(
     *,
     ai_key: str,
     user_message: str,
-    context: Dict[str, Any],
+    context: dict,
+    history: list | None = None,
 ) -> str:
-    ctx = json.dumps(context, ensure_ascii=False)
-    obj = await chat_json_with_retries(
-        config_str=ai_key,
-        role="runtime",
-        temperature=0.3,
-        messages=[
-            {
-                "role": "system",
-                "content": (
-                    "Ты живой русскоязычный ассистент продукта PIM.Giper.fm (проект pimv3). "
-                    "Говори коротко, без шаблонных фраз, дружелюбно. "
-                    "Никогда не говори, что ты 'роутер'. "
-                    "Если пользователь спрашивает про проект/файлы/контекст — отвечай прямо: "
-                    "ты работаешь в проекте pimv3 и видишь файлы проекта. "
-                    "Если задача запущена — объясни что запущено и что делать дальше. "
-                    "Если нужен вопрос-уточнение — задай один конкретный вопрос."
-                ),
-            },
-            {"role": "user", "content": f"Сообщение пользователя: {user_message}\nКонтекст: {ctx}\nВерни JSON {{\"reply\":\"...\"}}"},
-        ],
+    """Полноценный Claude-уровень ответ с контекстом проекта и историей."""
+    import subprocess, json as _json
+    from openai import AsyncOpenAI
+
+    workspace = "/mnt/data/Pimv3"
+    try:
+        tree_out = subprocess.run(
+            ["find", workspace + "/backend", "-type", "f", "-name", "*.py",
+             "-not", "-path", "*/venv/*", "-not", "-path", "*/__pycache__/*"],
+            capture_output=True, text=True, timeout=5
+        ).stdout
+        py_files = [f.replace(workspace + "/", "") for f in tree_out.strip().split("\n") if f][:50]
+        file_tree = "\n".join(py_files)
+    except Exception:
+        file_tree = "(не удалось получить список файлов)"
+
+    system = (
+        "Ты — Claude, AI-агент и ассистент разработчика проекта PIMv3.\n"
+        "PIMv3 — PIM-система (Product Information Management) для маркетплейсов: "
+        "Ozon, Wildberries, Яндекс Маркет, Мегамаркет.\n"
+        "Стек: Python 3.12 / FastAPI (порт 4877), React 18 / TypeScript / Vite (фронт), "
+        "PostgreSQL, Redis, Celery, SQLAlchemy async, Alembic.\n"
+        "\nТы умеешь всё то же что Claude Code:\n"
+        "• Анализировать код, находить баги, объяснять архитектуру\n"
+        "• Писать новые функции, endpoint'ы, компоненты, тесты, миграции\n"
+        "• Запускать задачи агентов для автономного выполнения кода\n"
+        "• Отвечать на любые вопросы по Python, FastAPI, React, SQL\n"
+        "\nОтвечай по-русски, кратко и по делу. Показывай код сразу без предисловий.\n"
+        f"\nФайлы backend:\n{file_tree}"
     )
-    if isinstance(obj, dict) and str(obj.get("reply") or "").strip():
-        return str(obj.get("reply")).strip()
-    return ""
+
+    msgs = [{"role": "system", "content": system}]
+    for m in (history or [])[-10:]:
+        role = m.get("role", "user")
+        cnt = m.get("content", "")
+        if role in ("user", "assistant") and cnt:
+            msgs.append({"role": role, "content": str(cnt)[:800]})
+
+    ctx_note = ""
+    intent = (context or {}).get("intent", "")
+    if intent == "task_create":
+        t = (context or {}).get("task", {})
+        ctx_note = f" [Запущена задача: '{t.get('title','')}', id={t.get('task_id','')}, тип={t.get('task_type','')}]"
+    elif intent == "task_status":
+        t = (context or {}).get("task", {})
+        logs = (context or {}).get("logs_tail", [])
+        ctx_note = f" [Статус: {t.get('status','')}, этап: {t.get('stage','')}]"
+        if logs:
+            ctx_note += " Логи: " + "; ".join(str(l) for l in logs[-3:])
+
+    msgs.append({"role": "user", "content": user_message + ctx_note})
+
+    try:
+        cfg = _json.loads(ai_key) if str(ai_key or "").strip().startswith("{") else {}
+        api_key_val = cfg.get("api_key", ai_key)
+        base_url = cfg.get("base_url", "https://api.deepseek.com")
+        model = cfg.get("model", "deepseek-chat")
+        client = AsyncOpenAI(api_key=api_key_val, base_url=base_url)
+        resp = await client.chat.completions.create(
+            model=model, messages=msgs, temperature=0.3, max_tokens=1500,
+        )
+        return (resp.choices[0].message.content or "").strip()
+    except Exception as e:
+        return f"Ошибка LLM: {e}"
 
 
 def build_user_reply(task: Dict[str, Any]) -> str:
