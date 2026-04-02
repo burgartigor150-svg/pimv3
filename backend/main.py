@@ -135,6 +135,8 @@ async def root():
 
 @app.get("/api/v1/health")
 async def health_check():
+    """Basic health check endpoint."""
+    return {"status": "ok", "message": "Backend is healthy", "timestamp": time.time()}
 
 @app.get("/api/v1/main-json-check")
 async def main_json_check():
@@ -1099,16 +1101,7 @@ async def get_stats(db: AsyncSession = Depends(get_db), current_user: models.Use
 
 
 
-    offset: int = 0,
-    db: AsyncSession = Depends(get_db),
-    current_user: models.User = Depends(get_current_user)
-):
-    """Возвращает список пользователей с пагинацией и фильтрацией по роли."""
-    from sqlalchemy import or_
-    query = select(models.User)
-    if role:
-        query = query.where(models.User.role == role)
-    query = query.offset(offset).limit(limit)
+
     result = await db.execute(query)
     users = result.scalars().all()
     return users
