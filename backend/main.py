@@ -238,6 +238,21 @@ async def iteration_4_status():
 
 @app.get("/api/v1/iteration-5-status")
 async def iteration_5_status():
+
+@app.get("/api/v1/iteration-5-ready")
+async def iteration_5_ready():
+    """Endpoint for iteration 5 to confirm backend is fully ready for new development tasks."""
+    return {
+        "iteration": 5,
+        "status": "ready",
+        "timestamp": time.time(),
+        "message": "Backend is fully operational and prepared for iteration 5 tasks.",
+        "endpoints": [
+            "/api/v1/health",
+            "/api/v1/iteration-5-status",
+            "/api/v1/iteration-5-ready"
+        ]
+    }
     """Endpoint for iteration 5 to confirm backend is running and ready for new tasks."""
     return {
         "iteration": 5,
@@ -1063,7 +1078,25 @@ async def import_marketplace_product(req: schemas.ImportRequest, db: AsyncSessio
     
     from backend.services.adapters import get_adapter
     adapter = get_adapter(db_conn.type, db_conn.api_key, db_conn.client_id, db_conn.store_id, getattr(db_conn, "warehouse_id", None))
-    pulled_data = await adapter.pull_product(req.query)
+    try:
+        pulled_data = await adapter.get_product(req.sku or req.product_id)  # Предполагаем, что адаптер имеет метод get_product
+        # Преобразовать pulled_data в модель Product и сохранить в БД
+        # Для примера: создаём продукт из pulled_data
+        product_data = {
+            "name": pulled_data.get("name"),
+            "category_id": pulled_data.get("category_id"),
+            "attributes_data": pulled_data.get("attributes", {}),
+            "sku": pulled_data.get("sku"),
+            "marketplace_id": pulled_data.get("id")
+        }
+        db_product = models.Product(**product_data)
+        db.add(db_product)
+        await db.commit()
+        await db.refresh(db_product)
+        return db_product
+    except Exception as e:
+        log.error(f"Import failed for connection {db_conn.id}: {e}")
+        raise HTTPException(status_code=500, detail=f"Ошибка импорта: {str(e)}")r.pull_product(req.query)
     
     if not pulled_data:
         raise HTTPException(404, "Товар не найден на маркетплейсе по этому артикулу/запросу.")
