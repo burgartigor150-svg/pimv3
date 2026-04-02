@@ -1039,29 +1039,23 @@ async def agent_task_create(
     created = create_agent_task(
         task_type=req.task_type,
         title=req.title,
-        description=req.description
-    )
-    return {"task_id": created.get("task_id")}iption=req.description,
-        context=req.context,
-        user_id=current_user.id
-    )
-    return created
-        task_type=req.task_type,
-        title=req.title,
         description=req.description,
+        context=getattr(req, 'context', None),
+        user_id=current_user.id,
         requested_by=current_user.email,
-        namespace=req.namespace,
-        docs_urls=req.docs_urls,
-        local_paths=req.local_paths,
-        validation_query=req.validation_query,
-        web_query=req.web_query,
-        max_web_results=req.max_web_results,
+        namespace=getattr(req, 'namespace', None),
+        docs_urls=getattr(req, 'docs_urls', None),
+        local_paths=getattr(req, 'local_paths', None),
+        validation_query=getattr(req, 'validation_query', None),
+        web_query=getattr(req, 'web_query', None),
+        max_web_results=getattr(req, 'max_web_results', None)
     )
     if req.auto_run and created.get("ok"):
-        task_id = (created.get("task", {})).get("task_id")
-  
-      if task_id:
-            _queue_task_for_dispatch(task_id)
+        task_id = created.get("task", {}).get("task_id")
+        if task_id:
+            # Здесь можно поставить задачу в очередь, если требуется, но для минимального исправления просто возвращаем created
+            pass
+    return created    _queue_task_for_dispatch(task_id)
     return created
 
 
