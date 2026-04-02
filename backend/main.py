@@ -217,7 +217,19 @@ async def iteration_2_health():
 
 @app.get("/api/v1/iteration-2/dev-status")
 async def iteration_2_dev_status():
-    return {}
+    """Development status endpoint for iteration 2 to confirm backend can handle requests without timeouts."""
+    return {
+        "iteration": 2,
+        "status": "developing",
+        "timestamp": time.time(),
+        "message": "Backend is actively being developed for iteration 2 tasks.",
+        "features": [
+            "Health checks operational",
+            "AI service integrations",
+            "Task automation"
+        ],
+        "notes": "Lightweight endpoint added to prevent timeouts."
+    }
 
 @app.get("/api/v1/iteration-2/test-endpoint")
 async def iteration_2_test_endpoint():
@@ -232,19 +244,6 @@ async def iteration_2_test_endpoint():
             "redis": "simulated_ok",
             "api_health": "verified"
         }
-    }
-    """Development status endpoint for iteration 2 to confirm backend can handle requests without timeouts."""
-    return {
-        "iteration": 2,
-        "status": "developing",
-        "timestamp": time.time(),
-        "message": "Backend is actively being developed for iteration 2 tasks.",
-        "features": [
-            "Health checks operational",
-            "AI service integrations",
-            "Task automation"
-        ],
-        "notes": "Lightweight endpoint added to prevent timeouts."
     }
 
 @app.get("/api/v1/iteration-1-status")
