@@ -530,6 +530,23 @@ async def create_connection(conn: schemas.MarketplaceConnectionCreate, db: Async
     await db.refresh(db_conn)
     return db_conn
 
+@app.patch("/api/v1/connections/{connection_id}", response_model=schemas.MarketplaceConnection)
+async def update_connection(connection_id: uuid.UUID, conn: schemas.MarketplaceConnectionUpdate, db: AsyncSession = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+    """Обновляет существующее подключение к маркетплейсу."""
+    result = await db.execute(select(models.MarketplaceConnection).where(models.MarketplaceConnection.id == connection_id))
+    db_conn = result.scalars().first()
+    if not db_conn:
+        raise HTTPException(status_code=404, detail="Connection not found")
+
+    update_data = conn.model_dump(exclude_unset=True)
+    for key, value in update_data.items():
+        setattr(db_conn, key, value)
+
+    db.add(db_conn)
+    await db.commit()
+    await db.refresh(db_conn)
+    return db_conn
+
 @app.post("/api/v1/ai/extract")
 async def ai_extract(req: schemas.AIExtractRequest, db: AsyncSession = Depends(get_db), ai_key: str = Depends(get_deepseek_key), current_user: models.User = Depends(get_current_user)):
     attrs_res = await db.execute(select(models.Attribute))
