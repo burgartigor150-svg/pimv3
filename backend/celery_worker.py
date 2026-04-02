@@ -375,6 +375,283 @@ def build_attribute_star_map_task(
         raise
 
 
+
+@celery_app.task(name="auto_build_star_map_from_products")
+def auto_build_star_map_from_products_task(task_id: str, ai_key: str) -> dict:
+    """Автосборка карты: берём категории из товаров PIM -> ищем в Ozon -> ищем похожие в MM -> строим маппинг."""
+    import time, json, re
+    from difflib import SequenceMatcher
+
+    def _progress(stage, pct, msg):
+        try:
+            redis_client.hset(f"task:star_map_build:{task_id}", mapping={
+                "status": "running", "stage": stage,
+                "progress_percent": max(0, min(int(pct), 99)),
+                "message": msg, "updated_at_ts": int(time.time()),
+            })
+        except Exception:
+            pass
+
+    def _done(msg):
+        redis_client.hset(f"task:star_map_build:{task_id}", mapping={
+            "status": "done", "stage": "done", "progress_percent": 100,
+            "message": msg, "finished_at_ts": int(time.time()),
+        })
+
+    def _error(msg):
+        redis_client.hset(f"task:star_map_build:{task_id}", mapping={
+            "status": "error", "stage": "error", "progress_percent": 0,
+            "message": msg, "error": msg, "finished_at_ts": int(time.time()),
+        })
+
+    def _norm(s):
+        return re.sub(r"\s+", " ", str(s or "").strip().lower().replace("ё", "е"))
+
+    def _sim(a, b):
+        an, bn = _norm(a), _norm(b)
+        if not an or not bn: return 0.0
+        seq = SequenceMatcher(None, an, bn).ratio()
+        tok_a = set(re.findall(r"[a-zA-Zа-яА-ЯёЁ0-9]+", an))
+        tok_b = set(re.findall(r"[a-zA-Zа-яА-ЯёЁ0-9]+", bn))
+        jac = len(tok_a & tok_b) / max(1, len(tok_a | tok_b))
+        if an in bn or bn in an: seq = max(seq, 0.82)
+        return seq * 0.65 + jac * 0.35
+
+    try:
+        from backend.database import AsyncSessionLocal
+        from backend.models import MarketplaceConnection, Category
+        from backend.services.adapters import get_adapter
+        from backend.services.attribute_star_map import (
+            _fetch_ozon_categories, _fetch_mm_categories,
+            _read_json, _write_json, _STAR_MAP_SNAPSHOT,
+        )
+        from openai import OpenAI
+        from sqlalchemy import select as sa_select
+
+        _progress("init", 2, "Инициализация...")
+
+        # ── 1. Get connections ────────────────────────────────────────────
+        async def _get_conns():
+            async with AsyncSessionLocal() as db:
+                oz = await db.execute(sa_select(MarketplaceConnection).where(MarketplaceConnection.type == "ozon"))
+                mm = await db.execute(sa_select(MarketplaceConnection).where(MarketplaceConnection.type == "megamarket"))
+                oz_list = [c for c in oz.scalars().all() if "test" not in (c.api_key or "").lower()]
+                mm_list = [c for c in mm.scalars().all() if "test" not in (c.api_key or "").lower()]
+                return oz_list, mm_list
+
+        oz_conns, mm_conns = asyncio.run(_get_conns())
+        if not oz_conns or not mm_conns:
+            _error("Нет активных подключений Ozon или Megamarket")
+            return {}
+
+        oz_conn = oz_conns[0]
+        mm_conn = mm_conns[0]
+
+        # ── 2. Get PIM categories (only those with products) ──────────────
+        _progress("load_pim_cats", 5, "Загружаем категории из товаров PIM...")
+
+        async def _get_pim_cats():
+            async with AsyncSessionLocal() as db:
+                r = await db.execute(sa_select(Category).where(Category.id.in_(
+                    sa_select(Category.id).join(
+                        __import__("backend.models", fromlist=["Product"]).Product,
+                        __import__("backend.models", fromlist=["Product"]).Product.category_id == Category.id
+                    )
+                )))
+                return r.scalars().all()
+
+        # Simplified: just get all categories with names
+        async def _get_cat_names():
+            from backend.database import engine
+            from sqlalchemy import text
+            async with engine.connect() as conn:
+                r = await conn.execute(text("""
+                    SELECT DISTINCT c.name FROM categories c
+                    INNER JOIN products p ON p.category_id = c.id
+                    WHERE c.name IS NOT NULL AND c.name NOT LIKE 'Cat_%' AND c.name NOT LIKE 'CatVisible_%'
+                """))
+                return [row[0] for row in r]
+
+        pim_cat_names = asyncio.run(_get_cat_names())
+        if not pim_cat_names:
+            _error("В PIM нет товаров с категориями")
+            return {}
+        _progress("load_pim_cats", 8, f"Найдено {len(pim_cat_names)} категорий в PIM: {', '.join(pim_cat_names[:5])}")
+
+        # ── 3. Fetch all Ozon + MM categories ────────────────────────────
+        _progress("fetch_ozon", 10, "Загружаем полное дерево Ozon...")
+        ozon_all = asyncio.run(_fetch_ozon_categories(oz_conn.api_key, oz_conn.client_id))
+        _progress("fetch_mm", 18, f"Загружаем полное дерево Megamarket... (Ozon: {len(ozon_all)} кат.)")
+        mm_all = asyncio.run(_fetch_mm_categories(mm_conn.api_key))
+        _progress("ai_match_cats", 25, f"Ozon: {len(ozon_all)}, MM: {len(mm_all)}. AI подбирает нужные категории...")
+
+        # ── 4. AI: match PIM category names -> Ozon leaf categories ──────
+        ai_client = OpenAI(api_key=ai_key, base_url="https://api.deepseek.com")
+
+        def _ai_find_categories(pim_names, platform_cats, platform_name, max_candidates=15):
+            """AI выбирает из списка категорий МП те, что соответствуют PIM."""
+            # Pre-filter by similarity to reduce prompt size
+            scored = []
+            for pc in platform_cats:
+                best = max((_sim(pn, pc["name"]) for pn in pim_names), default=0)
+                if best > 0.15:
+                    scored.append((best, pc))
+            scored.sort(key=lambda x: -x[0])
+            top = [c for _, c in scored[:120]]
+
+            prompt = f"""У нас есть интернет-магазин с категориями: {pim_names}
+
+Из списка категорий {platform_name} выбери те, которые ТОЧНО соответствуют нашим категориям.
+Список категорий {platform_name} (первые совпадения по названию):
+{json.dumps([{{"id": c["id"], "name": c["name"]}} for c in top], ensure_ascii=False, indent=None)}
+
+Верни JSON массив объектов ТОЛЬКО совпадающих категорий:
+[{{"id": "...", "name": "...", "pim_category": "..."}}]
+
+Правила:
+- Выбирай только листовые категории (самые конкретные)
+- Одна PIM категория может соответствовать нескольким категориям {platform_name}
+- Не придумывай категории которых нет в списке
+- Максимум {max_candidates} результатов"""
+
+            try:
+                resp = ai_client.chat.completions.create(
+                    model="deepseek-chat",
+                    messages=[{"role": "user", "content": prompt}],
+                    temperature=0.1, max_tokens=3000,
+                )
+                raw = resp.choices[0].message.content.strip()
+                m = re.search(r"\[.*\]", raw, re.DOTALL)
+                if m:
+                    return json.loads(m.group())
+            except Exception as e:
+                pass
+            # Fallback: similarity only
+            return [{"id": c["id"], "name": c["name"], "pim_category": ""} for _, c in scored[:max_candidates]]
+
+        _progress("ai_ozon_cats", 30, "AI выбирает категории Ozon...")
+        matched_ozon = _ai_find_categories(pim_cat_names, ozon_all, "Ozon", max_candidates=20)
+        _progress("ai_mm_cats", 42, f"Найдено {len(matched_ozon)} категорий Ozon. AI выбирает категории Megamarket...")
+        matched_mm = _ai_find_categories(pim_cat_names, mm_all, "Megamarket", max_candidates=20)
+        _progress("build_attrs", 52, f"Выбрано: Ozon={len(matched_ozon)}, MM={len(matched_mm)}. Загружаем атрибуты...")
+
+        # ── 5. Build attribute maps for each Ozon x MM pair ──────────────
+        oz_adapter = get_adapter("ozon", oz_conn.api_key, oz_conn.client_id, None, None)
+        mm_adapter = get_adapter("megamarket", mm_conn.api_key, None, None, None)
+
+        snap = _read_json(_STAR_MAP_SNAPSHOT, {
+            "edges": [], "ozon_categories_list": [], "megamarket_categories_list": [],
+            "ozon_attributes_data": [], "megamarket_attributes_data": [],
+        })
+
+        all_edges = list(snap.get("edges") or [])
+        oz_cats_list = list(snap.get("ozon_categories_list") or [])
+        mm_cats_list = list(snap.get("megamarket_categories_list") or [])
+        oz_attrs_data = list(snap.get("ozon_attributes_data") or [])
+        mm_attrs_data = list(snap.get("megamarket_attributes_data") or [])
+
+        total_pairs = len(matched_ozon)
+        for oz_idx, oz_cat in enumerate(matched_ozon):
+            pct = 52 + int((oz_idx / max(1, total_pairs)) * 40)
+            oz_name = oz_cat.get("name", "")
+            _progress("build_attrs", pct, f"[{oz_idx+1}/{total_pairs}] Ozon: {oz_name.split('->[-1]').strip() if '->' in oz_name else oz_name}")
+
+            try:
+                oz_schema = asyncio.run(oz_adapter.get_category_schema(str(oz_cat["id"])))
+                oz_attrs = oz_schema.get("attributes") or []
+            except Exception:
+                continue
+
+            # Find best MM match for this Ozon category
+            pim_cat = oz_cat.get("pim_category", "")
+            best_mm = None
+            best_score = 0.0
+            for mc in matched_mm:
+                s = _sim(oz_name, mc["name"])
+                if pim_cat:
+                    s = max(s, _sim(pim_cat, mc.get("pim_category", "")))
+                if s > best_score:
+                    best_score, best_mm = s, mc
+
+            if not best_mm:
+                # Fallback: first MM cat
+                best_mm = matched_mm[0] if matched_mm else None
+            if not best_mm:
+                continue
+
+            try:
+                mm_schema = asyncio.run(mm_adapter.get_category_schema(str(best_mm["id"])))
+                mm_attrs = mm_schema.get("attributes") or []
+            except Exception:
+                continue
+
+            # Build edges
+            for oz_a in oz_attrs:
+                oz_aname = str(oz_a.get("name") or "")
+                best_edge_score, best_mm_a = 0.0, None
+                for mm_a in mm_attrs:
+                    mm_aname = str(mm_a.get("name") or "")
+                    s = _sim(oz_aname, mm_aname)
+                    if s > best_edge_score:
+                        best_edge_score, best_mm_a = s, mm_a
+                if best_mm_a and best_edge_score >= 0.42:
+                    mm_opts = best_mm_a.get("dictionary_options") or []
+                    all_edges.append({
+                        "from_platform": "ozon",
+                        "from_category_id": str(oz_cat["id"]),
+                        "from_attribute_id": str(oz_a.get("id") or oz_a.get("attribute_id") or ""),
+                        "from_name": oz_aname,
+                        "to_platform": "megamarket",
+                        "to_category_id": str(best_mm["id"]),
+                        "to_attribute_id": str(best_mm_a.get("id") or ""),
+                        "to_name": str(best_mm_a.get("name") or ""),
+                        "score": round(best_edge_score, 3),
+                        "method": "auto",
+                        "mm_is_required": best_mm_a.get("is_required", False),
+                        "mm_type": best_mm_a.get("type") or best_mm_a.get("valueTypeCode", ""),
+                        "mm_is_suggest": best_mm_a.get("isSuggest"),
+                        "mm_dictionary": mm_opts,
+                        "value_mappings": [],
+                    })
+
+            # Update categories lists
+            if not any(c.get("id") == str(oz_cat["id"]) for c in oz_cats_list):
+                oz_cats_list.append({"id": str(oz_cat["id"]), "name": oz_name})
+            if not any(c.get("id") == str(best_mm["id"]) for c in mm_cats_list):
+                mm_cats_list.append({"id": str(best_mm["id"]), "name": best_mm.get("name", "")})
+
+            # Update attrs data
+            oz_attrs_data = [a for a in oz_attrs_data if str(a.get("category_id") or "") != str(oz_cat["id"])]
+            for a in oz_attrs:
+                oz_attrs_data.append({**a, "category_id": str(oz_cat["id"])})
+            mm_attrs_data = [a for a in mm_attrs_data if str(a.get("category_id") or "") != str(best_mm["id"])]
+            for a in mm_attrs:
+                mm_attrs_data.append({**a, "category_id": str(best_mm["id"])})
+
+        # ── 6. Save snapshot ──────────────────────────────────────────────
+        import time as _t
+        snap.update({
+            "edges": all_edges,
+            "ozon_categories_list": oz_cats_list,
+            "megamarket_categories_list": mm_cats_list,
+            "ozon_attributes_data": oz_attrs_data,
+            "megamarket_attributes_data": mm_attrs_data,
+            "ozon_categories": len(oz_cats_list),
+            "megamarket_categories": len(mm_cats_list),
+            "ozon_attributes": len(oz_attrs_data),
+            "megamarket_attributes": len(mm_attrs_data),
+            "generated_at_ts": int(_t.time()),
+        })
+        _write_json(_STAR_MAP_SNAPSHOT, snap)
+        _done(f"Готово: {len(oz_cats_list)} кат. Ozon, {len(mm_cats_list)} кат. MM, {len(all_edges)} связей атрибутов")
+        return {"edges": len(all_edges), "ozon_cats": len(oz_cats_list), "mm_cats": len(mm_cats_list)}
+
+    except Exception as exc:
+        import traceback
+        _error(f"{str(exc)}: {traceback.format_exc()[-300:]}")
+        raise
+
+
 @celery_app.task(name="run_self_improve_incident_task")
 def run_self_improve_incident_task(incident_id: str, ai_key: str = "") -> dict:
     """Celery task: запустить пайплайн самоисправления."""

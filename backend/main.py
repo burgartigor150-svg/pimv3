@@ -433,6 +433,17 @@ async def iteration_5_health():
 
 
 @app.get("/api/v1/iteration-5/dev-status")
+
+@app.get("/api/v1/iteration-5/quick-check")
+async def iteration_5_quick_check():
+    """A quick, dependency-free endpoint for iteration 5 to verify backend responsiveness and avoid timeouts."""
+    return {
+        "iteration": 5,
+        "status": "ok",
+        "timestamp": time.time(),
+        "message": "Backend is responsive and ready for iteration 5 tasks.",
+        "endpoint": "/api/v1/iteration-5/quick-check"
+    }
 async def iteration_5_dev_status():
     """Development status endpoint for iteration 5 to confirm backend can handle requests without timeouts."""
     return {
@@ -881,6 +892,9 @@ async def update_product(product_id: uuid.UUID, prod: schemas.ProductUpdate, db:
         raise HTTPException(status_code=404, detail="Product not found")
 
     update_data = prod.model_dump(exclude_unset=True)
+    if "images" in update_data and update_data["images"]:
+        from backend.services.image_download import download_product_images
+        update_data["images"] = await download_product_images(update_data["images"])
     for key, value in update_data.items():
         setattr(db_prod, key, value)
 
@@ -934,6 +948,28 @@ async def test_connection(conn: schemas.MarketplaceConnectionCreate, db: AsyncSe
         log.error(f"Connection test failed for {conn.type}: {e}")
         raise HTTPException(status_code=400, detail=f"Ошибка подключения: {str(e)}")
 
+
+@app.post("/api/v1/connections/{connection_id}/test")
+async def test_connection_by_id(connection_id: uuid.UUID, db: AsyncSession = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+    """Тестирует подключение по id из БД."""
+    from backend.services.adapters import get_adapter
+    result = await db.execute(select(models.MarketplaceConnection).where(models.MarketplaceConnection.id == connection_id))
+    conn = result.scalars().first()
+    if not conn:
+        raise HTTPException(status_code=404, detail="Connection not found")
+    try:
+        adapter = get_adapter(conn.type, conn.api_key, conn.client_id, conn.store_id, getattr(conn, "warehouse_id", None))
+        test_result = await adapter.test_connection()
+        # Обновляем статус в БД
+        conn.status = "connected"
+        await db.commit()
+        return {"success": True, "status": "connected", "details": test_result}
+    except Exception as e:
+        log.error(f"Connection test failed for {conn.type}: {e}")
+        conn.status = "error"
+        await db.commit()
+        raise HTTPException(status_code=400, detail=f"Ошибка подключения: {str(e)}")
+
 @app.post("/api/v1/connections", response_model=schemas.MarketplaceConnection)
 async def create_connection(conn: schemas.MarketplaceConnectionCreate, db: AsyncSession = Depends(get_db), current_user: models.User = Depends(get_current_user)):
     db_conn = models.MarketplaceConnection(**conn.model_dump())
@@ -958,6 +994,16 @@ async def update_connection(connection_id: uuid.UUID, conn: schemas.MarketplaceC
     await db.commit()
     await db.refresh(db_conn)
     return db_conn
+
+
+@app.delete("/api/v1/connections/{connection_id}", status_code=204)
+async def delete_connection(connection_id: uuid.UUID, db: AsyncSession = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+    result = await db.execute(select(models.MarketplaceConnection).where(models.MarketplaceConnection.id == connection_id))
+    db_conn = result.scalars().first()
+    if not db_conn:
+        raise HTTPException(status_code=404, detail="Connection not found")
+    await db.delete(db_conn)
+    await db.commit()
 
 @app.post("/api/v1/ai/extract")
 async def ai_extract(req: schemas.AIExtractRequest, db: AsyncSession = Depends(get_db), ai_key: str = Depends(get_deepseek_key), current_user: models.User = Depends(get_current_user)):
@@ -985,6 +1031,18 @@ async def iteration_1_test_ready():
 
 @app.get("/api/v1/iteration-1/dev-status")
 async def iteration_1_dev_status():
+    return {"status": "ok"}
+
+@app.get("/api/v1/iteration-1/test")
+async def iteration_1_test():
+    """Simple test endpoint for iteration 1 to verify backend can handle requests without dependencies, ideal for quick health checks."""
+    return {
+        "iteration": 1,
+        "status": "operational",
+        "timestamp": time.time(),
+        "message": "Backend is responsive and ready for iteration 1 tasks.",
+        "endpoint": "/api/v1/iteration-1/test"
+    }
     """Development status endpoint for iteration 1 to confirm backend can handle requests without timeouts."""
     return {
         "iteration": 1,
@@ -1391,17 +1449,34 @@ async def ai_generate_rich_content(
     return {"rich_content": rich_parsed, "landing_json": landing_parsed}
 
 
+@app.get("/api/v1/landing-templates")
+async def list_landing_templates():
+    from backend.services.landing_render import get_templates_list
+    return get_templates_list()
+
+
 @app.get("/api/v1/products/{product_id}/landing-preview", response_class=HTMLResponse)
-async def landing_preview(product_id: str, db: AsyncSession = Depends(get_db)):
+async def landing_preview(product_id: str, template: str = None, db: AsyncSession = Depends(get_db)):
     result = await db.execute(select(models.Product).where(models.Product.id == product_id))
     product = result.scalars().first()
     if not product:
         raise HTTPException(status_code=404, detail="Not found")
 
-    import json as _json
     from backend.services.landing_render import render_landing
-    html = render_landing(product)
+    html = render_landing(product, template=template)
     return html
+
+
+@app.put("/api/v1/products/{product_id}/landing-template")
+async def set_landing_template(product_id: str, body: dict, db: AsyncSession = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+    result = await db.execute(select(models.Product).where(models.Product.id == product_id))
+    product = result.scalars().first()
+    if not product:
+        raise HTTPException(status_code=404, detail="Not found")
+    product.landing_template = body.get("template", "dark_premium")
+    db.add(product)
+    await db.commit()
+    return {"ok": True}
 
 
 
@@ -1427,57 +1502,61 @@ async def put_social_content(product_id: str, body: dict, db: AsyncSession = Dep
 
 
 @app.post("/api/v1/products/{product_id}/ai-generate-social")
-async def ai_generate_social(product_id: str, db: AsyncSession = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+async def ai_generate_social(product_id: str, db: AsyncSession = Depends(get_db), current_user: models.User = Depends(get_current_user), ai_key: str = Depends(get_deepseek_key)):
     result = await db.execute(select(models.Product).where(models.Product.id == product_id))
     product = result.scalars().first()
     if not product:
         raise HTTPException(status_code=404, detail="Not found")
 
-    from openai import AsyncOpenAI
+    from backend.services.ai_service import get_client_and_model
     import json as _json
     import asyncio
 
-    client = AsyncOpenAI(
-        api_key=os.environ.get("DEEPSEEK_API_KEY", ""),
-        base_url="https://api.deepseek.com/v1",
-    )
+    client, model = get_client_and_model(ai_key)
 
     name = product.name or ""
-    desc = product.description or ""
+    desc = product.description_html or ""
     attrs = _json.dumps(product.attributes_data or {}, ensure_ascii=False)[:800]
-    images = (product.images or [])[:3]
-    img_str = ", ".join(images) if images else "нет"
+    images = (product.images or [])[:6]
+    img_str = "\n".join(f"  - {url}" for url in images) if images else "  нет фотографий"
+    img_count = len(images)
+    img_note = f"У товара {img_count} фото. Первое фото — главное изображение товара." if images else ""
 
     PLATFORMS = {
-        "instagram": {"name": "Instagram", "prompt": "Создай пост для Instagram. Формат: эмодзи-заголовок, 3-4 абзаца с эмодзи, 20-25 хэштегов в конце. Макс 2200 символов."},
-        "telegram": {"name": "Telegram", "prompt": "Создай пост для Telegram-канала. Используй **жирный** для акцентов, без спама хэштегов, с призывом к действию. Макс 4096 символов."},
-        "vk": {"name": "ВКонтакте", "prompt": "Создай пост для ВКонтакте. Живой разговорный стиль, 3-5 хэштегов в конце, призыв к действию. Макс 4096 символов."},
-        "twitter": {"name": "Twitter/X", "prompt": "Создай твит для Twitter/X. Строго до 280 символов, цепляющий, с 2-3 хэштегами."},
-        "ok": {"name": "Одноклассники", "prompt": "Создай пост для Одноклассников. Простой понятный стиль, эмодзи, 3-5 хэштегов. Макс 3000 символов."},
-        "yandex_market": {"name": "Яндекс.Маркет", "prompt": "Создай SEO-описание товара для Яндекс.Маркет. Заголовок до 150 символов, описание до 3000 символов с ключевыми характеристиками."},
-        "ozon": {"name": "Ozon", "prompt": "Создай rich-описание для Ozon: краткое описание, преимущества списком, технические особенности. До 5000 символов."},
-        "wildberries": {"name": "Wildberries", "prompt": "Создай описание для Wildberries: ключевые слова в начале, преимущества, характеристики. До 5000 символов."},
-        "max_messenger": {"name": "Мессенджер Макс", "prompt": "Создай пост для Мессенджера Макс. Короткий, с эмодзи, дружелюбный тон. Макс 1000 символов."},
+        "instagram": {"name": "Instagram", "prompt": f"Создай пост для Instagram с товаром, у которого {img_count} фото.\nПост должен:\n- начинаться с цепляющего эмодзи-заголовка\n- содержать 3-4 абзаца с эмодзи описывающих товар визуально (как он выглядит, цвет, дизайн — опирайся на фото)\n- заканчиваться 20-25 хэштегами\n- призыв к действию\nМакс 2200 символов."},
+        "telegram": {"name": "Telegram", "prompt": f"Создай пост для Telegram-канала.\nИспользуй **жирный** для акцентов.\nОпиши товар живо — как он выглядит, что в нём особенного визуально (у товара {img_count} фото).\n2-4 хэштега в конце, призыв к действию. Макс 4096 символов."},
+        "vk": {"name": "ВКонтакте", "prompt": f"Создай пост для ВКонтакте.\nЖивой разговорный стиль — расскажи о товаре как другу, опиши как он выглядит (у товара {img_count} фото).\n3-5 хэштегов в конце, призыв к действию. Макс 4096 символов."},
+        "twitter": {"name": "Twitter/X", "prompt": "Создай твит для Twitter/X. Строго до 280 символов, цепляющий, визуальный (намекни на то как выглядит товар), с 2-3 хэштегами."},
+        "ok": {"name": "Одноклассники", "prompt": f"Создай пост для Одноклассников. Простой понятный стиль для широкой аудитории, опиши внешний вид товара (у товара {img_count} фото), эмодзи, 3-5 хэштегов. Макс 3000 символов."},
+        "yandex_market": {"name": "Яндекс.Маркет", "prompt": "Создай SEO-описание товара для Яндекс.Маркет.\nСначала заголовок до 150 символов (с ключевыми словами).\nЗатем описание до 3000 символов: внешний вид и дизайн, ключевые характеристики, преимущества, для кого подходит."},
+        "ozon": {"name": "Ozon", "prompt": "Создай rich-описание для Ozon:\n1. Краткое описание (2-3 предложения о товаре и его внешнем виде)\n2. Ключевые преимущества списком (5-7 пунктов)\n3. Для кого подходит\n4. Технические особенности\nДо 5000 символов."},
+        "wildberries": {"name": "Wildberries", "prompt": "Создай описание для Wildberries:\n- Начни с ключевых слов через запятую\n- Описание внешнего вида и дизайна товара\n- Преимущества\n- Характеристики\n- Кому подойдёт\nДо 5000 символов."},
+        "max_messenger": {"name": "Мессенджер Макс", "prompt": f"Создай короткий пост для Мессенджера Макс. С эмодзи, дружелюбный тон, опиши как выглядит товар (у товара {img_count} фото). Макс 1000 символов."},
     }
 
-    base_ctx = "Товар: " + name + "\nОписание: " + desc[:500] + "\nАтрибуты: " + attrs + "\nФото: " + img_str + "\n"
+    base_ctx = (
+        "Товар: " + name + "\n"
+        "Описание: " + desc[:600] + "\n"
+        "Атрибуты: " + attrs + "\n"
+        + (img_note + "\nСсылки на фото товара:\n" + img_str + "\n" if images else "Фото: нет\n")
+    )
 
     async def gen_platform(key, cfg):
         try:
             import time
             resp = await client.chat.completions.create(
-                model="deepseek-chat",
+                model=model,
                 messages=[
-                    {"role": "system", "content": "Ты эксперт по контент-маркетингу и SMM для e-commerce. Пиши на русском языке."},
+                    {"role": "system", "content": "Ты эксперт по контент-маркетингу и SMM для e-commerce. Пиши на русском языке. Создавай живой, конкретный контент описывающий товар визуально."},
                     {"role": "user", "content": base_ctx + "\n" + cfg["prompt"]},
                 ],
-                max_tokens=1500,
+                max_tokens=1800,
                 temperature=0.8,
             )
             text = resp.choices[0].message.content or ""
-            return key, {"text": text.strip(), "platform": cfg["name"], "generated_at": time.time()}
+            return key, {"text": text.strip(), "platform": cfg["name"], "generated_at": time.time(), "images": images}
         except Exception as e:
-            return key, {"text": "Ошибка генерации: " + str(e), "platform": cfg["name"], "generated_at": 0}
+            return key, {"text": "Ошибка генерации: " + str(e), "platform": cfg["name"], "generated_at": 0, "images": images}
 
     tasks = [gen_platform(k, v) for k, v in PLATFORMS.items()]
     results = await asyncio.gather(*tasks)
@@ -1751,11 +1830,15 @@ async def import_marketplace_product(req: schemas.ImportRequest, db: AsyncSessio
 
     score = calculate_completeness(new_attrs, [a for a in active_attrs if a.is_required])
 
+    # Download external images to local storage
+    from backend.services.image_download import download_product_images
+    local_images = await download_product_images(images)
+
     if db_prod:
         db_prod.name = name
         db_prod.category_id = parent_id
         db_prod.attributes_data = new_attrs
-        db_prod.images = images
+        db_prod.images = local_images
         db_prod.completeness_score = score
     else:
         db_prod = models.Product(
@@ -1763,7 +1846,7 @@ async def import_marketplace_product(req: schemas.ImportRequest, db: AsyncSessio
             name=name,
             category_id=parent_id,
             attributes_data=new_attrs,
-            images=images,
+            images=local_images,
             completeness_score=score
         )
     db.add(db_prod)
@@ -3491,6 +3574,103 @@ async def get_market_dictionary(connection_id: str, category_id: str, dictionary
     return await adapter.get_dictionary(category_id, dictionary_id)
 
 
+
+
+@app.post("/api/v1/attribute-star-map/build-from-products")
+async def build_star_map_from_products(
+    db: AsyncSession = Depends(get_db),
+    ai_key: str = Depends(get_deepseek_key),
+    current_user: models.User = Depends(get_current_user),
+):
+    """Автосборка: категории из товаров PIM -> Ozon -> MM -> карта атрибутов."""
+    from backend.celery_worker import auto_build_star_map_from_products_task
+    import uuid as _uuid
+    task_id = str(_uuid.uuid4())
+    now_ts = int(time.time())
+    redis_client.hset(f"task:star_map_build:{task_id}", mapping={
+        "task_id": task_id, "status": "queued", "stage": "queued",
+        "progress_percent": 0, "message": "Запускаем автосборку по товарам PIM",
+        "started_at_ts": now_ts, "updated_at_ts": now_ts,
+        "finished_at_ts": "", "error": "", "result": "",
+    })
+    redis_client.expire(f"task:star_map_build:{task_id}", 60 * 60 * 24 * 7)
+    auto_build_star_map_from_products_task.delay(task_id, ai_key)
+    return {"ok": True, "task_id": task_id, "status": "queued"}
+
+@app.post("/api/v1/attribute-star-map/build-all")
+async def build_attribute_star_map_all(
+    db: AsyncSession = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    """Строит карту атрибутов по всем подключённым Ozon + Megamarket соединениям.
+    Берёт первый Ozon и перебирает все Megamarket."""
+    oz_res = await db.execute(
+        select(models.MarketplaceConnection).where(models.MarketplaceConnection.type == "ozon")
+    )
+    mm_res = await db.execute(
+        select(models.MarketplaceConnection).where(models.MarketplaceConnection.type == "megamarket")
+    )
+    ozon_conns = oz_res.scalars().all()
+    mm_conns = mm_res.scalars().all()
+
+    # Filter out test connections (api_key contains 'test')
+    ozon_conns = [c for c in ozon_conns if "test" not in (c.api_key or "").lower()]
+    mm_conns = [c for c in mm_conns if "test" not in (c.api_key or "").lower()]
+
+    if not ozon_conns:
+        raise HTTPException(400, "Нет активного подключения Ozon")
+    if not mm_conns:
+        raise HTTPException(400, "Нет активного подключения Megamarket")
+
+    import uuid as _uuid
+    task_id = str(_uuid.uuid4())
+    key = f"task:star_map_build:{task_id}"
+    now_ts = int(time.time())
+    redis_client.hset(key, mapping={
+        "task_id": task_id,
+        "status": "queued",
+        "stage": "queued",
+        "progress_percent": 0,
+        "message": f"Запускаем сборку: {len(ozon_conns)} Ozon x {len(mm_conns)} Megamarket",
+        "started_at_ts": now_ts,
+        "updated_at_ts": now_ts,
+        "finished_at_ts": "",
+        "error": "",
+        "result": "",
+        "ozon_count": len(ozon_conns),
+        "mm_count": len(mm_conns),
+    })
+    redis_client.expire(key, 60 * 60 * 24 * 7)
+
+    # Use first ozon + first mm (unique tokens — MM token is shared across stores)
+    oz_conn = ozon_conns[0]
+    # Deduplicate MM by api_key (same token = same company, no need to run twice)
+    seen_mm_keys: set = set()
+    unique_mm = []
+    for mc in mm_conns:
+        if mc.api_key not in seen_mm_keys:
+            seen_mm_keys.add(mc.api_key)
+            unique_mm.append(mc)
+    mm_conn = unique_mm[0]
+
+    build_attribute_star_map_task.delay(
+        task_id,
+        oz_conn.api_key,
+        oz_conn.client_id,
+        mm_conn.api_key,
+        500,   # max_ozon_categories — покрываем 500 наиболее частых
+        500,   # max_megamarket_categories
+        0.52,  # edge_threshold — чуть ниже для лучшего покрытия
+    )
+    return {
+        "ok": True,
+        "task_id": task_id,
+        "status": "queued",
+        "ozon_connections": [c.name for c in ozon_conns],
+        "megamarket_connections": [c.name for c in unique_mm],
+        "message": f"Сборка запущена: Ozon({oz_conn.name}) + {len(unique_mm)} ключей Megamarket (до 500 категорий каждый)",
+    }
+
 @app.post("/api/v1/attribute-star-map/build")
 async def build_attribute_star_map(
     req: schemas.AttributeStarMapBuildRequest,
@@ -3537,6 +3717,43 @@ async def build_attribute_star_map(
     )
     return {"ok": True, "task_id": task_id, "status": "queued", "stage": "queued", "message": "queued_celery_job"}
 
+
+
+@app.get("/api/v1/attribute-star-map/active-task")
+async def get_active_star_map_task(
+    current_user: models.User = Depends(get_current_user),
+):
+    """Возвращает активную задачу сборки карты (running > queued > done по времени)."""
+    keys = redis_client.keys("task:star_map_build:*")
+
+    def _d(v):
+        return v.decode() if isinstance(v, bytes) else str(v or "")
+
+    candidates = []
+    for k in keys:
+        raw = redis_client.hgetall(k) or {}
+        if not raw:
+            continue
+        d = {_d(kk): _d(vv) for kk, vv in raw.items()}
+        try:
+            d["progress_percent"] = int(d.get("progress_percent", 0))
+        except Exception:
+            d["progress_percent"] = 0
+        try:
+            d["_ts"] = int(d.get("updated_at_ts", 0))
+        except Exception:
+            d["_ts"] = 0
+        candidates.append(d)
+
+    if not candidates:
+        return {"ok": False, "task": None}
+
+    # Priority: running > queued > done/error, then by updated_at_ts desc
+    STATUS_PRI = {"running": 0, "building": 0, "queued": 1, "done": 2, "error": 3}
+    candidates.sort(key=lambda x: (STATUS_PRI.get(x.get("status", ""), 9), -x["_ts"]))
+    best = candidates[0]
+    best.pop("_ts", None)
+    return {"ok": True, "task": best}
 
 @app.get("/api/v1/attribute-star-map/build/status")
 async def build_attribute_star_map_status(
@@ -3643,6 +3860,230 @@ async def attribute_star_map_category_links(
 ):
     return get_attribute_star_category_links(ozon_category_id, megamarket_category_id, limit=limit)
 
+
+
+@app.get("/api/v1/mp/categories")
+async def mp_live_categories(
+    platform: str,
+    q: str = "",
+    db: AsyncSession = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    """Динамически загружает категории прямо из API маркетплейса (не из снэпшота).""",
+    from backend.services.attribute_star_map import _fetch_ozon_categories, _fetch_mm_categories
+    p = platform.strip().lower()
+    conn_res = await db.execute(
+        select(models.MarketplaceConnection).where(models.MarketplaceConnection.type == p)
+    )
+    conns = [c for c in conn_res.scalars().all() if "test" not in (c.api_key or "").lower()]
+    if not conns:
+        raise HTTPException(404, f"Нет подключения {platform}")
+    conn = conns[0]
+
+    if p == "ozon":
+        cats = await _fetch_ozon_categories(conn.api_key, conn.client_id)
+    elif p == "megamarket":
+        cats = await _fetch_mm_categories(conn.api_key)
+    else:
+        raise HTTPException(400, "platform must be ozon or megamarket")
+
+    if q.strip():
+        ql = q.strip().lower()
+        cats = [c for c in cats if ql in c["name"].lower()]
+
+    return {"ok": True, "platform": p, "total": len(cats), "categories": cats[:300]}
+
+
+@app.get("/api/v1/mp/category/attributes")
+async def mp_live_category_attributes(
+    platform: str,
+    category_id: str,
+    db: AsyncSession = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    """Загружает атрибуты категории прямо из API маркетплейса.""",
+    from backend.services.adapters import get_adapter
+    p = platform.strip().lower()
+    conn_res = await db.execute(
+        select(models.MarketplaceConnection).where(models.MarketplaceConnection.type == p)
+    )
+    conns = [c for c in conn_res.scalars().all() if "test" not in (c.api_key or "").lower()]
+    if not conns:
+        raise HTTPException(404, f"Нет подключения {platform}")
+    conn = conns[0]
+    adapter = get_adapter(conn.type, conn.api_key, conn.client_id, conn.store_id, getattr(conn, "warehouse_id", None))
+    try:
+        schema = await adapter.get_category_schema(category_id)
+        attrs = schema.get("attributes") or []
+        return {"ok": True, "platform": p, "category_id": category_id, "attributes": attrs, "total": len(attrs)}
+    except Exception as e:
+        raise HTTPException(500, f"Ошибка загрузки атрибутов: {str(e)}")
+
+
+@app.post("/api/v1/mp/category/map")
+async def mp_map_categories(
+    req: Dict[str, Any],
+    db: AsyncSession = Depends(get_db),
+    ai_key: str = Depends(get_deepseek_key),
+    current_user: models.User = Depends(get_current_user),
+):
+    """Строит маппинг атрибутов для пары категорий с учётом словарей MM."""
+    from backend.services.attribute_star_map import _read_json, _write_json, _STAR_MAP_SNAPSHOT
+    from backend.services.adapters import get_adapter
+    from difflib import SequenceMatcher
+    import re as _re, time as _time
+    from openai import AsyncOpenAI
+
+    ozon_cat = req.get("ozon_category")
+    mm_cat = req.get("megamarket_category")
+    if not ozon_cat or not mm_cat:
+        raise HTTPException(400, "ozon_category and megamarket_category required")
+
+    oz_res = await db.execute(select(models.MarketplaceConnection).where(models.MarketplaceConnection.type == "ozon"))
+    mm_res = await db.execute(select(models.MarketplaceConnection).where(models.MarketplaceConnection.type == "megamarket"))
+    oz_conns = [c for c in oz_res.scalars().all() if "test" not in (c.api_key or "").lower()]
+    mm_conns = [c for c in mm_res.scalars().all() if "test" not in (c.api_key or "").lower()]
+    if not oz_conns or not mm_conns:
+        raise HTTPException(400, "Нет подключений Ozon или Megamarket")
+
+    oz_adapter = get_adapter("ozon", oz_conns[0].api_key, oz_conns[0].client_id, None, None)
+    mm_adapter = get_adapter("megamarket", mm_conns[0].api_key, None, None, None)
+
+    oz_schema = await oz_adapter.get_category_schema(str(ozon_cat["id"]))
+    mm_schema = await mm_adapter.get_category_schema(str(mm_cat["id"]))
+    oz_attrs = oz_schema.get("attributes") or []
+    mm_attrs = mm_schema.get("attributes") or []
+
+    # ── Similarity helpers ──────────────────────────────────────────────────
+    _TR = _re.compile(r"[a-zA-Zа-яА-ЯёЁ0-9_]+")
+    def _n(s): return _re.sub(r"\s+", " ", str(s or "").strip().lower().replace("ё", "е"))
+    def _tok(s): return {t for t in _TR.findall(_n(s)) if len(t) > 1}
+    def _sim(a, b):
+        an, bn = _n(a), _n(b)
+        if not an or not bn: return 0.0
+        seq = SequenceMatcher(None, an, bn).ratio()
+        jac = len(_tok(an) & _tok(bn)) / max(1, len(_tok(an) | _tok(bn)))
+        if an in bn or bn in an: seq = max(seq, 0.82)
+        return seq * 0.7 + jac * 0.3
+
+    # ── AI matching for value dictionaries ─────────────────────────────────
+    async def _ai_match_values(oz_attr: dict, mm_attr: dict) -> list:
+        """Для атрибута с dict_options — AI сопоставляет значения Ozon -> MM словарь."""
+        oz_vals = oz_attr.get("dictionary_options") or oz_attr.get("values") or []
+        mm_opts = mm_attr.get("dictionary_options") or []
+        if not mm_opts:
+            return []
+        is_suggest = mm_attr.get("isSuggest")
+        restrict_note = "" if is_suggest else "ВАЖНО: isSuggest=false — использовать ТОЛЬКО значения из mm_options, не придумывать своих."
+        
+        prompt = f"""Сопоставь значения атрибута из Ozon с вариантами Megamarket.
+Ozon атрибут: {oz_attr.get("name")}
+Значения Ozon: {[v.get("value") or v.get("name") or str(v) for v in oz_vals[:50]]}
+
+Megamarket атрибут: {mm_attr.get("name")}
+Варианты MM (словарь): {[{"id": o.get("id"), "name": o.get("name")} for o in mm_opts[:100]]}
+
+{restrict_note}
+
+Верни JSON массив объектов: [{{"oz_value": "...", "mm_id": "...", "mm_name": "..."}}]
+Только те пары где есть реальное смысловое соответствие. Не придумывай — только из словаря MM."""
+        
+        try:
+            client = AsyncOpenAI(api_key=ai_key, base_url="https://api.deepseek.com")
+            resp = await client.chat.completions.create(
+                model="deepseek-chat",
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.1,
+                max_tokens=2000,
+            )
+            raw = resp.choices[0].message.content.strip()
+            # Extract JSON array
+            m = _re.search(r"\[.*\]", raw, _re.DOTALL)
+            if m:
+                import json as _json
+                return _json.loads(m.group())
+        except Exception:
+            pass
+        return []
+
+    # ── Build attribute edges ───────────────────────────────────────────────
+    edges = []
+    for oz_a in oz_attrs:
+        oz_name = str(oz_a.get("name") or "")
+        best_score, best_mm = 0.0, None
+        for mm_a in mm_attrs:
+            mm_name = str(mm_a.get("name") or "")
+            s = _sim(oz_name, mm_name)
+            if s > best_score:
+                best_score, best_mm = s, mm_a
+        if best_mm and best_score >= 0.42:
+            mm_name = str(best_mm.get("name") or "")
+            mm_opts = best_mm.get("dictionary_options") or []
+            is_suggest = best_mm.get("isSuggest")
+
+            edge = {
+                "from_platform": "ozon", "from_category_id": str(ozon_cat["id"]),
+                "from_attribute_id": str(oz_a.get("id") or oz_a.get("attribute_id") or ""),
+                "from_name": oz_name,
+                "to_platform": "megamarket", "to_category_id": str(mm_cat["id"]),
+                "to_attribute_id": str(best_mm.get("id") or ""),
+                "to_name": mm_name,
+                "score": round(best_score, 3),
+                "method": "semantic",
+                "mm_is_required": best_mm.get("is_required", False),
+                "mm_type": best_mm.get("type") or best_mm.get("valueTypeCode", ""),
+                "mm_is_suggest": is_suggest,
+                "mm_dictionary": mm_opts,          # полный словарь для UI
+                "value_mappings": [],               # будет заполнен если есть словарь
+            }
+
+            # If MM attr has a dictionary — match values
+            if mm_opts and oz_a.get("dictionary_options"):
+                value_mappings = await _ai_match_values(oz_a, best_mm)
+                edge["value_mappings"] = value_mappings
+
+            edges.append(edge)
+
+    # ── Merge into snapshot ─────────────────────────────────────────────────
+    snap = _read_json(_STAR_MAP_SNAPSHOT, {})
+    existing_edges = [e for e in (snap.get("edges") or [])
+                      if not (e.get("from_category_id") == str(ozon_cat["id"]) and
+                              e.get("to_category_id") == str(mm_cat["id"]))]
+    existing_edges.extend(edges)
+
+    oz_cats_list = snap.get("ozon_categories_list") or []
+    mm_cats_list = snap.get("megamarket_categories_list") or []
+    if not any(c.get("id") == str(ozon_cat["id"]) for c in oz_cats_list):
+        oz_cats_list.append({"id": str(ozon_cat["id"]), "name": ozon_cat.get("name", "")})
+    if not any(c.get("id") == str(mm_cat["id"]) for c in mm_cats_list):
+        mm_cats_list.append({"id": str(mm_cat["id"]), "name": mm_cat.get("name", "")})
+
+    oz_attrs_data = [a for a in (snap.get("ozon_attributes_data") or []) if str(a.get("category_id") or "") != str(ozon_cat["id"])]
+    for a in oz_attrs: oz_attrs_data.append({**a, "category_id": str(ozon_cat["id"])})
+    mm_attrs_data = [a for a in (snap.get("megamarket_attributes_data") or []) if str(a.get("category_id") or "") != str(mm_cat["id"])]
+    for a in mm_attrs: mm_attrs_data.append({**a, "category_id": str(mm_cat["id"])})
+
+    snap.update({
+        "edges": existing_edges,
+        "ozon_categories_list": oz_cats_list,
+        "megamarket_categories_list": mm_cats_list,
+        "ozon_attributes_data": oz_attrs_data,
+        "megamarket_attributes_data": mm_attrs_data,
+        "ozon_categories": len(oz_cats_list),
+        "megamarket_categories": len(mm_cats_list),
+        "ozon_attributes": len(oz_attrs_data),
+        "megamarket_attributes": len(mm_attrs_data),
+        "generated_at_ts": int(_time.time()),
+    })
+    _write_json(_STAR_MAP_SNAPSHOT, snap)
+
+    return {
+        "ok": True,
+        "edges_built": len(edges),
+        "ozon_attrs": len(oz_attrs),
+        "megamarket_attrs": len(mm_attrs),
+        "edges": edges,
+    }
 
 @app.post("/api/v1/integrations/{connection_id}/export")
 async def export_to_marketplace_bulk(

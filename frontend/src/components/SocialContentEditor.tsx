@@ -39,8 +39,8 @@ const s = {
   btn: (variant: 'primary' | 'ghost' | 'success' = 'ghost'): React.CSSProperties => ({
     display: 'flex', alignItems: 'center', gap: 6, padding: '8px 14px', borderRadius: 8,
     fontSize: 13, fontWeight: 600, cursor: 'pointer', border: '1px solid transparent',
-    ...(variant === 'primary' ? { background: 'linear-gradient(135deg,#6366f1,#8b5cf6)', color: '#fff', border: 'none' }
-      : variant === 'success' ? { background: 'linear-gradient(135deg,#10b981,#059669)', color: '#fff', border: 'none' }
+    ...(variant === 'primary' ? { background: 'linear-gradient(135deg,#6366f1,#8b5cf6)', color: '#fff', borderColor: 'transparent' }
+      : variant === 'success' ? { background: 'linear-gradient(135deg,#10b981,#059669)', color: '#fff', borderColor: 'transparent' }
       : { background: 'rgba(255,255,255,0.07)', color: 'rgba(255,255,255,0.75)', borderColor: 'rgba(255,255,255,0.1)' }),
   }),
   sideItem: (active: boolean, color: string): React.CSSProperties => ({
@@ -58,7 +58,7 @@ const s = {
 
 function PlatformCard({ platform, data, onChange }: {
   platform: Platform;
-  data: { text: string; generated_at: number } | undefined;
+  data: { text: string; generated_at: number; images?: string[] } | undefined;
   onChange: (text: string) => void;
 }) {
   const [copied, setCopied] = useState(false);
@@ -98,11 +98,30 @@ function PlatformCard({ platform, data, onChange }: {
               Нажмите «AI Генерировать» для создания контента
             </div>
           ) : (
+            <>
             <textarea
               style={{ ...s.textarea, minHeight: 140, borderColor: over ? 'rgba(248,113,113,0.4)' : 'rgba(255,255,255,0.1)' }}
               value={text}
               onChange={e => onChange(e.target.value)}
             />
+            {data?.images && data.images.length > 0 && (
+              <div style={{ marginTop: 12 }}>
+                <div style={{ fontSize: 11, color: 'rgba(255,255,255,.3)', marginBottom: 8, fontWeight: 600, textTransform: 'uppercase' as const, letterSpacing: '.06em' }}>
+                  Фото товара ({data.images.length})
+                </div>
+                <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' as const }}>
+                  {data.images.slice(0,6).map((img: string, i: number) => (
+                    <a key={i} href={img} target="_blank" rel="noreferrer">
+                      <img src={img} style={{ width: 72, height: 72, objectFit: 'cover' as const, borderRadius: 8, border: '1px solid rgba(255,255,255,.1)', cursor: 'pointer', transition: 'opacity .2s' }}
+                        onMouseOver={(e) => (e.currentTarget.style.opacity = '.7')}
+                        onMouseOut={(e) => (e.currentTarget.style.opacity = '1')}
+                      />
+                    </a>
+                  ))}
+                </div>
+              </div>
+            )}
+            </>
           )}
         </div>
       )}
@@ -114,7 +133,7 @@ function PlatformCard({ platform, data, onChange }: {
 
 export default function SocialContentEditor({ product }: { product: any }) {
   const { toast } = useToast();
-  const [content, setContent] = useState<Record<string, { text: string; platform: string; generated_at: number }>>({});
+  const [content, setContent] = useState<Record<string, { text: string; platform: string; generated_at: number; images?: string[] }>>({});
   const [generating, setGenerating] = useState(false);
   const [saving, setSaving] = useState(false);
   const [activePlatform, setActivePlatform] = useState<string>('instagram');
@@ -149,7 +168,7 @@ export default function SocialContentEditor({ product }: { product: any }) {
   const updateText = useCallback((key: string, text: string) => {
     setContent(prev => ({
       ...prev,
-      [key]: { ...prev[key], text, platform: PLATFORMS.find(p => p.key === key)?.name ?? key, generated_at: prev[key]?.generated_at ?? 0 },
+      [key]: { ...prev[key], text, platform: PLATFORMS.find(p => p.key === key)?.name ?? key, generated_at: prev[key]?.generated_at ?? 0, images: prev[key]?.images },
     }));
   }, []);
 

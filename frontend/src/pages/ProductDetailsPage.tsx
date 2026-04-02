@@ -21,6 +21,7 @@ import { api } from "../lib/api";
 import { useToast } from "../components/Toast";
 import ContentStudio from "../components/ContentStudio";
 import RichContentEditor from "../components/RichContentEditor";
+import SocialContentEditor from "../components/SocialContentEditor";
 import {
   ArrowLeft,
   Save,
@@ -41,6 +42,7 @@ import {
   History,
   Upload,
   X,
+  Share2,
 } from "lucide-react";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -202,6 +204,7 @@ const TABS = [
   { key: "syndication", label: "Синдикация", Icon: Send },
   { key: "history", label: "История", Icon: History },
   { key: "rich", label: "Rich & Лендинг", Icon: FileText },
+  { key: "social", label: "Соцсети", Icon: Share2 },
 ];
 
 // ─── Component ────────────────────────────────────────────────────────────────
@@ -1320,6 +1323,12 @@ export default function ProductDetailsPage() {
           <div style={{ padding: "0 16px 24px" }}>
             <RichContentEditor product={product} />
           </div>
+        </TabErrorBoundary>
+      )}
+
+      {activeTab === "social" && product && (
+        <TabErrorBoundary key="social">
+          <SocialContentEditor product={product} />
         </TabErrorBoundary>
       )}
     </div>

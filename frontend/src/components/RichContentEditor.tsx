@@ -2,7 +2,7 @@ import React, { useState, useEffect, useCallback } from 'react';
 import {
   Sparkles, Save, Plus, Trash2, ChevronUp, ChevronDown, RefreshCw,
   Type, List, Table, AlertCircle, ExternalLink, Eye, Edit3,
-  GripVertical, Star, Zap, CheckCircle, Image as ImageIcon,
+  GripVertical, Star, Zap, CheckCircle, Image as ImageIcon, Layout, X,
 } from 'lucide-react';
 import { api } from '../lib/api';
 import { useToast } from './Toast';
@@ -255,8 +255,11 @@ export default function RichContentEditor({ product }: { product: any }) {
   const [landingJson, setLandingJson] = useState<any>({});
   const [generating, setGenerating] = useState(false);
   const [saving, setSaving] = useState(false);
-  const [view, setView] = useState<'edit' | 'preview' | 'landing'>('edit');
+  const [view, setView] = useState<'edit' | 'preview' | 'landing' | 'templates'>('edit');
   const [landingUrl, setLandingUrl] = useState('');
+  const [templates, setTemplates] = useState<any[]>([]);
+  const [selectedTemplate, setSelectedTemplate] = useState<string>('dark_premium');
+  const [previewTemplate, setPreviewTemplate] = useState<string | null>(null);
 
   useEffect(() => {
     if (!product?.id) return;
@@ -267,7 +270,12 @@ export default function RichContentEditor({ product }: { product: any }) {
       })
       .catch(() => {});
     setLandingUrl(`/api/v1/products/${product.id}/landing-preview`);
+    if (product.landing_template) setSelectedTemplate(product.landing_template);
   }, [product?.id]);
+
+  useEffect(() => {
+    api.get('/landing-templates').then(r => setTemplates(r.data)).catch(() => {});
+  }, []);
 
   const addBlock = (type: BlockType) => setBlocks(prev => [...prev, defaultBlock(type)]);
 
@@ -289,8 +297,20 @@ export default function RichContentEditor({ product }: { product: any }) {
     });
   }, []);
 
-  const refreshLanding = () => {
-    setLandingUrl(`/api/v1/products/${product.id}/landing-preview?t=${Date.now()}`);
+  const refreshLanding = (tpl?: string) => {
+    const t = tpl || selectedTemplate;
+    setLandingUrl(`/api/v1/products/${product.id}/landing-preview?template=${t}&t=${Date.now()}`);
+  };
+
+  const handleSelectTemplate = async (key: string) => {
+    setSelectedTemplate(key);
+    setPreviewTemplate(null);
+    try {
+      await api.put(`/products/${product.id}/landing-template`, { template: key });
+    } catch {}
+    refreshLanding(key);
+    setView('landing');
+    toast('Шаблон применён', 'success');
   };
 
   const handleGenerate = async () => {
@@ -305,7 +325,7 @@ export default function RichContentEditor({ product }: { product: any }) {
         rich_content: newBlocks,
         landing_json: newLanding,
       });
-      setTimeout(() => { refreshLanding(); setView('landing'); }, 300);
+      setTimeout(() => { refreshLanding(selectedTemplate); setView('landing'); }, 300);
       toast('Готово — переключаю на лендинг', 'success');
     } catch (e: any) {
       toast('Ошибка генерации: ' + (e?.message ?? ''), 'error');
@@ -351,6 +371,7 @@ export default function RichContentEditor({ product }: { product: any }) {
         <button style={c.viewBtn(view === 'edit')} onClick={() => setView('edit')}><Edit3 size={13} />Редактор</button>
         <button style={c.viewBtn(view === 'preview')} onClick={() => setView('preview')}><Eye size={13} />Превью</button>
         <button style={c.viewBtn(view === 'landing')} onClick={() => { setView('landing'); refreshLanding(); }}><ExternalLink size={13} />Лендинг</button>
+        <button style={c.viewBtn(view === 'templates')} onClick={() => setView('templates')}><Layout size={13} />Шаблоны</button>
         <div style={{ flex: 1 }} />
         <span style={{ fontSize: 11, color: 'rgba(255,255,255,0.3)' }}>{blocks.length} блоков</span>
         <button style={{ ...c.btn('primary'), opacity: generating ? 0.7 : 1 }} onClick={handleGenerate} disabled={generating}>
@@ -405,6 +426,60 @@ export default function RichContentEditor({ product }: { product: any }) {
           </div>
         )}
 
+        {view === 'templates' && (
+          <div style={{ flex: 1, overflowY: 'auto' as const, padding: 24, background: '#0a0a18' }}>
+            <div style={{ marginBottom: 20 }}>
+              <div style={{ fontSize: 15, fontWeight: 700, color: '#fff', marginBottom: 6 }}>Выберите шаблон лендинга</div>
+              <div style={{ fontSize: 13, color: 'rgba(255,255,255,.4)' }}>Нажмите на шаблон для применения. Текущий: <b style={{ color: '#a5b4fc' }}>{templates.find(t => t.key === selectedTemplate)?.name || selectedTemplate}</b></div>
+            </div>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill,minmax(300px,1fr))', gap: 16 }}>
+              {templates.map(tpl => (
+                <div key={tpl.key} style={{
+                  borderRadius: 14, overflow: 'hidden', cursor: 'pointer',
+                  border: selectedTemplate === tpl.key ? '2px solid #6366f1' : '2px solid rgba(255,255,255,.08)',
+                  transition: 'all .2s', position: 'relative',
+                  boxShadow: selectedTemplate === tpl.key ? '0 0 24px rgba(99,102,241,.4)' : 'none',
+                }}>
+                  {/* Preview iframe */}
+                  <div style={{ position: 'relative', height: 200, overflow: 'hidden', background: '#111' }}
+                    onMouseEnter={() => setPreviewTemplate(tpl.key)}
+                    onMouseLeave={() => setPreviewTemplate(null)}>
+                    {previewTemplate === tpl.key ? (
+                      <iframe
+                        src={`/api/v1/products/${product.id}/landing-preview?template=${tpl.key}`}
+                        style={{ width: '200%', height: '200%', border: 'none', transform: 'scale(0.5)', transformOrigin: '0 0', pointerEvents: 'none' }}
+                        title={tpl.name}
+                      />
+                    ) : (
+                      <div style={{ width: '100%', height: '100%', background: tpl.preview_bg, display: 'flex', alignItems: 'center', justifyContent: 'center', flexDirection: 'column' as const, gap: 8 }}>
+                        <div style={{ width: 32, height: 4, borderRadius: 2, background: tpl.preview_accent, opacity: .9 }}></div>
+                        <div style={{ width: 56, height: 8, borderRadius: 4, background: tpl.preview_accent, opacity: .5 }}></div>
+                        <div style={{ width: 44, height: 4, borderRadius: 2, background: 'rgba(255,255,255,.2)' }}></div>
+                        <div style={{ marginTop: 8, fontSize: 11, color: 'rgba(255,255,255,.4)' }}>Наведите для превью</div>
+                      </div>
+                    )}
+                    {selectedTemplate === tpl.key && (
+                      <div style={{ position: 'absolute', top: 8, right: 8, background: '#6366f1', color: '#fff', fontSize: 11, fontWeight: 700, padding: '3px 10px', borderRadius: 20 }}>✓ Активен</div>
+                    )}
+                  </div>
+                  {/* Info */}
+                  <div style={{ padding: '12px 14px', background: 'rgba(255,255,255,.04)', display: 'flex', alignItems: 'center', gap: 10 }}>
+                    <div style={{ flex: 1 }}>
+                      <div style={{ fontSize: 13, fontWeight: 700, color: '#fff', marginBottom: 2 }}>{tpl.name}</div>
+                      <div style={{ fontSize: 11, color: 'rgba(255,255,255,.4)' }}>{tpl.desc}</div>
+                    </div>
+                    <button
+                      onClick={() => handleSelectTemplate(tpl.key)}
+                      style={{ padding: '7px 16px', borderRadius: 8, fontSize: 12, fontWeight: 700, cursor: 'pointer', border: 'none', background: selectedTemplate === tpl.key ? '#6366f1' : 'rgba(255,255,255,.1)', color: '#fff', transition: 'all .2s' }}
+                    >
+                      {selectedTemplate === tpl.key ? 'Применён' : 'Применить'}
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
         {view === 'landing' && (
           <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
             <div style={{ padding: '10px 16px', borderBottom: '1px solid rgba(255,255,255,0.07)', display: 'flex', gap: 10, alignItems: 'center', background: '#0d0d1a' }}>

@@ -26,6 +26,7 @@ class MarketplaceConnectionCreate(MarketplaceConnectionBase):
 
 class MarketplaceConnection(MarketplaceConnectionBase):
     id: UUID
+    status: Optional[str] = "pending"
     model_config = ConfigDict(from_attributes=True)
 
 class AttributeBase(BaseModel):
@@ -74,6 +75,7 @@ class ProductUpdate(BaseModel):
     rich_content: Optional[list] = None
     landing_json: Optional[Dict[str, Any]] = None
     social_content: Optional[Dict[str, Any]] = None
+    landing_template: Optional[str] = None
 
 class Product(ProductBase):
     id: UUID
@@ -82,6 +84,7 @@ class Product(ProductBase):
     rich_content: Optional[list] = None
     landing_json: Optional[Dict[str, Any]] = None
     social_content: Optional[Dict[str, Any]] = None
+    landing_template: Optional[str] = None
     model_config = ConfigDict(from_attributes=True)
 
 class AIExtractRequest(BaseModel):

@@ -216,7 +216,7 @@ class OzonAdapter(MarketplaceAdapter):
     async def push_product(self, mapped_payload: Dict[str, Any]) -> Dict[str, Any]:
         headers = self._ozon_headers()
         body = await self._build_ozon_v2_import_body(mapped_payload)
-        async with httpx.AsyncClient(timeout=60.0) as client:
+        async with ozon_httpx_client(60.0) as client:
             res = await client.post(
                 "https://api-seller.ozon.ru/v2/product/import",
                 headers=headers,
@@ -283,7 +283,7 @@ class OzonAdapter(MarketplaceAdapter):
                         out.append(s)
             return out
 
-        async with httpx.AsyncClient(timeout=60.0) as client:
+        async with ozon_httpx_client(60.0) as client:
             res_attrs = await client.post("https://api-seller.ozon.ru/v4/product/info/attributes", headers=headers, json=payload)
             res_info = await client.post("https://api-seller.ozon.ru/v2/product/info", headers=headers, json=payload_info)
             res_list = await client.post("https://api-seller.ozon.ru/v3/product/info/list", headers=headers, json=payload_list)
@@ -368,7 +368,7 @@ class OzonAdapter(MarketplaceAdapter):
             "Api-Key": self.api_key,
             "Content-Type": "application/json"
         }
-        async with httpx.AsyncClient(timeout=60.0) as client:
+        async with ozon_httpx_client(60.0) as client:
             res = await client.post("https://api-seller.ozon.ru/v1/description-category/tree", headers=headers)
             if res.status_code == 200:
                 tree = res.json().get("result", [])
@@ -402,7 +402,7 @@ class OzonAdapter(MarketplaceAdapter):
             "type_id": int(parts[1]),
             "language": "DEFAULT"
         }
-        async with httpx.AsyncClient(timeout=60.0) as client:
+        async with ozon_httpx_client(60.0) as client:
             res = await client.post("https://api-seller.ozon.ru/v1/description-category/attribute", headers=headers, json=payload)
             if res.status_code == 200:
                 return {"attributes": res.json().get("result", [])}
@@ -422,7 +422,7 @@ class OzonAdapter(MarketplaceAdapter):
             "dictionary_id": int(dictionary_id),
             "limit": 500
         }
-        async with httpx.AsyncClient(timeout=60.0) as client:
+        async with ozon_httpx_client(60.0) as client:
             res = await client.post("https://api-seller.ozon.ru/v1/description-category/attribute/values", headers=headers, json=payload)
             if res.status_code == 200:
                 return res.json().get("result", [])
@@ -433,7 +433,7 @@ class OzonAdapter(MarketplaceAdapter):
         headers = self._ozon_headers()
         payload = {"offer_id": [str(sku)], "visibility": "ALL"}
         try:
-            async with httpx.AsyncClient(timeout=60.0) as client:
+            async with ozon_httpx_client(60.0) as client:
                 res = await client.post(
                     "https://api-seller.ozon.ru/v3/product/info/list",
                     headers=headers,
@@ -460,6 +460,29 @@ class OzonAdapter(MarketplaceAdapter):
         except Exception as e:
             _log.debug("Ozon get_async_errors: %s", e)
         return None
+
+    async def test_connection(self) -> Dict[str, Any]:
+        """Проверяет подключение к Ozon Seller API через дерево категорий."""
+        headers = self._ozon_headers()
+        try:
+            async with ozon_httpx_client(15.0) as client:
+                res = await client.post(
+                    "https://api-seller.ozon.ru/v1/description-category/tree",
+                    headers=headers,
+                    json={},
+                )
+            if res.status_code == 200:
+                data = res.json()
+                cat_count = len((data.get("result") or []))
+                return {"status": "ok", "categories": cat_count}
+            elif res.status_code == 401:
+                raise Exception("Неверный Client-Id или Api-Key")
+            elif res.status_code == 403:
+                raise Exception("Нет прав доступа. Проверьте права ключа в кабинете Ozon.")
+            else:
+                raise Exception(f"Ozon API вернул {res.status_code}: {res.text[:200]}")
+        except Exception:
+            raise
 
 class WbAdapter(MarketplaceAdapter):
     async def push_product(self, mapped_payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -2041,6 +2064,24 @@ class MegamarketAdapter(MarketplaceAdapter):
             _log.warning("MM list_error_offer_ids failed: %s", e)
             return []
 
+    async def test_connection(self) -> Dict[str, Any]:
+        """Проверяет подключение к Megamarket Partner API."""
+        headers = megamarket_request_headers(self.api_key, for_post=False)
+        try:
+            async with megamarket_httpx_client(15.0) as client:
+                res = await client.get(
+                    "https://partner.megamarket.ru/api/merchantIntegration/assortment/v1/categoryTree/get",
+                    headers=headers,
+                )
+            if res.status_code == 200:
+                return {"status": "ok", "message": "Megamarket подключён"}
+            elif res.status_code in (401, 403):
+                raise Exception("Неверный токен Megamarket")
+            else:
+                raise Exception(f"Megamarket API вернул {res.status_code}: {res.text[:200]}")
+        except Exception:
+            raise
+
 def get_adapter(
     connection_type: str,
     api_key: str,
@@ -2119,6 +2160,16 @@ def megamarket_httpx_client(timeout: float = 60.0) -> httpx.AsyncClient:
     )
     return httpx.AsyncClient(timeout=timeout, proxy=proxy or None)
 
+
+
+def ozon_httpx_client(timeout: float = 60.0) -> httpx.AsyncClient:
+    """Клиент для api-seller.ozon.ru с поддержкой прокси через OZON_HTTPS_PROXY или HTTPS_PROXY."""
+    proxy = (
+        os.getenv("OZON_HTTPS_PROXY", "").strip()
+        or os.getenv("HTTPS_PROXY", "").strip()
+        or os.getenv("HTTP_PROXY", "").strip()
+    )
+    return httpx.AsyncClient(timeout=timeout, proxy=proxy or None)
 
 def megamarket_request_headers(token: str, *, for_post: bool = False) -> Dict[str, str]:
     """Общие заголовки для вызовов MM (token = X-Merchant-Token)."""
