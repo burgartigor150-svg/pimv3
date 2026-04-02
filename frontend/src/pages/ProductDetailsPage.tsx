@@ -1136,10 +1136,7 @@ export default function ProductDetailsPage() {
           </div>
         )}
 
-        {/* ──────────── Студия ──────────── */}
-        {activeTab === "studio" && product && (
-          <ContentStudio product={product} />
-        )}
+        {/* Studio moved outside container */}
 
         {/* ──────────── История ──────────── */}
         {activeTab === "history" && (
@@ -1289,6 +1286,13 @@ export default function ProductDetailsPage() {
           </div>
         )}
       </div>
+
+      {/* ──────────── Студия — полноэкранная, за пределами ограниченного контейнера ──────────── */}
+      {activeTab === "studio" && product && (
+        <div style={{ padding: "0 16px 24px" }}>
+          <ContentStudio product={product} />
+        </div>
+      )}
     </div>
   );
 }
