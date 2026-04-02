@@ -297,7 +297,13 @@ async def iteration_4_ready():
 
 @app.get("/api/v1/iteration-4-status")
 async def iteration_4_status():
-    return {}
+    """Endpoint for iteration 4 to confirm backend is running and ready for new tasks."""
+    return {
+        "iteration": 4,
+        "status": "backend operational",
+        "timestamp": time.time(),
+        "message": "Backend is healthy and ready for further development tasks."
+    }
 @app.get("/api/v1/iteration-4/dev-status")
 async def iteration_4_dev_status():
     """Development status endpoint for iteration 4 to confirm backend can handle requests without timeouts."""
@@ -312,13 +318,6 @@ async def iteration_4_dev_status():
             "Task automation"
         ],
         "notes": "Lightweight endpoint added to prevent timeouts."
-    }
-    """Endpoint for iteration 4 to confirm backend is running and ready for new tasks."""
-    return {
-        "iteration": 4,
-        "status": "backend operational",
-        "timestamp": time.time(),
-        "message": "Backend is healthy and ready for further development tasks."
     }
 
 @app.get("/api/v1/iteration-5-status")
@@ -1095,6 +1094,17 @@ async def ai_chat(req: schemas.ChatRequest, db: AsyncSession = Depends(get_db), 
     return {"reply": reply}
 @app.get("/api/v1/stats")
 async def get_stats(db: AsyncSession = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+t_user: models.User = Depends(get_current_user)):
+    """Возвращает статистику продуктов и атрибутов."""
+    from sqlalchemy import func
+    product_count = await db.scalar(select(func.count()).select_from(models.Product))
+    attribute_count = await db.scalar(select(func.count()).select_from(models.Attribute))
+    category_count = await db.scalar(select(func.count()).select_from(models.Category))
+    return {
+        "products": product_count or 0,
+        "attributes": attribute_count or 0,
+        "categories": category_count or 0
+    }
     from sqlalchemy import func
     total_products = (await db.execute(select(func.count(models.Product.id)))).scalar() or 0
     total_categories = (await db.execute(select(func.count(models.Category.id)))).scalar() or 0
