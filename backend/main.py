@@ -1040,6 +1040,13 @@ async def agent_task_create(
         task_type=req.task_type,
         title=req.title,
         description=req.description,
+        context=req.context,
+        user_id=current_user.id
+    )
+    return created
+        task_type=req.task_type,
+        title=req.title,
+        description=req.description,
         requested_by=current_user.email,
         namespace=req.namespace,
         docs_urls=req.docs_urls,
