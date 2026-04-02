@@ -1060,15 +1060,7 @@ async def agent_task_create(
 
 
 
-@app.get("/api/v1/agent-tasks/{task_id}")
-async def agent_task_get(
-    task_id: str,
-    current_user: models.User = Depends(get_current_user),
-):
-    return get_agent_task(task_id)
 
-
-@app.get("/api/v1/agent-tasks")
 async def get_agent_tasks(
     skip: int = 0,
     limit: int = 100,
