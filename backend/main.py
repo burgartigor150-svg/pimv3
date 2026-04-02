@@ -233,6 +233,18 @@ async def iteration_2_dev_status():
 
 @app.get("/api/v1/iteration-2/test-endpoint")
 async def iteration_2_test_endpoint():
+
+
+@app.get("/api/v1/iteration-2/simple-check")
+async def iteration_2_simple_check():
+    """A simple, lightweight endpoint for iteration 2 to verify backend can handle requests without any dependencies, useful for quick health checks."""
+    return {
+        "iteration": 2,
+        "status": "ok",
+        "timestamp": time.time(),
+        "message": "Backend is responsive and ready for iteration 2 tasks.",
+        "endpoint": "/api/v1/iteration-2/simple-check"
+    }
     """Test endpoint for iteration 2 to verify backend functionality and readiness for development tasks."""
     return {
         "iteration": 2,
@@ -468,6 +480,7 @@ async def iteration_5_dev_status():
 
 @app.get("/api/v1/iteration-6-status")
 async def iteration_6_status():
+    return {}
 
 @app.get("/api/v1/iteration-7-ready")
 async def iteration_7_ready():

@@ -90,16 +90,16 @@ function TextEditor({ block, onChange }: { block: TextBlock; onChange: (b: TextB
 
 function FeaturesEditor({ block, onChange }: { block: FeaturesBlock; onChange: (b: FeaturesBlock) => void }) {
   const updateItem = (i: number, upd: Partial<{ icon: string; title: string; desc: string }>) => {
-    const items = block.items.map((it, idx) => idx === i ? { ...it, ...upd } : it);
+    const items = (block.items ?? []).map((it, idx) => idx === i ? { ...it, ...upd } : it);
     onChange({ ...block, items });
   };
-  const addItem = () => onChange({ ...block, items: [...block.items, { icon: '✓', title: 'Новый пункт', desc: '' }] });
-  const removeItem = (i: number) => onChange({ ...block, items: block.items.filter((_, idx) => idx !== i) });
+  const addItem = () => onChange({ ...block, items: [...(block.items ?? []), { icon: '✓', title: 'Новый пункт', desc: '' }] });
+  const removeItem = (i: number) => onChange({ ...block, items: (block.items ?? []).filter((_, idx) => idx !== i) });
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
       <div><label style={s.label}>Заголовок раздела</label><input style={s.input} value={block.title} onChange={e => onChange({ ...block, title: e.target.value })} /></div>
-      {block.items.map((item, i) => (
+      {(block.items ?? []).map((item, i) => (
         <div key={i} style={{ background: 'rgba(255,255,255,0.04)', borderRadius: 8, padding: 10 }}>
           <div style={s.row}>
             <input style={{ ...s.input, width: 50 }} value={item.icon} onChange={e => updateItem(i, { icon: e.target.value })} title="Эмодзи" />
@@ -116,16 +116,16 @@ function FeaturesEditor({ block, onChange }: { block: FeaturesBlock; onChange: (
 
 function SpecsEditor({ block, onChange }: { block: SpecsBlock; onChange: (b: SpecsBlock) => void }) {
   const updateRow = (i: number, col: 0 | 1, val: string) => {
-    const rows = block.rows.map((r, idx): [string, string] => idx === i ? (col === 0 ? [val, r[1]] : [r[0], val]) : r);
+    const rows = (block.rows ?? []).map((r, idx): [string, string] => idx === i ? (col === 0 ? [val, r[1]] : [r[0], val]) : r);
     onChange({ ...block, rows });
   };
-  const addRow = () => onChange({ ...block, rows: [...block.rows, ['', '']] });
-  const removeRow = (i: number) => onChange({ ...block, rows: block.rows.filter((_, idx) => idx !== i) });
+  const addRow = () => onChange({ ...block, rows: [...(block.rows ?? []), ['', '']] });
+  const removeRow = (i: number) => onChange({ ...block, rows: (block.rows ?? []).filter((_, idx) => idx !== i) });
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
       <div><label style={s.label}>Заголовок таблицы</label><input style={s.input} value={block.title} onChange={e => onChange({ ...block, title: e.target.value })} /></div>
-      {block.rows.map((row, i) => (
+      {(block.rows ?? []).map((row, i) => (
         <div key={i} style={s.row}>
           <input style={{ ...s.input, flex: 1 }} value={row[0]} onChange={e => updateRow(i, 0, e.target.value)} placeholder="Название параметра" />
           <input style={{ ...s.input, flex: 1 }} value={row[1]} onChange={e => updateRow(i, 1, e.target.value)} placeholder="Значение" />
@@ -214,7 +214,7 @@ function RichPreview({ blocks, productImages }: { blocks: Block[]; productImages
           return (
             <div key={i} style={{ marginBottom: 28 }}>
               <h3 style={{ fontSize: 20, fontWeight: 800, marginBottom: 16, color: '#111' }}>{b.title}</h3>
-              {b.items.map((it, j) => (
+              {(b.items ?? []).map((it, j) => (
                 <div key={j} style={{ display: 'flex', gap: 12, alignItems: 'flex-start', marginBottom: 12 }}>
                   <span style={{ fontSize: 22 }}>{it.icon}</span>
                   <div><b style={{ fontSize: 15 }}>{it.title}</b><br /><span style={{ fontSize: 13, color: '#555' }}>{it.desc}</span></div>
@@ -229,7 +229,7 @@ function RichPreview({ blocks, productImages }: { blocks: Block[]; productImages
             <div key={i} style={{ marginBottom: 28 }}>
               <h3 style={{ fontSize: 20, fontWeight: 800, marginBottom: 12, color: '#111' }}>{b.title}</h3>
               <table style={{ width: '100%', borderCollapse: 'collapse' }}>
-                {b.rows.map((row, j) => (
+                {(b.rows ?? []).map((row, j) => (
                   <tr key={j}><td style={{ padding: '8px 12px', borderBottom: '1px solid #f0f0f0', color: '#666', fontSize: 13, width: '45%' }}>{row[0]}</td><td style={{ padding: '8px 12px', borderBottom: '1px solid #f0f0f0', fontWeight: 600, fontSize: 13 }}>{row[1]}</td></tr>
                 ))}
               </table>
@@ -289,13 +289,24 @@ export default function RichContentEditor({ product }: { product: any }) {
     });
   }, []);
 
+  const refreshLanding = () => {
+    setLandingUrl(`/api/v1/products/${product.id}/landing-preview?t=${Date.now()}`);
+  };
+
   const handleGenerate = async () => {
     setGenerating(true);
     try {
       const res = await api.post(`/products/${product.id}/ai-generate-rich`);
-      setBlocks(res.data.rich_content || []);
-      setLandingJson(res.data.landing_json || {});
-      toast('AI сгенерировал rich content и лендинг', 'success');
+      const newBlocks = res.data.rich_content || [];
+      const newLanding = res.data.landing_json || {};
+      setBlocks(newBlocks);
+      setLandingJson(newLanding);
+      await api.put(`/products/${product.id}/rich-content`, {
+        rich_content: newBlocks,
+        landing_json: newLanding,
+      });
+      setTimeout(() => { refreshLanding(); setView('landing'); }, 300);
+      toast('Готово — переключаю на лендинг', 'success');
     } catch (e: any) {
       toast('Ошибка генерации: ' + (e?.message ?? ''), 'error');
     } finally { setGenerating(false); }
@@ -305,6 +316,7 @@ export default function RichContentEditor({ product }: { product: any }) {
     setSaving(true);
     try {
       await api.put(`/products/${product.id}/rich-content`, { rich_content: blocks, landing_json: landingJson });
+      refreshLanding();
       toast('Сохранено', 'success');
     } catch { toast('Ошибка сохранения', 'error'); }
     finally { setSaving(false); }

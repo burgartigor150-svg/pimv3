@@ -1,4 +1,21 @@
-import React, { useEffect, useState, useCallback, useRef } from "react";
+import React, { useEffect, useState, useCallback, useRef, Component } from "react";
+
+// ─── Error Boundary ───────────────────────────────────────────────────────────
+class TabErrorBoundary extends Component<{children: React.ReactNode}, {error: Error | null}> {
+  constructor(props: any) { super(props); this.state = { error: null }; }
+  static getDerivedStateFromError(error: Error) { return { error }; }
+  render() {
+    if (this.state.error) {
+      return React.createElement('div',
+        {style: {padding: 40, color: '#f87171', background: '#1a0a0a', borderRadius: 12, margin: 16}},
+        React.createElement('b', null, 'Ошибка компонента:'),
+        React.createElement('pre', {style: {marginTop: 12, fontSize: 12, whiteSpace: 'pre-wrap', color: '#fca5a5'}},
+          this.state.error.message + ' ' + (this.state.error.stack ?? ''))
+      );
+    }
+    return this.props.children;
+  }
+}
 import { useParams, useNavigate } from "react-router-dom";
 import { api } from "../lib/api";
 import { useToast } from "../components/Toast";
@@ -1291,15 +1308,19 @@ export default function ProductDetailsPage() {
 
       {/* ──────────── Студия — полноэкранная, за пределами ограниченного контейнера ──────────── */}
       {activeTab === "studio" && product && (
-        <div style={{ padding: "0 16px 24px" }}>
-          <ContentStudio product={product} />
-        </div>
+        <TabErrorBoundary key="studio">
+          <div style={{ padding: "0 16px 24px" }}>
+            <ContentStudio product={product} />
+          </div>
+        </TabErrorBoundary>
       )}
 
       {activeTab === "rich" && product && (
-        <div style={{ padding: "0 16px 24px" }}>
-          <RichContentEditor product={product} />
-        </div>
+        <TabErrorBoundary key="rich">
+          <div style={{ padding: "0 16px 24px" }}>
+            <RichContentEditor product={product} />
+          </div>
+        </TabErrorBoundary>
       )}
     </div>
   );
