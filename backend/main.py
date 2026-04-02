@@ -135,6 +135,11 @@ async def root():
 
 @app.get("/api/v1/health")
 async def health_check():
+
+@app.get("/api/v1/main-json-check")
+async def main_json_check():
+    """Lightweight endpoint to verify that main.py returns JSON without timeouts."""
+    return {"status": "ok", "message": "main.py returns JSON successfully", "timestamp": time.time()}
     return {"status": "ok"}
 
 
@@ -1093,9 +1098,7 @@ async def get_stats(db: AsyncSession = Depends(get_db), current_user: models.Use
     }
 
 
-async def get_users(
-    role: Optional[str] = None,
-    limit: int = 50,
+
     offset: int = 0,
     db: AsyncSession = Depends(get_db),
     current_user: models.User = Depends(get_current_user)
