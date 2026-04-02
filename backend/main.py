@@ -150,6 +150,46 @@ async def iteration_2_status():
         "message": "Backend is healthy and ready for further development tasks."
     }
 
+@app.get("/api/v1/iteration-2-ready")
+async def iteration_2_ready():
+    """Endpoint for iteration 2 to confirm backend is fully ready for new development tasks."""
+    return {
+        "iteration": 2,
+        "status": "ready",
+        "timestamp": time.time(),
+        "message": "Backend is fully operational and prepared for iteration 2 tasks.",
+        "endpoints": [
+            "/api/v1/health",
+            "/api/v1/iteration-2-status",
+            "/api/v1/iteration-2-ready"
+        ]
+    }
+
+@app.get("/api/v1/iteration-1-status")
+
+@app.get("/api/v1/iteration-3-ready")
+async def iteration_3_ready():
+    """Endpoint for iteration 3 to confirm backend is fully ready for new development tasks."""
+    return {
+        "iteration": 3,
+        "status": "ready",
+        "timestamp": time.time(),
+        "message": "Backend is fully operational and prepared for iteration 3 tasks.",
+        "endpoints": [
+            "/api/v1/health",
+            "/api/v1/iteration-3-status",
+            "/api/v1/iteration-3-ready"
+        ]
+    }
+async def iteration_1_status():
+    """Endpoint for iteration 1 to confirm backend is running and ready for new tasks."""
+    return {
+        "iteration": 1,
+        "status": "backend operational",
+        "timestamp": time.time(),
+        "message": "Backend is healthy and ready for further development tasks."
+    }
+
 @app.get("/api/v1/iteration-4-status")
 async def iteration_4_status():
     """Endpoint for iteration 4 to confirm backend is running and ready for new tasks."""
@@ -606,6 +646,10 @@ async def ai_extract(req: schemas.AIExtractRequest, db: AsyncSession = Depends(g
     attrs_res = await db.execute(select(models.Attribute))
     active_attrs = attrs_res.scalars().all()
     extracted = await extract_attributes(req.text, active_attrs, ai_key)
+    try:
+        extracted = await asyncio.wait_for(extract_attributes(req.text, active_attrs, ai_key), timeout=30.0)
+    except asyncio.TimeoutError:
+        raise HTTPException(status_code=504, detail="LLM request timed out after 30 seconds")
     return {"extracted_data": extracted}
 
 @app.post("/api/v1/ai/generate-promo")
@@ -818,6 +862,10 @@ async def ai_chat(req: schemas.ChatRequest, db: AsyncSession = Depends(get_db), 
     extra_instructions = setting.value if setting else ""
     
     reply = await chat_with_copilot([m.model_dump() for m in req.messages], ai_key, req.current_path, extra_instructions)
+    try:
+        reply = await asyncio.wait_for(chat_with_copilot([m.model_dump() for m in req.messages], ai_key, req.current_path, extra_instructions), timeout=30.0)
+    except asyncio.TimeoutError:
+        raise HTTPException(status_code=504, detail="LLM chat request timed out after 30 seconds")
     return {"reply": reply}
 
 @app.get("/api/v1/stats")
