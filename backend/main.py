@@ -943,6 +943,23 @@ async def iteration_1_test_ready():
         "endpoint": "/api/v1/iteration-1/test-ready"
     }
 
+
+@app.get("/api/v1/iteration-1/dev-status")
+async def iteration_1_dev_status():
+    """Development status endpoint for iteration 1 to confirm backend can handle requests without timeouts."""
+    return {
+        "iteration": 1,
+        "status": "developing",
+        "timestamp": time.time(),
+        "message": "Backend is actively being developed for iteration 1 tasks.",
+        "features": [
+            "Health checks operational",
+            "AI service integrations",
+            "Task automation"
+        ],
+        "notes": "Lightweight endpoint added to prevent timeouts."
+    }
+
 @app.post("/api/v1/ai/enrich/{product_id}")
 async def ai_enrich_product(
     product_id: str,
@@ -968,9 +985,8 @@ async def ai_enrich_product(
 2. Напиши HTML-описание на русском (2-4 абзаца, ключевые характеристики, преимущества)
 Верни JSON: {"name": "...", "description_html": "<p>...</p>"}"""
 
-    user_msg = (Товар:  + name +
-                
-Атрибуты:  + _json.dumps(attrs, ensure_ascii=False)[:2000])
+    user_msg = ("Товар: " + name +
+                "\nАтрибуты: " + _json.dumps(attrs, ensure_ascii=False)[:2000])
 
     response = await client.chat.completions.create(
         model=model,
