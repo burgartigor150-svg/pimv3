@@ -166,6 +166,21 @@ async def iteration_2_ready():
 
 @app.get("/api/v1/iteration-1-status")
 
+@app.get("/api/v1/iteration-1/health")
+async def iteration_1_health():
+    """Health check endpoint specifically for iteration 1 to confirm backend is running smoothly."""
+    return {
+        "iteration": 1,
+        "status": "healthy",
+        "timestamp": time.time(),
+        "message": "Backend is operational and ready for iteration 1 tasks.",
+        "endpoints": [
+            "/api/v1/health",
+            "/api/v1/iteration-1-status",
+            "/api/v1/iteration-1/health"
+        ]
+    }
+
 @app.get("/api/v1/iteration-3-ready")
 async def iteration_3_ready():
     """Endpoint for iteration 3 to confirm backend is fully ready for new development tasks."""
@@ -195,7 +210,6 @@ async def iteration_4_ready():
             "/api/v1/iteration-4-ready"
         ]
     }
-async def iteration_1_status():
     """Endpoint for iteration 1 to confirm backend is running and ready for new tasks."""
     return {
         "iteration": 1,
