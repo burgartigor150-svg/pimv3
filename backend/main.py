@@ -505,6 +505,22 @@ async def iteration_5_dev_status():
 async def iteration_6_status():
     return {}
 
+
+@app.get("/api/v1/iteration-6-ready")
+async def iteration_6_ready():
+    """Endpoint for iteration 6 to confirm backend is fully ready for new development tasks."""
+    return {
+        "iteration": 6,
+        "status": "ready",
+        "timestamp": time.time(),
+        "message": "Backend is fully operational and prepared for iteration 6 tasks.",
+        "endpoints": [
+            "/api/v1/health",
+            "/api/v1/iteration-6-status",
+            "/api/v1/iteration-6-ready"
+        ]
+    }
+
 @app.get("/api/v1/iteration-7-ready")
 async def iteration_7_ready():
     """Endpoint for iteration 7 to confirm backend is fully ready for new development tasks."""
@@ -3645,6 +3661,23 @@ async def build_star_map_from_products(
     redis_client.expire(f"task:star_map_build:{task_id}", 60 * 60 * 24 * 7)
     auto_build_star_map_from_products_task.delay(task_id, ai_key)
     return {"ok": True, "task_id": task_id, "status": "queued"}
+
+@app.post("/api/v1/attribute-star-map/enrich-value-mappings")
+async def enrich_star_map_value_mappings_endpoint(
+    ai_key: str = Depends(get_deepseek_key),
+    current_user: models.User = Depends(get_current_user),
+):
+    """
+    Обогащает edges звёздной карты value_mappings через AI.
+    Запускать однократно после автосборки — AI сопоставит значения Ozon
+    со словарями Megamarket и сохранит результат в снапшот.
+    После этого при выгрузке товаров resolve_product_attributes будет
+    сразу подставлять готовые значения без запросов к AI.
+    """
+    from backend.services.attribute_star_map import enrich_star_map_value_mappings
+    result = enrich_star_map_value_mappings(ai_key)
+    return result
+
 
 @app.post("/api/v1/attribute-star-map/build-all")
 async def build_attribute_star_map_all(
