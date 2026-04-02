@@ -138,6 +138,27 @@ async def health_check():
     return {"status": "ok"}
 
 @app.get("/api/v1/system-status")
+
+
+@app.get("/api/v1/iteration-2-status")
+async def iteration_2_status():
+
+@app.get("/api/v1/iteration-3-status")
+async def iteration_3_status():
+    """Endpoint for iteration 3 to confirm backend is running and ready for new tasks."""
+    return {
+        "iteration": 3,
+        "status": "backend operational",
+        "timestamp": time.time(),
+        "message": "Backend is healthy and ready for further development tasks."
+    }
+    """Endpoint for iteration 2 to confirm backend is running and ready for new tasks."""
+    return {
+        "iteration": 2,
+        "status": "backend operational",
+        "timestamp": time.time(),
+        "message": "Backend is healthy and ready for further development tasks."
+    }
 async def system_status():
     """Возвращает статус зависимостей: PostgreSQL, Redis, Celery."""
     import psycopg2
@@ -1054,7 +1075,10 @@ async def knowledge_bootstrap_core_docs(
 
 
 @app.post("/api/v1/knowledge/bootstrap/project-core")
-async def knowledge_bootstrap_project_core(
+async def knowledge_bootstrap_project_core(current_user: models.User = Depends(get_current_user)):
+    _require_admin(current_user)
+    await bootstrap_project_knowledge()
+    return {"ok": True}sync def knowledge_bootstrap_project_core(
     current_user: models.User = Depends(get_current_user),
 ):
     _require_admin(current_user)
