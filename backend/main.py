@@ -1088,7 +1088,15 @@ async def get_stats(db: AsyncSession = Depends(get_db), current_user: models.Use
     total_attributes = (await db.execute(select(func.count(models.Attribute.id)))).scalar() or 0
     total_connections = (await db.execute(select(func.count(models.MarketplaceConnection.id)))).scalar() or 0
     
-    avg_score = (await db.execute(select(func.avg(models.Product.completeness_score)))).scalar() or 0.0
+    avg_score = (await db.execute(select(func.avg(models.Product.completeness_score)))).scalar() or 0.0ore)))).scalar() or 0.0
+    
+    return {
+        "total_products": total_products,
+        "total_categories": total_categories,
+        "total_attributes": total_attributes,
+        "total_connections": total_connections,
+        "average_completeness_score": round(avg_score, 2)
+    }
     avg_score = round(avg_score)
     
     return {
