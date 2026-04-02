@@ -165,6 +165,14 @@ async def iteration_2_ready():
     }
 
 @app.get("/api/v1/iteration-1-status")
+async def iteration_1_status():
+    """Endpoint for iteration 1 to confirm backend is running and ready for new tasks."""
+    return {
+        "iteration": 1,
+        "status": "backend operational",
+        "timestamp": time.time(),
+        "message": "Backend is healthy and ready for further development tasks."
+    }
 
 @app.get("/api/v1/iteration-1/health")
 async def iteration_1_health():
@@ -1072,6 +1080,49 @@ async def import_marketplace_product(req: schemas.ImportRequest, db: AsyncSessio
     # Check if SKU exists
     existing_res = await db.execute(select(models.Product).where(models.Product.sku == req.query))
     db_prod = existing_res.scalars().first()
+    
+    # Prepare product data from pulled_data
+    category_id = pulled_data.get("category_id")
+    if category_id:
+        # Ensure category exists; if not, create a placeholder or handle error
+        cat_res = await db.execute(select(models.Category).where(models.Category.id == category_id))
+        if not cat_res.scalars().first():
+            # Optionally create a new category or use default; for simplicity, set to None or raise error
+            category_id = None
+    
+    product_data = {
+        "sku": req.query,
+        "name": pulled_data.get("name", ""),
+        "description": pulled_data.get("description", ""),
+        "description_html": pulled_data.get("description_html", ""),
+        "category_id": category_id,
+        "attributes_data": pulled_data.get("attributes", {}),
+        "images": images,
+        "source_marketplace": db_conn.type,
+        "source_connection_id": db_conn.id,
+        "completeness_score": 0.0  # Will be calculated below
+    }
+    
+    if db_prod:
+        # Update existing product
+        for key, value in product_data.items():
+            setattr(db_prod, key, value)
+    else:
+        # Create new product
+        db_prod = models.Product(**product_data)
+        db.add(db_prod)
+    
+    # Calculate completeness score
+    req_attrs_res = await db.execute(select(models.Attribute).where(
+        (models.Attribute.is_required == True) &
+        ((models.Attribute.category_id == None) | (models.Attribute.category_id == category_id))
+    ))
+    req_attrs = req_attrs_res.scalars().all()
+    db_prod.completeness_score = calculate_completeness(product_data["attributes_data"], req_attrs)
+    
+    await db.commit()
+    await db.refresh(db_prod)
+    return db_prodg_res.scalars().first()
         
     # Generate a name
     name = pulled_data.get("name", pulled_data.get("title", f"Imported {req.query}"))
