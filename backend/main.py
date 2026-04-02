@@ -137,7 +137,6 @@ async def root():
 async def health_check():
     return {"status": "ok"}
 
-@app.get("/api/v1/system-status")
 
 
 @app.get("/api/v1/iteration-2-status")
@@ -210,6 +209,17 @@ async def iteration_5_status():
         "message": "Backend is healthy and ready for further development tasks."
     }
 
+
+@app.get("/api/v1/iteration-6-status")
+async def iteration_6_status():
+    """Endpoint for iteration 6 to confirm backend is running and ready for new tasks."""
+    return {
+        "iteration": 6,
+        "status": "backend operational",
+        "timestamp": time.time(),
+        "message": "Backend is healthy and ready for further development tasks."
+    }
+
 @app.get("/api/v1/iteration-3-status")
 async def iteration_3_status():
     """Endpoint for iteration 3 to confirm backend is running and ready for new tasks."""
@@ -219,6 +229,7 @@ async def iteration_3_status():
         "timestamp": time.time(),
         "message": "Backend is healthy and ready for further development tasks."
     }
+@app.get("/api/v1/system-status")
 async def system_status():
     """Возвращает статус зависимостей: PostgreSQL, Redis, Celery."""
     import psycopg2
@@ -887,9 +898,7 @@ async def get_stats(db: AsyncSession = Depends(get_db), current_user: models.Use
         "average_completeness": avg_score
     }
 
-@app.get("/api/v1/users/stats")
 
-@app.get("/api/v1/users")
 async def get_users(
     role: Optional[str] = None,
     limit: int = 50,
@@ -1044,11 +1053,22 @@ async def import_marketplace_product(req: schemas.ImportRequest, db: AsyncSessio
         if isinstance(src_raw, dict):
             new_attrs["__ozon_raw"] = src_raw
     
+    # Ensure ai_result is a dict to avoid attribute errors
+    if not isinstance(ai_result, dict):
+        raise HTTPException(status_code=500, detail="AI service returned invalid response format.")
     new_schema = ai_result.get("new_schema_attributes", [])
     for attr in new_schema:
-        existing_attr = await db.execute(select(models.Attribute).where(models.Attribute.code == attr["code"]))
-        if not existing_attr.scalars().first():
+        existing_attr_res = await db.execute(select(models.Attribute).where(models.Attribute.code == attr["code"]))
+        if not existing_attr_res.scalars().first():
             db_attr = models.Attribute(
+                code=attr["code"],
+                name=attr.get("name", attr["code"]),
+                type=attr.get("type", "string"),
+                is_required=attr.get("is_required", False),
+                description=attr.get("description", "")
+            )
+            db.add(db_attr)
+    await db.commit()  # Commit new attributes before proceeding  db_attr = models.Attribute(
                 code=attr["code"],
                 name=attr.get("name", attr["code"]).capitalize(),
                 type=attr.get("type", "string"),
