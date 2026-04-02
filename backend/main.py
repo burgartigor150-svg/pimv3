@@ -1051,6 +1051,17 @@ async def iteration_1_dev_status():
 
 @app.get("/api/v1/iteration-1/test")
 async def iteration_1_test():
+
+@app.get("/api/v1/iteration-1/lightweight-check")
+async def iteration_1_lightweight_check():
+    """Lightweight health check for iteration 1 to verify backend responsiveness without dependencies."""
+    return {
+        "iteration": 1,
+        "status": "ok",
+        "timestamp": time.time(),
+        "message": "Backend is responsive and ready for iteration 1 tasks.",
+        "endpoint": "/api/v1/iteration-1/lightweight-check"
+    }
     """Simple test endpoint for iteration 1 to verify backend can handle requests without dependencies, ideal for quick health checks."""
     return {
         "iteration": 1,
@@ -1152,6 +1163,17 @@ async def generate_product_promo(
 @app.post("/api/v1/ai/generate-infographic-plan")
 
 
+@app.get("/api/v1/iteration-3/quick-check")
+async def iteration_3_quick_check():
+    """A quick, dependency-free endpoint for iteration 3 to verify backend responsiveness and avoid timeouts."""
+    return {
+        "iteration": 3,
+        "status": "ok",
+        "timestamp": time.time(),
+        "message": "Backend is responsive and ready for iteration 3 tasks.",
+        "endpoint": "/api/v1/iteration-3/quick-check"
+    }
+
 @app.get("/api/v1/iteration-3/health")
 async def iteration_3_health():
     """Health check endpoint specifically for iteration 3 to confirm backend is running smoothly without dependencies, avoiding timeouts."""
@@ -1177,6 +1199,10 @@ async def iteration_3_health():
 async def iteration_3_dev_status():
     """Development status endpoint for iteration 3 to confirm backend can handle requests without timeouts, useful for monitoring."""
     return {
+        "iteration": 3,
+        "status": "developing",
+        "timestamp": time.time(),
+        "message": "Backend is actively being developed for iteration 3 tasks.",
         "iteration": 3,
         "status": "developing",
         "timestamp": time.time(),

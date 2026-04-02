@@ -924,7 +924,8 @@ def resolve_product_attributes(
     def _match_dict_value(raw_value: any, value_mappings: list, mm_dictionary: list):
         """
         Сопоставляет сырое значение с словарём MM.
-        Сначала по value_mappings (готовые пары от AI), потом fuzzy по словарю.
+        MM API принимает строку (name), не id.
+        Порядок: value_mappings от AI -> точное совпадение -> fuzzy -> substring.
         """
         if raw_value is None:
             return None
@@ -934,9 +935,15 @@ def resolve_product_attributes(
         # 1. Готовые value_mappings от AI
         for vm in (value_mappings or []):
             if _norm(str(vm.get("oz_value") or "")) == raw_n:
-                return {"id": vm.get("mm_id"), "name": vm.get("mm_name")}
+                return str(vm.get("mm_name") or "")  # MM принимает строку
 
-        # 2. Fuzzy по именам словаря
+        # 2. Точное совпадение по словарю (без нормализации)
+        for opt in (mm_dictionary or []):
+            opt_name = str(opt.get("name") or "")
+            if opt_name.lower() == raw_str.lower():
+                return opt_name
+
+        # 3. Fuzzy по именам словаря
         if not mm_dictionary:
             return None
         best_s, best_opt = 0.0, None
@@ -946,13 +953,13 @@ def resolve_product_attributes(
             if s > best_s:
                 best_s, best_opt = s, opt
         if best_s >= 0.72:
-            return {"id": best_opt.get("id"), "name": best_opt.get("name")}
+            return str(best_opt.get("name") or "")
 
-        # 3. Substring match
+        # 4. Substring match
         for opt in mm_dictionary:
             opt_n = _norm(str(opt.get("name") or ""))
             if raw_n in opt_n or opt_n in raw_n:
-                return {"id": opt.get("id"), "name": opt.get("name")}
+                return str(opt.get("name") or "")
 
         return None
 
