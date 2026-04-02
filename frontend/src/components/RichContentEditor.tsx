@@ -338,7 +338,7 @@ export default function RichContentEditor({ product }: { product: any }) {
       <div style={c.toolbar}>
         <button style={c.viewBtn(view === 'edit')} onClick={() => setView('edit')}><Edit3 size={13} />Редактор</button>
         <button style={c.viewBtn(view === 'preview')} onClick={() => setView('preview')}><Eye size={13} />Превью</button>
-        <button style={c.viewBtn(view === 'landing')} onClick={() => setView('landing')}><ExternalLink size={13} />Лендинг</button>
+        <button style={c.viewBtn(view === 'landing')} onClick={() => { setView('landing'); refreshLanding(); }}><ExternalLink size={13} />Лендинг</button>
         <div style={{ flex: 1 }} />
         <span style={{ fontSize: 11, color: 'rgba(255,255,255,0.3)' }}>{blocks.length} блоков</span>
         <button style={{ ...c.btn('primary'), opacity: generating ? 0.7 : 1 }} onClick={handleGenerate} disabled={generating}>
