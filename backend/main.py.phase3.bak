@@ -5088,53 +5088,25 @@ async def export_to_marketplace_bulk(
 async def syndication_push_simple(
     product_id: uuid.UUID,
     body: dict,
-    background_tasks: BackgroundTasks,
     db: AsyncSession = Depends(get_db),
     current_user: models.User = Depends(get_current_user),
 ):
-    """Push product to marketplace. Uses direct push with current attributes."""
+    """Simple push: direct push with existing attributes (no AI). Fast."""
     connection_id = body.get("connection_id")
     if not connection_id:
         raise HTTPException(400, "connection_id is required")
     try:
-        connection_uuid = uuid.UUID(connection_id) if isinstance(connection_id, str) else connection_id
+        connection_uuid = uuid.UUID(connection_id)
     except ValueError:
         raise HTTPException(400, "Invalid connection_id format")
 
-    # Validate product exists
     prod_res = await db.execute(select(models.Product).where(models.Product.id == product_id))
     db_prod = prod_res.scalars().first()
     if not db_prod:
         raise HTTPException(404, "Product not found")
-
-    # Validate connection exists
-    conn_res = await db.execute(select(models.MarketplaceConnection).where(models.MarketplaceConnection.id == connection_uuid))
-    db_conn = conn_res.scalars().first()
-    if not db_conn:
-        raise HTTPException(404, "Connection not found")
-
-    # Build mapped_payload from product attributes
     mapped_payload = dict(db_prod.attributes_data or {})
     mapped_payload.pop("_platforms", None)
     mapped_payload.pop("_vendor_code", None)
-
-    # Add required fields
-    mapped_payload["offer_id"] = db_prod.sku
-    mapped_payload["name"] = db_prod.name
-
-    # Add images
-    if db_prod.images and not mapped_payload.get("Фото"):
-        public_base = body.get("public_base_url", os.getenv("PUBLIC_API_BASE_URL", "")).strip().rstrip("/")
-        imgs = []
-        for im in (db_prod.images or []):
-            s = str(im).strip()
-            if s.startswith("http"):
-                imgs.append(s)
-            elif s.startswith("/") and public_base:
-                imgs.append(public_base + s)
-        if imgs:
-            mapped_payload["Фото"] = imgs
-
     push_req = schemas.SyndicatePushRequest(
         product_id=str(product_id),
         connection_id=str(connection_uuid),

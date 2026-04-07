@@ -936,7 +936,6 @@ async def create_product(prod: schemas.ProductCreate, db: AsyncSession = Depends
     return db_prod
 
 @app.patch("/api/v1/products/{product_id}", response_model=schemas.Product)
-@app.put("/api/v1/products/{product_id}", response_model=schemas.Product)
 async def update_product(product_id: uuid.UUID, prod: schemas.ProductUpdate, db: AsyncSession = Depends(get_db), current_user: models.User = Depends(get_current_user)):
     result = await db.execute(select(models.Product).where(models.Product.id == product_id))
     db_prod = result.scalars().first()
@@ -1179,6 +1178,7 @@ async def ai_enrich_product(
         "description": product.description_html or "",
         "brand": attrs.get("brand", ""),
         "category": attrs.get("category", ""),
+        "attributes": attrs,
     }
 
 @app.post("/api/v1/ai/generate-promo")
@@ -1496,7 +1496,6 @@ async def mp_shadow_product(
                 "category": str(body.get("category") or ""),
                 "image_url": incoming_images[0] if incoming_images else "",
                 "status": "active",
-                "marketplace_product_id": str(body.get("marketplace_product_id") or ""),
             }
             attrs["_platforms"] = platforms
             existing.attributes_data = attrs
@@ -1523,7 +1522,6 @@ async def mp_shadow_product(
         "category": str(body.get("category") or ""),
         "image_url": images[0] if images else "",
         "status": "active",
-        "marketplace_product_id": str(body.get("marketplace_product_id") or ""),
     }
     new_prod = models.Product(
         sku=unified_sku,
@@ -4340,7 +4338,6 @@ async def _sync_shadows_for_platform(platform: str, adapter, db_session):
                 "category": category_name,
                 "image_url": str(it.get("image_url") or ""),
                 "status": str(it.get("status") or "active"),
-                "marketplace_product_id": str(it.get("marketplace_product_id") or ""),
             }
             try:
                 res = await db_session.execute(
@@ -5081,66 +5078,6 @@ async def export_to_marketplace_bulk(
         process_single_syndicate_task.delay(str(pid), connection_id, ai_key.value, task_id)
         
     return {"status": "success", "task_id": task_id, "message": f"Queued {total} products for export"}
-
-
-
-@app.post("/api/v1/syndication/push/{product_id}")
-async def syndication_push_simple(
-    product_id: uuid.UUID,
-    body: dict,
-    background_tasks: BackgroundTasks,
-    db: AsyncSession = Depends(get_db),
-    current_user: models.User = Depends(get_current_user),
-):
-    """Push product to marketplace. Uses direct push with current attributes."""
-    connection_id = body.get("connection_id")
-    if not connection_id:
-        raise HTTPException(400, "connection_id is required")
-    try:
-        connection_uuid = uuid.UUID(connection_id) if isinstance(connection_id, str) else connection_id
-    except ValueError:
-        raise HTTPException(400, "Invalid connection_id format")
-
-    # Validate product exists
-    prod_res = await db.execute(select(models.Product).where(models.Product.id == product_id))
-    db_prod = prod_res.scalars().first()
-    if not db_prod:
-        raise HTTPException(404, "Product not found")
-
-    # Validate connection exists
-    conn_res = await db.execute(select(models.MarketplaceConnection).where(models.MarketplaceConnection.id == connection_uuid))
-    db_conn = conn_res.scalars().first()
-    if not db_conn:
-        raise HTTPException(404, "Connection not found")
-
-    # Build mapped_payload from product attributes
-    mapped_payload = dict(db_prod.attributes_data or {})
-    mapped_payload.pop("_platforms", None)
-    mapped_payload.pop("_vendor_code", None)
-
-    # Add required fields
-    mapped_payload["offer_id"] = db_prod.sku
-    mapped_payload["name"] = db_prod.name
-
-    # Add images
-    if db_prod.images and not mapped_payload.get("Фото"):
-        public_base = body.get("public_base_url", os.getenv("PUBLIC_API_BASE_URL", "")).strip().rstrip("/")
-        imgs = []
-        for im in (db_prod.images or []):
-            s = str(im).strip()
-            if s.startswith("http"):
-                imgs.append(s)
-            elif s.startswith("/") and public_base:
-                imgs.append(public_base + s)
-        if imgs:
-            mapped_payload["Фото"] = imgs
-
-    push_req = schemas.SyndicatePushRequest(
-        product_id=str(product_id),
-        connection_id=str(connection_uuid),
-        mapped_payload=mapped_payload,
-    )
-    return await syndicate_push(push_req, db=db, current_user=current_user)
 
 @app.post("/api/v1/syndicate/push")
 async def syndicate_push(req: schemas.SyndicatePushRequest, db: AsyncSession = Depends(get_db), current_user: models.User = Depends(get_current_user)):

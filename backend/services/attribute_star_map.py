@@ -127,6 +127,15 @@ def _build_tree_from_paths(items: List[Dict[str, str]], separator: str) -> List[
 
 
 async def _fetch_ozon_categories(api_key: str, client_id: str | None) -> List[Dict[str, str]]:
+    import json as _j
+    _cache_key = f"pim:ozon_cats:{client_id}"
+    try:
+        from backend.celery_worker import redis_client as _rc
+        _cached = _rc.get(_cache_key)
+        if _cached:
+            return _j.loads(_cached)
+    except Exception:
+        pass
     headers = {
         "Client-Id": client_id or "",
         "Api-Key": api_key or "",
@@ -170,10 +179,25 @@ async def _fetch_ozon_categories(api_key: str, client_id: str | None) -> List[Di
     uniq: Dict[str, Dict[str, str]] = {}
     for c in out:
         uniq[c["id"]] = c
-    return list(uniq.values())
+    result = list(uniq.values())
+    try:
+        from backend.celery_worker import redis_client as _rc
+        _rc.setex(_cache_key, 3600, _j.dumps(result, ensure_ascii=False))
+    except Exception:
+        pass
+    return result
 
 
 async def _fetch_mm_categories(api_key: str) -> List[Dict[str, str]]:
+    import json as _j
+    _mm_cache_key = f"pim:mm_cats:{api_key[:16]}"
+    try:
+        from backend.celery_worker import redis_client as _rc
+        _cached = _rc.get(_mm_cache_key)
+        if _cached:
+            return _j.loads(_cached)
+    except Exception:
+        pass
     headers = megamarket_request_headers(api_key, for_post=False)
     async with megamarket_httpx_client(120.0) as client:
         res = await client.get(
@@ -209,7 +233,132 @@ async def _fetch_mm_categories(api_key: str) -> List[Dict[str, str]]:
     uniq: Dict[str, Dict[str, str]] = {}
     for c in out:
         uniq[c["id"]] = c
-    return list(uniq.values())
+    mm_result = list(uniq.values())
+    try:
+        from backend.celery_worker import redis_client as _rc
+        import json as _j
+        _rc.setex(_mm_cache_key, 3600, _j.dumps(mm_result, ensure_ascii=False))
+    except Exception:
+        pass
+    return mm_result
+
+
+
+async def _fetch_yandex_categories(api_key: str, client_id: str | None = None) -> List[Dict[str, str]]:
+    """Плоский список листовых категорий Яндекс.Маркет из POST /v2/categories/tree."""
+    import json as _j
+    _cache_key = f"pim:yandex_cats:{(api_key or '')[:16]}"
+    try:
+        from backend.celery_worker import redis_client as _rc
+        _cached = _rc.get(_cache_key)
+        if _cached:
+            return _j.loads(_cached)
+    except Exception:
+        pass
+
+    headers: Dict[str, str] = {"Content-Type": "application/json"}
+    if client_id:
+        headers["Authorization"] = f"OAuth oauth_token={api_key}, oauth_client_id={client_id}"
+    else:
+        headers["Api-Key"] = api_key
+
+    async with httpx.AsyncClient(timeout=120.0) as client:
+        res = await client.post(
+            "https://api.partner.market.yandex.ru/v2/categories/tree",
+            headers=headers,
+            json={"language": "RU"},
+        )
+    if res.status_code != 200:
+        return []
+    js = res.json()
+    if js.get("status") != "OK":
+        return []
+    root = js.get("result")
+    if not isinstance(root, dict):
+        return []
+
+    out: List[Dict[str, str]] = []
+
+    def walk(node: Any, path: str) -> None:
+        if not isinstance(node, dict):
+            return
+        name = str(node.get("name") or "").strip()
+        cid = node.get("id")
+        cur = f"{path} / {name}".strip(" /") if path and name else (name or path)
+        children = node.get("children")
+        # leaf: children is None or empty list
+        if not children:
+            if cid is not None:
+                out.append({"id": str(int(cid)), "name": cur})
+            return
+        for ch in (children or []):
+            walk(ch, cur)
+
+    walk(root, "")
+    uniq: Dict[str, Dict[str, str]] = {c["id"]: c for c in out}
+    result = list(uniq.values())
+    try:
+        from backend.celery_worker import redis_client as _rc
+        _rc.setex(_cache_key, 3600, _j.dumps(result, ensure_ascii=False))
+    except Exception:
+        pass
+    return result
+
+
+
+async def _fetch_wb_categories(api_key: str) -> List[Dict[str, str]]:
+    """Плоский список предметов (листовых категорий) Wildberries.
+    Использует GET /content/v2/object/all с пагинацией по offset.
+    id = subjectID — используется в /content/v2/object/charcs/{subjectId}.
+    """
+    import json as _j
+    _cache_key = f"pim:wb_cats:{(api_key or '')[:16]}"
+    try:
+        from backend.celery_worker import redis_client as _rc
+        _cached = _rc.get(_cache_key)
+        if _cached:
+            return _j.loads(_cached)
+    except Exception:
+        pass
+
+    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+    result = []
+    seen: set = set()
+    offset = 0
+
+    async with httpx.AsyncClient(timeout=60.0) as client:
+        while True:
+            res = await client.get(
+                "https://content-api.wildberries.ru/content/v2/object/all",
+                headers=headers,
+                params={"limit": 1000, "offset": offset},
+            )
+            if res.status_code != 200:
+                break
+            data = res.json().get("data") or []
+            for item in data:
+                if not isinstance(item, dict):
+                    continue
+                sid = item.get("subjectID")
+                if sid is None or str(sid) in seen:
+                    continue
+                seen.add(str(sid))
+                parent = item.get("parentName", "")
+                name = item.get("subjectName", "")
+                full_name = f"{parent} / {name}".strip(" /") if parent else name
+                result.append({"id": str(sid), "name": full_name})
+            if len(data) < 1000:
+                break
+            offset += 1000
+
+    uniq = {c["id"]: c for c in result}
+    final = list(uniq.values())
+    try:
+        from backend.celery_worker import redis_client as _rc
+        _rc.setex(_cache_key, 3600, _j.dumps(final, ensure_ascii=False))
+    except Exception:
+        pass
+    return final
 
 
 def _extract_schema_attributes(platform: str, category: Dict[str, str], schema: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -628,6 +777,7 @@ def get_attribute_star_map_state(edge_limit: int = 300) -> Dict[str, Any]:
             "megamarket_attributes": snap.get("megamarket_attributes", 0),
             "edges_total": len(snap.get("edges") or []),
             "manual_overrides_total": len(overrides),
+            "categories_by_platform": {k: v for k, v in (snap.get("categories_by_platform") or {}).items()},
         },
         "edges_sample": edges,
         "manual_overrides": overrides[:500],

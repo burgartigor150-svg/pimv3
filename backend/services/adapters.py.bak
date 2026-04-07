@@ -540,7 +540,6 @@ class OzonAdapter(MarketplaceAdapter):
                 "image_url": img,
                 "status": "archived" if (info.get("is_archived") or info.get("archived")) else str(info.get("visibility") or "active").lower(),
                 "attributes": attrs,
-                "marketplace_product_id": pid,
                 "_raw": info or it,
             })
         has_more = bool(next_last_id) and len(chunk) >= page_size
@@ -802,7 +801,6 @@ class WbAdapter(MarketplaceAdapter):
                 "image_url": img,
                 "status": "active",
                 "attributes": attrs,
-                "marketplace_product_id": pid,
                 "_raw": c,
             })
         total = resp_cursor.get("total", len(items))
@@ -2313,7 +2311,6 @@ class MegamarketAdapter(MarketplaceAdapter):
                 "image_url": photos[0].get("url", photos[0]) if photos and isinstance(photos[0], dict) else (photos[0] if photos else ""),
                 "status": status_str,
                 "attributes": attrs.get("contentAttributes") or [],
-                "marketplace_product_id": str(c.get("goodsId") or ""),
                 "_raw": {**c, **attrs},
             })
         return {"items": items, "total": total, "has_more": (offset + limit) < total}

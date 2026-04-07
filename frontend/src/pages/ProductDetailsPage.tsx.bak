@@ -104,7 +104,6 @@ interface Connection {
   id: string;
   name: string;
   marketplace: string;
-  type: string;
 }
 
 // ─── Style Constants ──────────────────────────────────────────────────────────
@@ -221,7 +220,6 @@ export default function ProductDetailsPage() {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [enriching, setEnriching] = useState(false);
-  const [enrichConnectionDialog, setEnrichConnectionDialog] = useState(false);
   const [activeTab, setActiveTab] = useState("main");
   const [pushingId, setPushingId] = useState<string | null>(null);
   const isMpProduct = id?.startsWith('mp__') ?? false;
@@ -270,7 +268,7 @@ export default function ProductDetailsPage() {
           description: raw.description ?? '',
           description_html: raw.description ?? '',
           media: (raw.photos ?? []).map((url: string, i: number) => ({ id: String(i), url, type: 'image' as const })),
-          attributes: (raw.attributes ?? []).map((a: any) => ({ key: a.name || a.id, value: a.value, type: a.type || 'string', dictionary_options: a.dictionary_options || [], isSuggest: a.isSuggest, is_multiple: a.is_multiple, is_required: a.is_required, error: a.error })),
+          attributes: (raw.attributes ?? []).map((a: any) => ({ key: a.name || a.id, value: a.value, type: 'string' })),
           syndication: [],
           history: [],
         };
@@ -330,16 +328,7 @@ export default function ProductDetailsPage() {
         category: getCatName(p.category),
       });
       const attrs = Array.isArray(p.attributes) && p.attributes.length > 0
-        ? p.attributes.map((a: any) => ({
-            key: a.key ?? a.name ?? a.id,
-            value: a.value ?? '',
-            type: a.type ?? 'string',
-            dictionary_options: Array.isArray(a.dictionary_options) ? a.dictionary_options : [],
-            isSuggest: a.isSuggest,
-            is_multiple: a.is_multiple,
-            is_required: a.is_required,
-            error: a.error,
-          }))
+        ? p.attributes
         : p.attributes_data
           ? Object.entries(p.attributes_data)
               .filter(([key]) => !key.startsWith('_'))
@@ -347,11 +336,6 @@ export default function ProductDetailsPage() {
                 key,
                 value: v?.value ?? String(v ?? ""),
                 type: v?.type ?? "string",
-                dictionary_options: Array.isArray(v?.dictionary_options) ? v.dictionary_options : [],
-                isSuggest: v?.isSuggest,
-                is_multiple: v?.is_multiple,
-                is_required: v?.is_required,
-                error: v?.error,
               }))
           : [];
       setAttributes(attrs);
@@ -376,8 +360,8 @@ export default function ProductDetailsPage() {
             try {
               const liveRes = await api.get(`/mp/product-details?platform=${encodeURIComponent(firstPlatform)}&sku=${encodeURIComponent(vc)}`);
               const liveAttrs = (liveRes.data?.attributes || []).map((a: any) => ({
-                key: a.name || a.id, value: a.value ?? '', type: a.type || 'string',
-                is_required: a.is_required, error: a.error, dictionary_options: a.dictionary_options || [], isSuggest: a.isSuggest, is_multiple: a.is_multiple,
+                key: a.name || a.id, value: a.value ?? '', type: 'string',
+                is_required: a.is_required, error: a.error,
               }));
               setMpAttrsByPlatform(prev => ({ ...prev, [firstPlatform]: liveAttrs }));
               setMpAttrSchemaByPlatform(prev => ({ ...prev, [firstPlatform]: liveRes.data?.attributes || [] }));
@@ -398,12 +382,6 @@ export default function ProductDetailsPage() {
   }, [id, toast]);
 
   const switchPlatform = async (platform: string) => {
-    // Save current platform's edited attributes to cache before switching
-    const currentPlatform = activePlatform || mpBindingPlatform || mpPlatform;
-    if (currentPlatform && currentPlatform !== platform) {
-      setMpAttrsByPlatform(prev => ({ ...prev, [currentPlatform]: attributes }));
-    }
-
     setActivePlatform(platform);
     setMpBindingPlatform(platform);
     // Use cached attrs if available
@@ -415,7 +393,7 @@ export default function ProductDetailsPage() {
       const vc = vendorCode;
       const liveRes = await api.get(`/mp/product-details?platform=${encodeURIComponent(platform)}&sku=${encodeURIComponent(vc)}`);
       const liveAttrs = (liveRes.data?.attributes || []).map((a: any) => ({
-        key: a.name || a.id, value: a.value ?? '', type: a.type || 'string', dictionary_options: a.dictionary_options || [], isSuggest: a.isSuggest, is_multiple: a.is_multiple,
+        key: a.name || a.id, value: a.value ?? '', type: 'string',
         is_required: a.is_required, error: a.error,
       }));
       setMpAttrsByPlatform(prev => ({ ...prev, [platform]: liveAttrs }));
@@ -433,51 +411,11 @@ export default function ProductDetailsPage() {
   }, [loadData]);
 
   const handleSave = async () => {
-    let effectiveId = (isMpProduct && pimId) ? pimId : id;
-
-    // Auto-create shadow product if MP product without PIM record
-    if (isMpProduct && !pimId) {
-      try {
-        const shadowRes = await api.post('/mp/shadow-product', {
-          platform: mpPlatform,
-          sku: mpSku,
-          vendor_code: vendorCode || mpSku,
-          name: fields.name,
-          brand: fields.brand,
-          description: fields.description,
-          images: product?.media?.map((m: any) => m.url) || [],
-        });
-        const newPimId = shadowRes.data?.id;
-        if (newPimId) {
-          setPimId(newPimId);
-          effectiveId = newPimId;
-        }
-      } catch (e) {
-        toast("Не удалось создать запись в каталоге", "error");
-        return;
-      }
-    }
-
+    const effectiveId = (isMpProduct && pimId) ? pimId : id;
     if (!effectiveId) return;
     setSaving(true);
     try {
-      // Convert attributes array to attributes_data dict for the backend
-      const attributes_data: Record<string, any> = {};
-      for (const attr of attributes) {
-        if (attr.key) {
-          attributes_data[attr.key] = attr.value ?? '';
-        }
-      }
-      const payload: any = {
-        name: fields.name,
-        description_html: fields.description,
-        attributes_data,
-      };
-      // Only include images if product has media
-      if (product?.media?.length) {
-        payload.images = product.media.map(m => m.url);
-      }
-      const res = await api.put(`/products/${effectiveId}`, payload);
+      const res = await api.put(`/products/${effectiveId}`, { ...fields, attributes });
       setProduct(res.data);
       toast("Продукт сохранён", "success");
     } catch {
@@ -487,128 +425,26 @@ export default function ProductDetailsPage() {
     }
   };
 
-  const runEnrichWithConnection = async (connectionId: string) => {
-    let effectiveId = (isMpProduct && pimId) ? pimId : id;
-
-    // Auto-create shadow product if MP product without PIM record
-    if (isMpProduct && !pimId && !effectiveId) {
-      try {
-        const shadowRes = await api.post('/mp/shadow-product', {
-          platform: mpPlatform,
-          sku: mpSku,
-          vendor_code: vendorCode || mpSku,
-          name: fields.name,
-          brand: fields.brand,
-          description: fields.description,
-          images: product?.media?.map((m: any) => m.url) || [],
-        });
-        const newPimId = shadowRes.data?.id;
-        if (newPimId) {
-          setPimId(newPimId);
-          effectiveId = newPimId;
-        }
-      } catch (e) {
-        toast("\u041d\u0435 \u0443\u0434\u0430\u043b\u043e\u0441\u044c \u0441\u043e\u0437\u0434\u0430\u0442\u044c \u0437\u0430\u043f\u0438\u0441\u044c", "error");
-        return;
-      }
-    }
-
+  const handleEnrich = async () => {
+    const effectiveId = (isMpProduct && pimId) ? pimId : id;
     if (!effectiveId) return;
     setEnriching(true);
     try {
-      const res = await api.post('/syndicate/agent', {
-        product_id: effectiveId,
-        connection_id: connectionId,
-        push: false,
-        public_base_url: window.location.origin,
-      });
+      const res = await api.post(`/ai/enrich/${effectiveId}`);
       const d = res.data;
-      if (d.mapped_payload) {
-        const mp = d.mapped_payload;
-        setFields((f: any) => ({
-          name: mp["Наименование карточки"] || mp.name || f.name,
-          sku: f.sku,
-          description: mp["Описание"] || mp.description || f.description,
-          brand: mp["Бренд"] || mp.brand || f.brand,
-          category: f.category,
-        }));
-        // Reload live attributes
-        const platform = activePlatform || mpBindingPlatform || mpPlatform;
-        const vc = vendorCode || mpSku;
-        if (vc && platform) {
-          const liveRes = await api.get(`/mp/product-details?platform=${encodeURIComponent(platform)}&sku=${encodeURIComponent(vc)}`);
-          const liveAttrs = (liveRes.data?.attributes || []).map((a: any) => ({
-            key: a.name || a.id, value: a.value ?? '', type: a.type || 'string',
-            is_required: a.is_required, error: a.error,
-            dictionary_options: Array.isArray(a.dictionary_options) ? a.dictionary_options : [],
-            isSuggest: a.isSuggest, is_multiple: a.is_multiple,
-          }));
-          setAttributes(liveAttrs);
-          setMpErrors(liveRes.data?.errors || []);
-        }
-      }
-      toast(d.status === 'success' ? 'AI обогащение выполнено' : (d.message || 'Завершено с замечаниями'), d.status === 'success' ? 'success' : 'warning');
-    } catch (err: any) {
-      toast(err?.response?.data?.detail || "Ошибка AI обогащения", "error");
+      setFields((f) => ({
+        name: d.name ?? f.name,
+        sku: d.sku ?? f.sku,
+        description: d.description ?? f.description,
+        brand: d.brand ?? f.brand,
+        category: d.category ?? f.category,
+      }));
+      if (d.attributes) setAttributes(d.attributes);
+      toast("AI обогащение выполнено", "success");
+    } catch {
+      toast("Ошибка AI обогащения", "error");
     } finally {
       setEnriching(false);
-    }
-  };
-
-  const handleEnrich = async () => {
-    let effectiveId = (isMpProduct && pimId) ? pimId : id;
-
-    // Auto-create shadow product if MP product without PIM record
-    if (isMpProduct && !pimId) {
-      try {
-        const shadowRes = await api.post('/mp/shadow-product', {
-          platform: mpPlatform,
-          sku: mpSku,
-          vendor_code: vendorCode || mpSku,
-          name: fields.name,
-          brand: fields.brand,
-          description: fields.description,
-          images: product?.media?.map((m: any) => m.url) || [],
-        });
-        const newPimId = shadowRes.data?.id;
-        if (newPimId) {
-          setPimId(newPimId);
-          effectiveId = newPimId;
-        }
-      } catch (e) {
-        toast("\u041d\u0435 \u0443\u0434\u0430\u043b\u043e\u0441\u044c \u0441\u043e\u0437\u0434\u0430\u0442\u044c \u0437\u0430\u043f\u0438\u0441\u044c \u0432 \u043a\u0430\u0442\u0430\u043b\u043e\u0433\u0435", "error");
-        return;
-      }
-    }
-
-    if (!effectiveId) return;
-
-    if (isMpProduct || isShadowCard) {
-      const platform = activePlatform || mpBindingPlatform || mpPlatform;
-      const platformConns = connections.filter((c: any) => c.type === platform);
-      if (platformConns.length === 0) {
-        toast("Нет подключений для этого маркетплейса", "error");
-        return;
-      }
-      if (platformConns.length === 1) {
-        await runEnrichWithConnection(platformConns[0].id);
-      } else {
-        setEnrichConnectionDialog(true);
-      }
-    } else {
-      // Simple PIM enrichment
-      setEnriching(true);
-      try {
-        const res = await api.post(`/ai/enrich/${effectiveId}`);
-        const d = res.data;
-        setFields((f: any) => ({
-          name: d.name ?? f.name, sku: d.sku ?? f.sku,
-          description: d.description ?? f.description,
-          brand: d.brand ?? f.brand, category: d.category ?? f.category,
-        }));
-        toast("AI обогащение выполнено", "success");
-      } catch { toast("Ошибка AI обогащения", "error"); }
-      finally { setEnriching(false); }
     }
   };
 
@@ -616,23 +452,12 @@ export default function ProductDetailsPage() {
     if (!id) return;
     setPushingId(connectionId);
     try {
-      const effectiveId = (isMpProduct && pimId) ? pimId : id;
-      const res = await api.post(`/syndication/push/${effectiveId}`, {
-        connection_id: connectionId,
-        public_base_url: window.location.origin,
-      });
-      const d = res.data;
-      if (d.ok === false || d.error) {
-        toast(d.message || d.error || "Ошибка при отправке", "error");
-      } else {
-        toast("Продукт отправлен на маркетплейс", "success");
-      }
-      // Reload product to update syndication status
-      const prodRes = await api.get(`/products/${effectiveId}`);
-      setProduct(prodRes.data);
-    } catch (err: any) {
-      const detail = err?.response?.data?.detail || err?.response?.data?.message || "Ошибка синдикации";
-      toast(typeof detail === "string" ? detail : JSON.stringify(detail), "error");
+      await api.post(`/syndication/push/${isMpProduct && pimId ? pimId : id}`, { connection_id: connectionId });
+      toast("Продукт отправлен на маркетплейс", "success");
+      const res = await api.get(`/products/${(isMpProduct && pimId) ? pimId : id}`);
+      setProduct(res.data);
+    } catch {
+      toast("Ошибка синдикации", "error");
     } finally {
       setPushingId(null);
     }
@@ -831,8 +656,8 @@ export default function ProductDetailsPage() {
 
         {/* Action buttons */}
         <div style={{ display: "flex", gap: 10, flexShrink: 0 }}>
-          
-          <button
+          {(isMpProduct || isShadowCard) && <span style={{ fontSize: 12, color: "rgba(255,255,255,0.3)", alignSelf: "center" }}>Только просмотр</span>}
+          {!isMpProduct && <button
             onClick={handleEnrich}
             disabled={enriching}
             style={{
@@ -845,9 +670,9 @@ export default function ProductDetailsPage() {
               ? <Loader2 size={15} style={spinStyle} />
               : <Sparkles size={15} color="#a5b4fc" />}
             {enriching ? "Обогащение…" : "AI обогатить"}
-          </button>
+          </button>}
 
-          <button
+          {!isMpProduct && <button
             className="btn-glow"
             onClick={handleSave}
             disabled={saving}
@@ -861,7 +686,7 @@ export default function ProductDetailsPage() {
               ? <Loader2 size={15} style={spinStyle} />
               : <Save size={15} />}
             {saving ? "Сохранение…" : "Сохранить"}
-          </button>
+          </button>}
         </div>
       </div>
 
@@ -1025,10 +850,10 @@ export default function ProductDetailsPage() {
                   </span>
                 )}
               </h2>
-              <button onClick={addAttr} style={btnSecondary}>
+              {!isMpProduct && <button onClick={addAttr} style={btnSecondary}>
                 <Plus size={14} />
                 Добавить
-              </button>
+              </button>}
             </div>
 
             {/* Error summary for MP */}
@@ -1126,7 +951,7 @@ export default function ProductDetailsPage() {
                   <React.Fragment key={activePlatform || 'mp'}>
                   {attributes.map((attr, idx) => {
                     const hasError = !!(attr as any).error;
-                    const opts: any[] = Array.isArray((attr as any).dictionary_options) ? (attr as any).dictionary_options : [];
+                    const opts: any[] = (attr as any).dictionary_options || [];
                     const isSuggest = (attr as any).isSuggest;
                     const isRequired = (attr as any).is_required;
                     const isEmpty = !attr.value;
@@ -1152,11 +977,6 @@ export default function ProductDetailsPage() {
                             {opts.length > 0 && !isSuggest ? (
                               <select
                                 defaultValue={attr.value}
-                                onChange={(e) => {
-                                  const newAttrs = [...attributes];
-                                  newAttrs[idx] = { ...newAttrs[idx], value: e.target.value };
-                                  setAttributes(newAttrs);
-                                }}
                                 style={{ ...inputStyle, padding: "7px 12px", width: "100%", cursor: "pointer",
                                   borderColor: hasError ? "rgba(248,113,113,0.5)" : "rgba(255,255,255,0.08)",
                                   background: hasError ? "rgba(248,113,113,0.08)" : "rgba(255,255,255,0.04)",
@@ -1167,28 +987,6 @@ export default function ProductDetailsPage() {
                                   <option key={o.id ?? o.name} value={o.name ?? o.id}>{o.name ?? o.id}</option>
                                 ))}
                               </select>
-                            ) : isSuggest && opts.length > 0 ? (
-                              <>
-                                <input
-                                  list={`suggest-${idx}`}
-                                  style={{ ...inputStyle, padding: "7px 12px", width: "100%", boxSizing: "border-box",
-                                    borderColor: hasError ? "rgba(248,113,113,0.5)" : "rgba(255,255,255,0.08)",
-                                    background: hasError ? "rgba(248,113,113,0.08)" : "rgba(255,255,255,0.04)",
-                                    color: isEmpty ? "rgba(255,255,255,0.25)" : "rgba(255,255,255,0.9)" }}
-                                  defaultValue={attr.value}
-                                  placeholder={isEmpty ? "Введите или выберите" : undefined}
-                                  onChange={(e) => {
-                                    const newAttrs = [...attributes];
-                                    newAttrs[idx] = { ...newAttrs[idx], value: e.target.value };
-                                    setAttributes(newAttrs);
-                                  }}
-                                />
-                                <datalist id={`suggest-${idx}`}>
-                                  {opts.map((o: any) => (
-                                    <option key={o.id ?? o.name} value={o.name ?? o.id} />
-                                  ))}
-                                </datalist>
-                              </>
                             ) : (
                               <input
                                 style={{ ...inputStyle, padding: "7px 12px", width: "100%", boxSizing: "border-box",
@@ -1197,11 +995,6 @@ export default function ProductDetailsPage() {
                                   color: isEmpty ? "rgba(255,255,255,0.25)" : "rgba(255,255,255,0.9)" }}
                                 defaultValue={attr.value}
                                 placeholder={isEmpty ? "Не заполнено" : undefined}
-                                onChange={(e) => {
-                                  const newAttrs = [...attributes];
-                                  newAttrs[idx] = { ...newAttrs[idx], value: e.target.value };
-                                  setAttributes(newAttrs);
-                                }}
                               />
                             )}
                             {hasError && (
@@ -1272,14 +1065,14 @@ export default function ProductDetailsPage() {
                   </div>
                   ))
                 )}
-                <div
+                {!isMpProduct && <div
                   style={{ padding: "14px 24px", borderTop: "1px solid rgba(255,255,255,0.04)" }}
                 >
                   <button onClick={addAttr} style={btnSecondary}>
                     <Plus size={14} />
                     Добавить атрибут
                   </button>
-                </div>
+                </div>}
               </>
             )}
           </div>
@@ -1553,7 +1346,7 @@ export default function ProductDetailsPage() {
                             marginTop: 2,
                           }}
                         >
-                          {({megamarket: "Мегамаркет", ozon: "Ozon", wildberries: "Wildberries", yandex: "Яндекс.Маркет"} as Record<string, string>)[conn.type] || conn.type || conn.marketplace}
+                          {conn.marketplace}
                         </div>
                       </div>
                     </div>
@@ -1822,29 +1615,6 @@ export default function ProductDetailsPage() {
           <SocialContentEditor product={product} />
         </TabErrorBoundary>
       )}
-
-      {/* Connection chooser modal for AI enrichment */}
-      {enrichConnectionDialog && (
-        <div style={{position:'fixed', inset:0, zIndex:9999, display:'flex', alignItems:'center', justifyContent:'center'}}>
-          <div onClick={() => setEnrichConnectionDialog(false)} style={{position:'absolute', inset:0, background:'rgba(0,0,0,0.6)'}} />
-          <div style={{position:'relative', background:'#12121f', borderRadius:16, padding:32, maxWidth:400, width:'90%', border:'1px solid rgba(99,102,241,0.2)'}}>
-            <h3 style={{margin:'0 0 16px', fontSize:18, fontWeight:700, color:'#fff'}}>Выберите подключение</h3>
-            <p style={{fontSize:13, color:'rgba(255,255,255,0.4)', marginBottom:20}}>AI заполнит атрибуты для выбранного маркетплейса</p>
-            <div style={{display:'flex', flexDirection:'column' as const, gap:8}}>
-              {connections.filter((c: any) => c.type === (activePlatform || mpPlatform)).map((c) => (
-                <button key={c.id} onClick={() => { setEnrichConnectionDialog(false); runEnrichWithConnection(c.id); }}
-                  style={{padding:'12px 16px', borderRadius:10, border:'1px solid rgba(99,102,241,0.2)', background:'rgba(99,102,241,0.06)', color:'#fff', cursor:'pointer', textAlign:'left' as const, fontSize:14}}>
-                  {c.name || c.type}
-                </button>
-              ))}
-            </div>
-            <button onClick={() => setEnrichConnectionDialog(false)} style={{marginTop:16, width:'100%', padding:'10px', borderRadius:8, border:'1px solid rgba(255,255,255,0.1)', background:'transparent', color:'rgba(255,255,255,0.5)', cursor:'pointer'}}>
-              Отмена
-            </button>
-          </div>
-        </div>
-      )}
-
     </div>
   );
 }

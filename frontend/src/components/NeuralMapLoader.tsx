@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useCallback } from "react";
+import React, { useEffect, useRef, useCallback, useState } from "react";
 
 interface BuildStatus {
   task_id: string; status: string; stage: string;
@@ -7,26 +7,39 @@ interface BuildStatus {
 
 const STAGE_NAMES: Record<string, string> = {
   queued: "В очереди", init: "Инициализация",
-  load_pim_cats: "Загрузка категорий PIM",
-  fetch_ozon: "Загрузка дерева Ozon", fetch_mm: "Загрузка дерева Megamarket",
-  ai_ozon_cats: "AI выбирает категории Ozon", ai_mm_cats: "AI выбирает категории Megamarket",
-  build_attrs: "Построение связей атрибутов", phased_matching: "Семантический маппинг",
+  fetch_categories: "Загрузка категорий всех платформ",
+  fetch_ozon_products: "Загрузка товаров Ozon",
+  build_pair: "Построение пар связей",
+  build_attrs: "Построение связей атрибутов",
   done: "Карта построена", error: "Ошибка",
 };
 
-const OZ_NAMES = ["Название","Бренд","Цвет","Материал","Страна","Вес, г","Высота, мм",
-  "Ширина, мм","Глубина, мм","Мощность, Вт","Гарантия","Артикул","Штрихкод","Описание",
-  "Комплектация","Тип","Серия","Модель","Напряжение","Тип управления","Тип покрытия",
-  "Объём, л","Цвет корпуса","Потребление","Класс энергоэфф."];
+const PLATFORM_COLORS: Record<string, [number,number,number]> = {
+  ozon:        [99, 102, 241],
+  megamarket:  [251, 146, 60],
+  mm:          [251, 146, 60],
+  wildberries: [203, 62, 118],
+  wb:          [203, 62, 118],
+  yandex:      [255, 204, 0],
+};
+const PLATFORM_LABELS: Record<string, string> = {
+  ozon: "Ozon", megamarket: "Megamarket", mm: "Megamarket",
+  wildberries: "Wildberries", wb: "Wildberries", yandex: "Яндекс",
+};
 
-const MM_NAMES = ["Наименование карточки","Производитель","Цвет товара","Материал корпуса",
-  "Страна-изготовитель","Вес (кг)","Высота (упаковки)","Ширина (упаковки)","Глубина изделия",
-  "Мощность микроволн, Вт","Гарантийный срок","Артикул производителя","Штрихкод","Описание товара",
-  "Состав набора","Вид","Серия продукта","Модель","Напряжение питания","Тип управления",
-  "Покрытие камеры","Объём камеры","Цвет","Мощность, Вт","Класс энергопотребления"];
+function getColor(platform: string): [number,number,number] {
+  return PLATFORM_COLORS[platform.toLowerCase()] ?? [140, 140, 200];
+}
+function getLabel(platform: string): string {
+  return PLATFORM_LABELS[platform.toLowerCase()] ?? platform;
+}
 
-interface SNode { x:number; y:number; z:number; label:string; platform:"ozon"|"mm"; connected:boolean; }
-interface SEdge { from:number; to:number; strength:number; }
+const FALLBACK_ATTR_NAMES = [
+  "Название","Бренд","Цвет","Материал","Страна","Вес, г","Высота, мм",
+  "Ширина, мм","Глубина, мм","Мощность, Вт","Гарантия","Артикул","Штрихкод",
+  "Описание","Комплектация","Тип","Серия","Модель","Напряжение","Тип управления",
+  "Объём, л","Цвет корпуса","Потребление","Класс энергоэфф.","Размер",
+];
 
 function goldenSphere(n: number, r: number): [number,number,number][] {
   const phi = Math.PI * (3 - Math.sqrt(5));
@@ -38,62 +51,100 @@ function goldenSphere(n: number, r: number): [number,number,number][] {
   });
 }
 
-function buildNodes(): SNode[] {
-  const ozPos = goldenSphere(OZ_NAMES.length, 140);
-  const mmPos = goldenSphere(MM_NAMES.length, 140);
-  const oz: SNode[] = ozPos.map(([x,y,z], i) => ({
-    x: x - 130, y, z, label: OZ_NAMES[i] ?? `oz_${i}`, platform: "ozon", connected: false,
-  }));
-  const mm: SNode[] = mmPos.map(([x,y,z], i) => ({
-    x: x + 130, y, z, label: MM_NAMES[i] ?? `mm_${i}`, platform: "mm", connected: false,
-  }));
-  return [...oz, ...mm];
-}
-
 function seededRng(seed: number) {
   let s = seed;
   return () => { s = (s * 1664525 + 1013904223) | 0; return Math.abs(s) / 2147483647; };
 }
 
-export default function NeuralMapLoader({ status }: { status: BuildStatus }) {
-  const canvasRef = useRef<HTMLCanvasElement>(null);
-  const containerRef = useRef<HTMLDivElement>(null);
-  const animRef = useRef(0);
-  const st = useRef({
-    nodes: buildNodes(),
-    edges: [] as SEdge[],
-    rotY: 0, rotX: 0.25, frame: 0,
-    hoveredNode: -1,
-    selectedNode: -1,
-    highlightedEdges: new Set<number>(),
-    highlightedNodes: new Set<number>(),
-    mouseX: 0, mouseY: 0,
-    dragging: false, lastMouseX: 0, lastMouseY: 0,
+interface SNode { x:number; y:number; z:number; label:string; platform:string; connected:boolean; }
+interface SEdge { from:number; to:number; strength:number; }
+
+function buildNodes(platforms: string[]): SNode[] {
+  const count = 25;
+  const nodes: SNode[] = [];
+  const N = platforms.length;
+  // Arrange platforms in a circle of clusters
+  platforms.forEach((platform, pi) => {
+    const angle = (2 * Math.PI * pi) / N;
+    const cx = Math.cos(angle) * 130;
+    const cz = Math.sin(angle) * 130;
+    const pos = goldenSphere(count, 110);
+    pos.forEach(([x,y,z], i) => {
+      nodes.push({
+        x: x * 0.5 + cx, y: y * 0.5, z: z * 0.5 + cz,
+        label: FALLBACK_ATTR_NAMES[i] ?? `attr_${i}`,
+        platform,
+        connected: false,
+      });
+    });
   });
+  return nodes;
+}
+
+export interface NeuralMapLoaderProps {
+  status: BuildStatus;
+  platforms?: string[]; // список активных платформ
+}
+
+export default function NeuralMapLoader({ status, platforms: propPlatforms }: NeuralMapLoaderProps) {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const animRef = useRef(0);
+
+  const [platforms, setPlatforms] = useState<string[]>(propPlatforms ?? ["ozon", "megamarket"]);
+  useEffect(() => {
+    if (propPlatforms && propPlatforms.length >= 2) setPlatforms(propPlatforms);
+  }, [JSON.stringify(propPlatforms)]);
 
   const progress = status.progress_percent;
   const isDone = status.status === "done";
   const isError = status.status === "error";
 
+  const st = useRef({
+    nodes: buildNodes(platforms),
+    edges: [] as SEdge[],
+    rotY: 0, rotX: 0.25, frame: 0,
+    hoveredNode: -1, selectedNode: -1,
+    highlightedEdges: new Set<number>(),
+    highlightedNodes: new Set<number>(),
+    mouseX: 0, mouseY: 0,
+    dragging: false, lastMouseX: 0, lastMouseY: 0,
+    platforms: platforms,
+  });
+
+  // Rebuild nodes when platforms change
+  useEffect(() => {
+    st.current.nodes = buildNodes(platforms);
+    st.current.platforms = platforms;
+    st.current.selectedNode = -1;
+    st.current.highlightedEdges.clear();
+    st.current.highlightedNodes.clear();
+  }, [platforms]);
+
   // Rebuild edges on progress change
   useEffect(() => {
     const rng = seededRng(42);
     const nodes = st.current.nodes;
-    const ozCount = OZ_NAMES.length;
-    const mmStart = ozCount;
-    const mmCount = MM_NAMES.length;
-    const maxEdges = ozCount * mmCount;
-    const targetEdges = Math.floor((maxEdges * Math.min(progress, 100)) / 100);
+    const ps = st.current.platforms;
+    const perPlatform = 25;
 
+    // Build all cross-platform pairs
     const pairs: [number,number][] = [];
-    for (let i = 0; i < ozCount; i++)
-      for (let j = 0; j < mmCount; j++)
-        pairs.push([i, mmStart + j]);
+    for (let pi = 0; pi < ps.length; pi++) {
+      for (let pj = pi + 1; pj < ps.length; pj++) {
+        const baseI = pi * perPlatform;
+        const baseJ = pj * perPlatform;
+        for (let i = 0; i < perPlatform; i++)
+          for (let j = 0; j < perPlatform; j++)
+            pairs.push([baseI + i, baseJ + j]);
+      }
+    }
+    // Shuffle
     for (let i = pairs.length - 1; i > 0; i--) {
       const j = Math.floor(rng() * (i + 1));
       [pairs[i], pairs[j]] = [pairs[j], pairs[i]];
     }
 
+    const targetEdges = Math.floor((pairs.length * Math.min(progress, 100)) / 100);
     nodes.forEach(n => n.connected = false);
     const edges: SEdge[] = [];
     for (let k = 0; k < Math.min(targetEdges, pairs.length); k++) {
@@ -106,7 +157,7 @@ export default function NeuralMapLoader({ status }: { status: BuildStatus }) {
     st.current.selectedNode = -1;
     st.current.highlightedEdges.clear();
     st.current.highlightedNodes.clear();
-  }, [progress]);
+  }, [progress, platforms]);
 
   const project = useCallback((x: number, y: number, z: number) => {
     const { rotX, rotY } = st.current;
@@ -121,7 +172,6 @@ export default function NeuralMapLoader({ status }: { status: BuildStatus }) {
     return { sx: rx * scale, sy: ry * scale, scale, rz };
   }, []);
 
-  // Hit test
   const hitTest = useCallback((mouseX: number, mouseY: number, W: number, H: number) => {
     const CX = W / 2, CY = H / 2;
     const nodes = st.current.nodes;
@@ -140,14 +190,10 @@ export default function NeuralMapLoader({ status }: { status: BuildStatus }) {
   const selectNode = useCallback((nodeIdx: number) => {
     const s = st.current;
     if (nodeIdx === s.selectedNode) {
-      s.selectedNode = -1;
-      s.highlightedEdges.clear();
-      s.highlightedNodes.clear();
-      return;
+      s.selectedNode = -1; s.highlightedEdges.clear(); s.highlightedNodes.clear(); return;
     }
     s.selectedNode = nodeIdx;
-    s.highlightedEdges.clear();
-    s.highlightedNodes.clear();
+    s.highlightedEdges.clear(); s.highlightedNodes.clear();
     s.highlightedNodes.add(nodeIdx);
     s.edges.forEach((e, ei) => {
       if (e.from === nodeIdx || e.to === nodeIdx) {
@@ -163,14 +209,12 @@ export default function NeuralMapLoader({ status }: { status: BuildStatus }) {
     if (!canvas) return;
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
-
     const W = canvas.width, H = canvas.height;
     const CX = W / 2, CY = H / 2;
 
     const onMouseMove = (e: MouseEvent) => {
       const rect = canvas.getBoundingClientRect();
-      const scaleX = W / rect.width;
-      const scaleY = H / rect.height;
+      const scaleX = W / rect.width, scaleY = H / rect.height;
       const mx = (e.clientX - rect.left) * scaleX;
       const my = (e.clientY - rect.top) * scaleY;
       const s = st.current;
@@ -210,12 +254,9 @@ export default function NeuralMapLoader({ status }: { status: BuildStatus }) {
       if (!s.dragging) s.rotY += isDone ? 0.003 : 0.006;
 
       ctx.clearRect(0, 0, W, H);
-
-      // BG
       ctx.fillStyle = "#050510";
       ctx.fillRect(0, 0, W, H);
 
-      // Ambient center glow
       const cg = ctx.createRadialGradient(CX, CY, 0, CX, CY, 200);
       cg.addColorStop(0, `rgba(99,40,220,${0.06 + 0.03 * Math.sin(s.frame * 0.03)})`);
       cg.addColorStop(1, "rgba(0,0,0,0)");
@@ -226,20 +267,17 @@ export default function NeuralMapLoader({ status }: { status: BuildStatus }) {
       const edges = s.edges;
       const hasSelection = s.selectedNode >= 0;
 
-      // Project
       const proj = nodes.map(n => {
         const p = project(n.x, n.y, n.z);
         return { ...p, sx: CX + p.sx, sy: CY + p.sy };
       });
 
-      // Sort edges by depth
       const sortedEdgeIdx = edges.map((_, i) => i).sort((a, b) => {
         const za = (proj[edges[a].from].rz + proj[edges[a].to].rz) / 2;
         const zb = (proj[edges[b].from].rz + proj[edges[b].to].rz) / 2;
         return za - zb;
       });
 
-      // Draw edges
       sortedEdgeIdx.forEach(ei => {
         const e = edges[ei];
         const fp = proj[e.from], tp = proj[e.to];
@@ -254,15 +292,18 @@ export default function NeuralMapLoader({ status }: { status: BuildStatus }) {
         else if (isDone) alpha = e.strength * 0.45;
         else alpha = isLive ? e.strength * pulse * 0.85 : e.strength * 0.2;
 
+        const fnColor = getColor(nodes[e.from].platform);
+        const tnColor = getColor(nodes[e.to].platform);
+
         const grad = ctx.createLinearGradient(fp.sx, fp.sy, tp.sx, tp.sy);
         if (isHighlighted) {
           grad.addColorStop(0, `rgba(255,200,50,${alpha})`);
           grad.addColorStop(0.5, `rgba(255,255,150,${alpha})`);
           grad.addColorStop(1, `rgba(255,200,50,${alpha})`);
         } else {
-          grad.addColorStop(0, `rgba(99,102,241,${alpha})`);
+          grad.addColorStop(0, `rgba(${fnColor.join(",")},${alpha})`);
           grad.addColorStop(0.5, `rgba(168,85,247,${alpha * 1.4})`);
-          grad.addColorStop(1, `rgba(251,146,60,${alpha})`);
+          grad.addColorStop(1, `rgba(${tnColor.join(",")},${alpha})`);
         }
 
         ctx.beginPath();
@@ -274,7 +315,6 @@ export default function NeuralMapLoader({ status }: { status: BuildStatus }) {
         ctx.lineWidth = isHighlighted ? 2 : (isLive ? 1.2 * e.strength : 0.5);
         ctx.stroke();
 
-        // Spark
         if ((isLive && e.strength > 0.55 && !dimmed) || isHighlighted) {
           const t2 = ((s.frame * 0.025 + ei * 0.13) % 1);
           const px2 = fp.sx + (tp.sx - fp.sx) * t2;
@@ -286,7 +326,6 @@ export default function NeuralMapLoader({ status }: { status: BuildStatus }) {
         }
       });
 
-      // Draw nodes
       [...nodes.map((n, i) => ({ n, p: proj[i], i }))]
         .sort((a, b) => a.p.rz - b.p.rz)
         .forEach(({ n, p, i }) => {
@@ -298,7 +337,7 @@ export default function NeuralMapLoader({ status }: { status: BuildStatus }) {
 
           const baseR = (n.connected ? 5 : 2) * p.scale;
           const r = isHovered || isSelected ? baseR * 1.8 : baseR;
-          const color = n.platform === "ozon" ? [99,102,241] : [251,146,60];
+          const color = getColor(n.platform);
           const alpha = dimmed ? 0.12 : (n.connected ? pulse : 0.25);
           const glowAlpha = dimmed ? 0 : (isHighlighted || isHovered ? 0.5 : 0.15) * pulse;
 
@@ -317,10 +356,11 @@ export default function NeuralMapLoader({ status }: { status: BuildStatus }) {
               : `rgba(${color.join(",")},${alpha})`;
           ctx.fill();
 
-          // Label on hover/select/highlight
           if (isHovered || isSelected || isHighlighted) {
-            const isLeft = n.platform === "ozon";
             ctx.font = `${isSelected ? "700" : "600"} ${11 * Math.max(0.8, p.scale)}px Inter, sans-serif`;
+            // Put label on left for left-cluster platforms, right for rest
+            const platformIdx = s.platforms.indexOf(n.platform);
+            const isLeft = platformIdx < s.platforms.length / 2;
             ctx.textAlign = isLeft ? "right" : "left";
             ctx.textBaseline = "middle";
             const tx = isLeft ? p.sx - r - 6 : p.sx + r + 6;
@@ -339,8 +379,7 @@ export default function NeuralMapLoader({ status }: { status: BuildStatus }) {
       ctx.fillStyle = bg2;
       ctx.fill();
       ctx.font = `bold ${isDone ? 20 : 18}px Inter, sans-serif`;
-      ctx.textAlign = "center";
-      ctx.textBaseline = "middle";
+      ctx.textAlign = "center"; ctx.textBaseline = "middle";
       ctx.fillStyle = "#fff";
       ctx.fillText(isDone ? "✓" : `${progress}%`, CX, CY - 6);
       ctx.font = "500 9px Inter, sans-serif";
@@ -351,21 +390,26 @@ export default function NeuralMapLoader({ status }: { status: BuildStatus }) {
       if (s.selectedNode >= 0 && s.highlightedNodes.size > 1) {
         const selNode = nodes[s.selectedNode];
         const connectedCount = s.highlightedEdges.size;
+        const connectedPlatforms = [...new Set(
+          s.edges.filter((e, ei) => s.highlightedEdges.has(ei))
+            .flatMap(e => [nodes[e.from].platform, nodes[e.to].platform])
+            .filter(p => p !== selNode.platform)
+        )].map(getLabel).join(", ");
         const tipX = s.mouseX, tipY = Math.max(40, s.mouseY - 50);
         ctx.fillStyle = "rgba(20,10,40,0.92)";
         ctx.beginPath();
-        ctx.roundRect(tipX - 120, tipY - 26, 240, 50, 8);
+        ctx.roundRect(tipX - 130, tipY - 26, 260, 50, 8);
         ctx.fill();
-        ctx.strokeStyle = selNode.platform === "ozon" ? "rgba(99,102,241,0.6)" : "rgba(251,146,60,0.6)";
-        ctx.lineWidth = 1;
-        ctx.stroke();
+        const selColor = getColor(selNode.platform);
+        ctx.strokeStyle = `rgba(${selColor.join(",")},0.6)`;
+        ctx.lineWidth = 1; ctx.stroke();
         ctx.font = "600 12px Inter, sans-serif";
         ctx.textAlign = "center";
         ctx.fillStyle = "rgba(255,255,255,0.9)";
         ctx.fillText(selNode.label, tipX, tipY - 8);
         ctx.font = "11px Inter, sans-serif";
         ctx.fillStyle = "rgba(255,255,255,0.45)";
-        ctx.fillText(`${connectedCount} связей → ${selNode.platform === "ozon" ? "Megamarket" : "Ozon"}`, tipX, tipY + 12);
+        ctx.fillText(`${connectedCount} связей → ${connectedPlatforms || "другие платформы"}`, tipX, tipY + 12);
       }
 
       animRef.current = requestAnimationFrame(draw);
@@ -378,16 +422,22 @@ export default function NeuralMapLoader({ status }: { status: BuildStatus }) {
       canvas.removeEventListener("mousedown", onMouseDown);
       canvas.removeEventListener("mouseup", onMouseUp);
     };
-  }, [progress, isDone, project, selectNode]);
+  }, [progress, isDone, project, selectNode, platforms]);
+
+  // Legend items: platforms + edge count
+  const legendItems: [string, string][] = platforms.map(p => {
+    const [r,g,b] = getColor(p);
+    return [`rgb(${r},${g},${b})`, getLabel(p)];
+  });
+  legendItems.splice(Math.floor(platforms.length / 2), 0, ["#a855f7", `${st.current.edges.length} связей`]);
 
   return (
-    <div ref={containerRef} style={{
+    <div style={{
       background: "#050510",
       border: `1px solid ${isDone ? "rgba(16,185,129,0.25)" : isError ? "rgba(248,113,113,0.25)" : "rgba(99,102,241,0.18)"}`,
       borderRadius: 20, overflow: "hidden",
       boxShadow: isDone ? "0 0 50px rgba(16,185,129,0.06)" : "0 0 50px rgba(99,102,241,0.06)",
     }}>
-      {/* Header */}
       <div style={{ padding: "14px 22px", borderBottom: "1px solid rgba(255,255,255,0.05)", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
         <div>
           <div style={{ fontSize: 14, fontWeight: 700, color: isDone ? "#10b981" : isError ? "#f87171" : "rgba(255,255,255,0.9)" }}>
@@ -397,8 +447,8 @@ export default function NeuralMapLoader({ status }: { status: BuildStatus }) {
             {STAGE_NAMES[status.stage] ?? status.stage} · Нажмите на узел чтобы проследить связи
           </div>
         </div>
-        <div style={{ display: "flex", gap: 18 }}>
-          {[["#6366f1","Ozon"],["#a855f7",`${st.current.edges.length} связей`],["#fb923c","Megamarket"]].map(([c,l]) => (
+        <div style={{ display: "flex", gap: 14, flexWrap: "wrap", justifyContent: "flex-end" }}>
+          {legendItems.map(([c, l]) => (
             <div key={l} style={{ display:"flex", alignItems:"center", gap:6 }}>
               <div style={{ width:7, height:7, borderRadius:"50%", background:c }} />
               <span style={{ fontSize:11, color:"rgba(255,255,255,0.4)" }}>{l}</span>
@@ -407,11 +457,9 @@ export default function NeuralMapLoader({ status }: { status: BuildStatus }) {
         </div>
       </div>
 
-      {/* Canvas */}
       <canvas ref={canvasRef} width={960} height={480}
         style={{ display:"block", width:"100%", height:"auto", cursor:"grab" }} />
 
-      {/* Footer */}
       <div style={{ padding:"10px 22px", borderTop:"1px solid rgba(255,255,255,0.05)" }}>
         <div style={{ height:3, background:"rgba(255,255,255,0.06)", borderRadius:2, marginBottom:8, overflow:"hidden" }}>
           <div style={{

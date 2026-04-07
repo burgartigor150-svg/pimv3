@@ -40,6 +40,7 @@ class Product(Base):
     landing_json = Column(JSONB, nullable=True)  # Landing page sections
     social_content = Column(JSONB, nullable=True)
     landing_template = Column(String, nullable=True, default="dark_premium")  # Social media posts per platform
+    studio_projects = Column(JSONB, nullable=True)  # Saved ContentStudio projects [{name, layers, bg, canvas, ts}]
 
     category = relationship("Category", back_populates="products", lazy="selectin")
 

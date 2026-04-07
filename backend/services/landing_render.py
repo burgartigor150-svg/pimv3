@@ -8,6 +8,16 @@ def _esc(s: str) -> str:
             .replace("&", "&amp;").replace("<", "&lt;")
             .replace(">", "&gt;").replace('"', "&quot;"))
 
+def _normalize_blocks(blocks: List[Dict]) -> List[Dict]:
+    """Flatten {type, data: {...}} -> {type, ...} if saved in old format."""
+    result = []
+    for b in (blocks or []):
+        if isinstance(b, dict) and "data" in b and isinstance(b.get("data"), dict):
+            result.append({"type": b["type"], **b["data"]})
+        else:
+            result.append(b)
+    return result
+
 # ─── Template registry ────────────────────────────────────────────────────────
 
 TEMPLATES: Dict[str, Dict] = {
@@ -82,8 +92,9 @@ def _faq(items: List[Dict], q_color: str, a_color: str, border_color: str, bg: s
 # TEMPLATE 1: DARK PREMIUM (violet/indigo)
 # ═══════════════════════════════════════════════════════════════════════════════
 def _tpl_dark_premium(p: Any) -> str:
-    attrs=p.attributes_data or {}; images=p.images or []; name=p.name or "Товар"
-    brand=str(attrs.get("brand","")); rich=p.rich_content or []; landing=p.landing_json or {}
+    attrs=p.attributes_data or {}; name=p.name or "Товар"
+    brand=str(attrs.get("brand","")); rich=_normalize_blocks(p.rich_content or []); landing=p.landing_json or {}
+    images = list(dict.fromkeys((p.images or []) + [u for u in [landing.get("hero",{}).get("image_url","")] + [f.get("image_url","") if isinstance(f,dict) else "" for f in (landing.get("features") or [])] if u]))
     hero_d=landing.get("hero",{}); usp=landing.get("usp",[]); features=landing.get("features",[])
     specs=landing.get("specs_preview",[]); faq=landing.get("faq",[]); cta=landing.get("cta_section",{})
 
@@ -141,8 +152,9 @@ body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
 # TEMPLATE 2: LUXURY BLACK (black + gold)
 # ═══════════════════════════════════════════════════════════════════════════════
 def _tpl_luxury_black(p: Any) -> str:
-    attrs=p.attributes_data or {}; images=p.images or []; name=p.name or "Товар"
-    brand=str(attrs.get("brand","")); rich=p.rich_content or []; landing=p.landing_json or {}
+    attrs=p.attributes_data or {}; name=p.name or "Товар"
+    brand=str(attrs.get("brand","")); rich=_normalize_blocks(p.rich_content or []); landing=p.landing_json or {}
+    images = list(dict.fromkeys((p.images or []) + [u for u in [landing.get("hero",{}).get("image_url","")] + [f.get("image_url","") if isinstance(f,dict) else "" for f in (landing.get("features") or [])] if u]))
     hero_d=landing.get("hero",{}); usp=landing.get("usp",[]); features=landing.get("features",[])
     specs=landing.get("specs_preview",[]); faq=landing.get("faq",[]); cta=landing.get("cta_section",{})
     gallery = _gallery(images,"width:100%;max-height:460px;object-fit:contain;display:block;background:#0a0a0a;","width:68px;height:68px;object-fit:cover;border-radius:8px;cursor:pointer;border:2px solid transparent;opacity:.55;transition:all .25s;")
@@ -195,8 +207,9 @@ body{{font-family:"Georgia","Times New Roman",serif;background:#0a0a0a;color:#ff
 # TEMPLATE 3: CYBER NEON (dark + cyan)
 # ═══════════════════════════════════════════════════════════════════════════════
 def _tpl_cyber_neon(p: Any) -> str:
-    attrs=p.attributes_data or {}; images=p.images or []; name=p.name or "Товар"
-    brand=str(attrs.get("brand","")); rich=p.rich_content or []; landing=p.landing_json or {}
+    attrs=p.attributes_data or {}; name=p.name or "Товар"
+    brand=str(attrs.get("brand","")); rich=_normalize_blocks(p.rich_content or []); landing=p.landing_json or {}
+    images = list(dict.fromkeys((p.images or []) + [u for u in [landing.get("hero",{}).get("image_url","")] + [f.get("image_url","") if isinstance(f,dict) else "" for f in (landing.get("features") or [])] if u]))
     hero_d=landing.get("hero",{}); usp=landing.get("usp",[]); features=landing.get("features",[])
     specs=landing.get("specs_preview",[]); faq=landing.get("faq",[]); cta=landing.get("cta_section",{})
     gallery = _gallery(images,"width:100%;max-height:440px;object-fit:contain;display:block;background:#00040f;","width:68px;height:68px;object-fit:cover;border-radius:6px;cursor:pointer;border:2px solid transparent;opacity:.5;transition:all .25s;")
@@ -249,8 +262,9 @@ body{{font-family:"Courier New",Courier,monospace;background:#00040f;color:#fff;
 # TEMPLATE 4: CLEAN WHITE (minimal light)
 # ═══════════════════════════════════════════════════════════════════════════════
 def _tpl_clean_white(p: Any) -> str:
-    attrs=p.attributes_data or {}; images=p.images or []; name=p.name or "Товар"
-    brand=str(attrs.get("brand","")); rich=p.rich_content or []; landing=p.landing_json or {}
+    attrs=p.attributes_data or {}; name=p.name or "Товар"
+    brand=str(attrs.get("brand","")); rich=_normalize_blocks(p.rich_content or []); landing=p.landing_json or {}
+    images = list(dict.fromkeys((p.images or []) + [u for u in [landing.get("hero",{}).get("image_url","")] + [f.get("image_url","") if isinstance(f,dict) else "" for f in (landing.get("features") or [])] if u]))
     hero_d=landing.get("hero",{}); usp=landing.get("usp",[]); features=landing.get("features",[])
     specs=landing.get("specs_preview",[]); faq=landing.get("faq",[]); cta=landing.get("cta_section",{})
     gallery = _gallery(images,"width:100%;max-height:480px;object-fit:contain;display:block;background:#f8faff;border-radius:20px;","width:68px;height:68px;object-fit:cover;border-radius:10px;cursor:pointer;border:2px solid transparent;opacity:.6;transition:all .25s;")
@@ -311,16 +325,11 @@ def _render_rich_light(blocks: List[Dict]) -> str:
         t = b.get("type","")
         if t == "text":
             parts.append(f'<div class="reveal" style="margin:28px 0;font-size:16px;line-height:1.8;color:#475569">{b.get("html","")}</div>')
-        elif t == "features":
-            items = "".join(f'<div style="display:flex;gap:14px;align-items:flex-start;margin-bottom:18px"><span style="font-size:24px;flex-shrink:0">{_esc(i.get("icon","•"))}</span><div><b style="font-size:15px;color:#1e293b;display:block;margin-bottom:4px">{_esc(i.get("title",""))}</b><span style="color:#64748b;font-size:14px">{_esc(i.get("desc",""))}</span></div></div>' for i in b.get("items",[]))
-            parts.append(f'<div class="reveal" style="margin:36px 0"><h3 style="font-size:22px;font-weight:900;color:#0f172a;margin-bottom:20px">{_esc(b.get("title",""))}</h3>{items}</div>')
         elif t == "callout":
             bgs={"info":"#eff6ff","success":"#f0fdf4","warning":"#fffbeb"}; borders={"info":"#2563eb","success":"#16a34a","warning":"#d97706"}
             s=b.get("style","info")
             parts.append(f'<div class="reveal" style="background:{bgs.get(s,"#eff6ff")};border-left:4px solid {borders.get(s,"#2563eb")};border-radius:0 12px 12px 0;padding:20px 24px;margin:24px 0"><b style="color:#1e293b;font-size:15px;display:block;margin-bottom:8px">{_esc(b.get("title",""))}</b><p style="color:#475569;font-size:14px;line-height:1.65;margin:0">{_esc(b.get("text",""))}</p></div>')
-        elif t == "specs":
-            rows="".join(f'<tr><td style="padding:10px 14px;border-bottom:1px solid #f1f5f9;color:#64748b;font-size:13px">{_esc(r[0] if len(r)>0 else "")}</td><td style="padding:10px 14px;border-bottom:1px solid #f1f5f9;font-weight:700;font-size:13px;color:#1e293b">{_esc(r[1] if len(r)>1 else "")}</td></tr>' for r in b.get("rows",[]))
-            parts.append(f'<div class="reveal" style="margin:32px 0"><h3 style="font-size:20px;font-weight:900;color:#0f172a;margin-bottom:16px">{_esc(b.get("title","Характеристики"))}</h3><table style="width:100%;border-collapse:collapse;border:1px solid #e2e8f0;border-radius:12px;overflow:hidden">{rows}</table></div>')
+        # features and specs rendered in dedicated landing sections
     return "".join(parts)
 
 def _render_rich_theme(blocks: List[Dict], text_color: str, muted_color: str, callout_bg: str, accent: str) -> str:
@@ -329,14 +338,32 @@ def _render_rich_theme(blocks: List[Dict], text_color: str, muted_color: str, ca
         t = b.get("type","")
         if t == "text":
             parts.append(f'<div class="reveal" style="margin:28px 0;font-size:15px;line-height:1.85;color:{muted_color}">{b.get("html","")}</div>')
-        elif t == "features":
-            items = "".join(f'<div class="reveal" style="display:flex;gap:14px;align-items:flex-start;margin-bottom:18px"><span style="font-size:26px;flex-shrink:0;filter:drop-shadow(0 4px 8px {accent}44)">{_esc(i.get("icon","•"))}</span><div><b style="font-size:15px;color:{text_color};display:block;margin-bottom:4px">{_esc(i.get("title",""))}</b><span style="color:{muted_color};font-size:14px;line-height:1.6">{_esc(i.get("desc",""))}</span></div></div>' for i in b.get("items",[]))
-            parts.append(f'<div class="reveal" style="margin:36px 0"><h3 style="font-size:22px;font-weight:900;color:{text_color};margin-bottom:22px">{_esc(b.get("title",""))}</h3>{items}</div>')
         elif t == "callout":
             parts.append(f'<div class="reveal" style="background:{callout_bg};border-left:4px solid {accent};border-radius:0 14px 14px 0;padding:22px 26px;margin:24px 0"><b style="color:{text_color};font-size:15px;display:block;margin-bottom:8px">{_esc(b.get("title",""))}</b><p style="color:{muted_color};font-size:14px;line-height:1.65;margin:0">{_esc(b.get("text",""))}</p></div>')
-        elif t == "specs":
-            rows="".join(f'<tr><td style="padding:11px 16px;border-bottom:1px solid rgba(255,255,255,.06);color:{muted_color};font-size:13px">{_esc(r[0] if len(r)>0 else "")}</td><td style="padding:11px 16px;border-bottom:1px solid rgba(255,255,255,.06);font-weight:700;font-size:13px;color:{text_color}">{_esc(r[1] if len(r)>1 else "")}</td></tr>' for r in b.get("rows",[]))
-            parts.append(f'<div class="reveal" style="margin:32px 0"><h3 style="font-size:20px;font-weight:900;color:{text_color};margin-bottom:16px">{_esc(b.get("title","Характеристики"))}</h3><table style="width:100%;border-collapse:collapse">{rows}</table></div>')
+        elif t == "gallery":
+            imgs = b.get("images", [])
+            if imgs:
+                main_img = _esc(imgs[0])
+                gid = f"gal_{id(b)}"
+                thumbs_parts = []
+                for _gi, _gu in enumerate(imgs[:8]):
+                    _eu = _esc(_gu)
+                    thumbs_parts.append(
+                        f'<img src="{_eu}" style="width:110px;height:80px;object-fit:cover;border-radius:8px;cursor:pointer;opacity:.65;transition:all .2s" '
+                        f'onclick="document.getElementById(\'{gid}\').src=this.src;[...this.parentElement.querySelectorAll(\'img\')].forEach(x=>x.style.opacity=.65);this.style.opacity=1" />'
+                    )
+                thumbs = "".join(thumbs_parts)
+                parts.append(
+                    f'<div class="reveal" style="margin:28px 0">'
+                    f'<img id="{gid}" src="{main_img}" style="width:100%;max-height:400px;object-fit:contain;border-radius:12px;display:block;margin-bottom:12px" />'
+                    f'<div style="display:flex;gap:8px;flex-wrap:wrap">{thumbs}</div>'
+                    f'</div>'
+                )
+        elif t == "hero":
+            img_url = b.get("image_url", "")
+            if img_url:
+                parts.append(f'<div class="reveal" style="margin:28px 0;border-radius:16px;overflow:hidden"><img src="{_esc(img_url)}" style="width:100%;max-height:460px;object-fit:contain;display:block" /></div>')
+        # specs/features blocks are rendered in the dedicated landing section — skip here
     return "".join(parts)
 
 
@@ -346,8 +373,9 @@ def _render_rich_theme(blocks: List[Dict], text_color: str, muted_color: str, ca
 def _make_dark_variant(accent_hex: str, accent_rgb: str, bg: str, bg2: str):
     """Factory for dark templates with different accent colors."""
     def _tpl(p: Any) -> str:
-        attrs=p.attributes_data or {}; images=p.images or []; name=p.name or "Товар"
-        brand=str(attrs.get("brand","")); rich=p.rich_content or []; landing=p.landing_json or {}
+        attrs=p.attributes_data or {}; name=p.name or "Товар"
+        brand=str(attrs.get("brand","")); rich=_normalize_blocks(p.rich_content or []); landing=p.landing_json or {}
+        images = list(dict.fromkeys((p.images or []) + [u for u in [landing.get("hero",{}).get("image_url","")] + [f.get("image_url","") if isinstance(f,dict) else "" for f in (landing.get("features") or [])] if u]))
         hero_d=landing.get("hero",{}); usp=landing.get("usp",[]); features=landing.get("features",[])
         specs=landing.get("specs_preview",[]); faq=landing.get("faq",[]); cta=landing.get("cta_section",{})
         gallery = _gallery(images,f"width:100%;max-height:460px;object-fit:contain;display:block;background:{bg};",f"width:68px;height:68px;object-fit:cover;border-radius:10px;cursor:pointer;border:2px solid transparent;opacity:.6;transition:all .25s;")

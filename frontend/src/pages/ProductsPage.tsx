@@ -13,6 +13,7 @@ import {
   CheckSquare,
   Square,
   Loader2,
+  RefreshCw,
 } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import { api } from '../lib/api';
@@ -87,13 +88,25 @@ function CompletenessBar({ value }: { value: number }) {
 }
 
 function StatusBadge({ status }: { status: string }) {
-  const map: Record<string, { bg: string; color: string; label: string }> = {
-    active:   { bg: 'rgba(16,185,129,0.12)',  color: '#10b981', label: 'Активный' },
-    draft:    { bg: 'rgba(245,158,11,0.12)',  color: '#f59e0b', label: 'Черновик' },
-    archived: { bg: 'rgba(248,113,113,0.12)', color: '#f87171', label: 'Архив' },
-    default:  { bg: 'rgba(255,255,255,0.06)', color: 'rgba(255,255,255,0.45)', label: status },
-  };
-  const s = map[status] ?? map.default;
+  const s = (() => {
+    const st = (status || '').toLowerCase();
+    if (['active', 'ok', 'ready', 'has_card_can_update'].some(v => st.includes(v)))
+      return { bg: 'rgba(16,185,129,0.12)', color: '#10b981', label: 'Активный' };
+    if (['draft', 'pending', 'processing', 'moderation'].some(v => st.includes(v)))
+      return { bg: 'rgba(245,158,11,0.12)', color: '#f59e0b', label: 'На модерации' };
+    if (['error', 'ошибк', 'has_card_can_update_errors', 'invalid'].some(v => st.includes(v)))
+      return { bg: 'rgba(248,113,113,0.12)', color: '#f87171', label: 'Есть ошибки' };
+    if (['archived', 'archive', 'disabled'].some(v => st.includes(v)))
+      return { bg: 'rgba(255,255,255,0.06)', color: 'rgba(255,255,255,0.35)', label: 'Архив' };
+    if (['inactive', 'paused', 'blocked'].some(v => st.includes(v)))
+      return { bg: 'rgba(248,113,113,0.08)', color: '#f87171', label: 'Неактивный' };
+    // Russian status labels from MM
+    if (st.includes('есть ошибки') || st.includes('ошибки'))
+      return { bg: 'rgba(248,113,113,0.12)', color: '#f87171', label: 'Есть ошибки' };
+    if (st.includes('готов') || st.includes('активн'))
+      return { bg: 'rgba(16,185,129,0.12)', color: '#10b981', label: 'Активный' };
+    return { bg: 'rgba(255,255,255,0.06)', color: 'rgba(255,255,255,0.45)', label: status };
+  })();
   return (
     <span
       style={{
@@ -332,6 +345,120 @@ function ImportModal({ connections, onClose, onDone }: ImportModalProps) {
   );
 }
 
+// ─── MP Product Detail Modal ──────────────────────────────────────────────────
+
+interface MpDetail {
+  name: string; brand: string; category: string; description: string;
+  photos: string[]; attributes: { id: string; name: string; value: string }[];
+  sku: string; status: string;
+}
+
+function MpProductModal({ product, platform, onClose }: { product: Product; platform: string; onClose: () => void }) {
+  const [detail, setDetail] = useState<MpDetail | null>(null);
+  const [loadingDetail, setLoadingDetail] = useState(true);
+  const [photoIdx, setPhotoIdx] = useState(0);
+  const { toast } = useToast();
+
+  useEffect(() => {
+    setLoadingDetail(true);
+    const catId = typeof product.category === 'string' ? product.category : '';
+    api.get(`/mp/product-details?platform=${encodeURIComponent(platform)}&sku=${encodeURIComponent(product.sku)}&category_id=${encodeURIComponent(catId)}`)
+      .then((r) => setDetail({ ...r.data, status: product.status }))
+      .catch(() => toast('Не удалось загрузить детали товара', 'error'))
+      .finally(() => setLoadingDetail(false));
+  }, [product.sku, platform]);
+
+  const photos = detail?.photos?.length ? detail.photos : (product.image_url ? [product.image_url] : []);
+  const attrList = detail?.attributes?.filter((a) => a.value && a.value !== 'None' && a.value !== 'undefined') ?? [];
+
+  return (
+    <div
+      style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.8)', backdropFilter: 'blur(10px)', zIndex: 200, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 24 }}
+      onClick={(e) => e.target === e.currentTarget && onClose()}
+    >
+      <div style={{ background: '#0d0d1a', border: '1px solid rgba(255,255,255,0.1)', borderRadius: 20, width: '100%', maxWidth: 860, maxHeight: '92vh', overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
+        {/* Header */}
+        <div style={{ padding: '24px 28px 20px', borderBottom: '1px solid rgba(255,255,255,0.07)', display: 'flex', gap: 20, alignItems: 'flex-start' }}>
+          {/* Photo gallery */}
+          <div style={{ flexShrink: 0, position: 'relative' }}>
+            <div style={{ width: 100, height: 100, borderRadius: 12, background: 'rgba(255,255,255,0.04)', overflow: 'hidden', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+              {photos[photoIdx] ? (
+                <img src={photos[photoIdx]} alt="" style={{ width: '100%', height: '100%', objectFit: 'contain' }} onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }} />
+              ) : (
+                <Package size={32} style={{ color: 'rgba(255,255,255,0.15)' }} />
+              )}
+            </div>
+            {photos.length > 1 && (
+              <div style={{ display: 'flex', gap: 4, marginTop: 6, justifyContent: 'center' }}>
+                {photos.slice(0, 6).map((_, i) => (
+                  <div key={i} onClick={() => setPhotoIdx(i)} style={{ width: 6, height: 6, borderRadius: '50%', background: i === photoIdx ? '#6366f1' : 'rgba(255,255,255,0.2)', cursor: 'pointer' }} />
+                ))}
+              </div>
+            )}
+          </div>
+
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ fontSize: 18, fontWeight: 700, marginBottom: 8, lineHeight: 1.35 }}>
+              {loadingDetail ? product.name : (detail?.name || product.name)}
+            </div>
+            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 8 }}>
+              {(detail?.brand || product.brand) && (
+                <span style={{ background: 'rgba(99,102,241,0.15)', color: '#a5b4fc', borderRadius: 6, padding: '3px 10px', fontSize: 12, fontWeight: 600 }}>
+                  {detail?.brand || product.brand}
+                </span>
+              )}
+              {(detail?.category || (typeof product.category === 'string' && product.category)) && (
+                <span style={{ background: 'rgba(255,255,255,0.06)', color: 'rgba(255,255,255,0.5)', borderRadius: 6, padding: '3px 10px', fontSize: 12 }}>
+                  {detail?.category || String(product.category)}
+                </span>
+              )}
+              <StatusBadge status={product.status} />
+            </div>
+            <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.3)', marginBottom: 4 }}>SKU: {product.sku.startsWith('mp:') ? product.sku.slice(3) : product.sku}</div>
+            {detail?.description && (
+              <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.45)', marginTop: 8, lineHeight: 1.5, maxHeight: 60, overflow: 'hidden' }}>
+                {detail.description}
+              </div>
+            )}
+          </div>
+
+          <button onClick={onClose} style={{ background: 'none', border: 'none', color: 'rgba(255,255,255,0.4)', cursor: 'pointer', padding: 4, flexShrink: 0 }}>
+            <X size={20} />
+          </button>
+        </div>
+
+        {/* Body */}
+        <div style={{ flex: 1, overflowY: 'auto', padding: '20px 28px 28px' }}>
+          {loadingDetail ? (
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', paddingTop: 40, gap: 10, color: 'rgba(255,255,255,0.35)' }}>
+              <Loader2 size={20} style={{ animation: 'spin 1s linear infinite' }} />
+              Загружаем атрибуты…
+            </div>
+          ) : attrList.length > 0 ? (
+            <>
+              <div style={{ fontSize: 12, fontWeight: 600, color: 'rgba(255,255,255,0.35)', marginBottom: 14, textTransform: 'uppercase', letterSpacing: '0.06em' }}>
+                Атрибуты · {attrList.length}
+              </div>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '2px 24px' }}>
+                {attrList.map((a, i) => (
+                  <div key={i} style={{ padding: '8px 0', borderBottom: '1px solid rgba(255,255,255,0.04)' }}>
+                    <div style={{ fontSize: 11, color: 'rgba(255,255,255,0.3)', marginBottom: 3 }}>{a.name}</div>
+                    <div style={{ fontSize: 13, color: 'rgba(255,255,255,0.85)', wordBreak: 'break-word' }}>{a.value}</div>
+                  </div>
+                ))}
+              </div>
+            </>
+          ) : (
+            <div style={{ color: 'rgba(255,255,255,0.25)', fontSize: 14, textAlign: 'center', paddingTop: 40 }}>
+              Атрибуты не загружены
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ─── Main Component ───────────────────────────────────────────────────────────
 
 export default function ProductsPage() {
@@ -348,35 +475,95 @@ export default function ProductsPage() {
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [showImport, setShowImport] = useState(false);
   const [connections, setConnections] = useState<Connection[]>([]);
+  const [categories, setCategories] = useState<{id: string; name: string}[]>([]);
   const [aiLoading, setAiLoading] = useState(false);
   const [bulkDeleteLoading, setBulkDeleteLoading] = useState(false);
+  const [source, setSource] = useState<string>('pim');
+  const [syncing, setSyncing] = useState(false);
+  const [syncLog, setSyncLog] = useState<string[]>([]);
+  const [syncDone, setSyncDone] = useState(0);
   const searchTimeout = useRef<ReturnType<typeof setTimeout>>();
 
-  const fetchProducts = useCallback(async (p = page, s = search, cat = category) => {
+  const fetchProducts = useCallback(async (p = page, s = search, cat = category, src = source) => {
     setLoading(true);
     try {
-      const res = await api.get<ProductsResponse>(
-        `/products?page=${p}&limit=50&search=${encodeURIComponent(s)}&category=${encodeURIComponent(cat)}`
-      );
-      const rawData = res.data;
-      const items = Array.isArray(rawData) ? rawData : (rawData.items ?? []);
-      setProducts(items);
-      setTotal(Array.isArray(rawData) ? rawData.length : (rawData.total ?? items.length));
-      setPages(Array.isArray(rawData) ? 1 : (rawData.pages ?? 1));
+      if (src === 'pim') {
+        const res = await api.get<ProductsResponse>(
+          `/products?page=${p}&limit=50&search=${encodeURIComponent(s)}&category=${encodeURIComponent(cat)}`
+        );
+        const rawData = res.data;
+        const items = Array.isArray(rawData) ? rawData : (rawData.items ?? []);
+        setProducts(items);
+        setTotal(Array.isArray(rawData) ? rawData.length : (rawData.total ?? items.length));
+        setPages(Array.isArray(rawData) ? 1 : (rawData.pages ?? 1));
+      } else {
+        const res = await api.get(`/mp/products?platform=${src}&page=${p}&limit=50`);
+        const items = (res.data.items ?? []).map((it: any) => {
+          const attrs = Array.isArray(it.attributes) ? it.attributes : (it.attributes ? Object.keys(it.attributes) : []);
+          const filledAttrs = attrs.filter((a: any) => {
+            const val = typeof a === 'object' ? (a.value ?? a.values) : a;
+            return val !== undefined && val !== null && val !== '' && !(Array.isArray(val) && val.length === 0);
+          });
+          const completeness = attrs.length > 0 ? Math.round((filledAttrs.length / attrs.length) * 100) : (it.name && it.brand ? 40 : 10);
+          const rawStatus = String(it.status || 'active').toLowerCase();
+          return {
+            id: it.sku || String(Math.random()),
+            sku: it.sku || '',
+            name: it.name || '',
+            brand: it.brand || '',
+            category: it.category || '',
+            completeness,
+            status: rawStatus,
+            image_url: it.image_url || '',
+          };
+        });
+        setProducts(items);
+        setTotal(res.data.total ?? items.length);
+        setPages(res.data.has_more ? p + 1 : p);
+      }
     } catch (e: any) {
       toast(e?.message ?? 'Ошибка загрузки товаров', 'error');
     } finally {
       setLoading(false);
     }
-  }, [page, search, category, toast]);
+  }, [page, search, category, source, toast]);
 
-  useEffect(() => { fetchProducts(); }, [page, category]);
+  useEffect(() => { fetchProducts(page, search, category, source); }, [page, category, source]);
+
+  const handleSyncShadows = async () => {
+    setSyncing(true);
+    setSyncLog(['Запуск синхронизации...']);
+    setSyncDone(0);
+    try {
+      await api.post('/mp/sync-shadows');
+      const poll = async () => {
+        try {
+          const res = await api.get('/mp/sync-shadows/status');
+          const s = res.data;
+          setSyncLog(s.log || []);
+          setSyncDone(s.done || 0);
+          if (s.running) {
+            setTimeout(poll, 1500);
+          } else {
+            setSyncing(false);
+            toast(`Синхронизация завершена: ${s.done} товаров, ${s.errors} ошибок`, s.errors > 0 ? 'error' : 'success');
+            fetchProducts();
+          }
+        } catch { setSyncing(false); }
+      };
+      poll();
+    } catch {
+      setSyncing(false);
+      toast('Ошибка запуска синхронизации', 'error');
+    }
+  };
+
 
   useEffect(() => {
     clearTimeout(searchTimeout.current);
     searchTimeout.current = setTimeout(() => {
       setPage(1);
-      fetchProducts(1, search, category);
+      fetchProducts(1, search, category, source);
     }, 400);
     return () => clearTimeout(searchTimeout.current);
   }, [search]);
@@ -384,6 +571,17 @@ export default function ProductsPage() {
   useEffect(() => {
     api.get<Connection[]>('/connections').then((r) => {
       setConnections(Array.isArray(r.data) ? r.data : []);
+    });
+    api.get('/categories').then((r) => {
+      const cats = Array.isArray(r.data) ? r.data : [];
+      // Deduplicate by name, keep unique names only
+      const seen = new Set<string>();
+      const unique = cats.filter((c: any) => {
+        if (seen.has(c.name)) return false;
+        seen.add(c.name);
+        return true;
+      });
+      setCategories(unique.map((c: any) => ({ id: c.id, name: c.name })));
     });
   }, []);
 
@@ -511,7 +709,16 @@ export default function ProductsPage() {
               {total.toLocaleString()}
             </span>
           </div>
-          <div style={{ marginLeft: 'auto' }}>
+          <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 8 }}>
+            <button
+              onClick={handleSyncShadows}
+              disabled={syncing}
+              style={{ padding: '10px 18px', fontSize: 14, display: 'flex', alignItems: 'center', gap: 8, borderRadius: 10, border: '1px solid rgba(99,102,241,0.3)', background: 'rgba(99,102,241,0.1)', color: '#a5b4fc', cursor: syncing ? 'not-allowed' : 'pointer', opacity: syncing ? 0.7 : 1 }}
+              title="Создать shadow-записи для всех товаров МП"
+            >
+              <RefreshCw size={15} style={syncing ? { animation: 'spin 1s linear infinite' } : {}} />
+              {syncing ? `Синхронизация... ${syncDone}` : 'Синхронизировать МП'}
+            </button>
             <button
               className="btn-glow"
               onClick={() => setShowImport(true)}
@@ -523,6 +730,39 @@ export default function ProductsPage() {
           </div>
         </div>
 
+        {/* Source tabs */}
+        <div style={{ display: 'flex', gap: 6, marginBottom: 16, flexWrap: 'wrap' }}>
+          {(['pim', ...connections.map((c: Connection) => c.type).filter((v: string, i: number, a: string[]) => a.indexOf(v) === i)] as string[]).map((src: string) => {
+            const LABELS: Record<string, string> = { pim: 'PIM', ozon: 'Ozon', megamarket: 'Megamarket', wildberries: 'Wildberries', wb: 'Wildberries', yandex: 'Яндекс' };
+            const COLORS: Record<string, string> = { pim: '#6366f1', ozon: '#005bff', megamarket: '#ff9900', wildberries: '#cb3e76', wb: '#cb3e76', yandex: '#ffcc00' };
+            const label = LABELS[src] ?? src;
+            const color = COLORS[src] ?? '#8888cc';
+            const active = source === src;
+            return (
+              <button
+                key={src}
+                onClick={() => { setSource(src); setPage(1); setSelected(new Set()); }}
+                style={{
+                  padding: '6px 16px', borderRadius: 20, fontSize: 12, fontWeight: 600,
+                  cursor: 'pointer', border: `1px solid ${active ? color : 'rgba(255,255,255,0.1)'}`,
+                  background: active ? color + '22' : 'transparent',
+                  color: active ? color : 'rgba(255,255,255,0.45)',
+                  transition: 'all 0.15s',
+                }}
+              >
+                {label}
+              </button>
+            );
+          })}
+        </div>
+
+
+        {/* Sync progress log */}
+        {(syncing || syncLog.length > 0) && (
+          <div style={{ marginBottom: 12, padding: '10px 14px', background: 'rgba(99,102,241,0.07)', border: '1px solid rgba(99,102,241,0.15)', borderRadius: 8, fontSize: 11, color: 'rgba(255,255,255,0.5)', maxHeight: 80, overflowY: 'auto' }}>
+            {syncLog.slice(-5).map((l: string, i: number) => <div key={i}>{l}</div>)}
+          </div>
+        )}
         {/* Filter bar */}
         <div style={{ display: 'flex', gap: 12, marginBottom: 20 }}>
           <div style={{ flex: 1, maxWidth: 360, position: 'relative' }}>
@@ -551,11 +791,9 @@ export default function ProductsPage() {
             onChange={(e) => { setCategory(e.target.value); setPage(1); }}
           >
             <option value="">Все категории</option>
-            <option value="electronics">Электроника</option>
-            <option value="clothing">Одежда</option>
-            <option value="food">Продукты</option>
-            <option value="sport">Спорт</option>
-            <option value="home">Дом</option>
+            {categories.map((c) => (
+              <option key={c.id} value={c.id}>{c.name}</option>
+            ))}
           </select>
         </div>
 
@@ -696,7 +934,7 @@ export default function ProductsPage() {
                   return (
                     <tr
                       key={product.id}
-                      onClick={() => navigate(`/products/${product.id}`)}
+                      onClick={() => source !== 'pim' ? navigate(`/products/mp__${source}__${encodeURIComponent(product.sku)}`) : navigate(`/products/${product.id}`)}
                       style={{
                         borderBottom:
                           idx < products.length - 1 ? '1px solid rgba(255,255,255,0.04)' : 'none',
@@ -748,7 +986,7 @@ export default function ProductsPage() {
                       </td>
                       {/* SKU */}
                       <td style={{ padding: '12px 16px', color: 'rgba(255,255,255,0.45)', fontSize: 12, fontFamily: 'monospace' }}>
-                        {product.sku}
+                        {product.sku.startsWith('mp:') ? product.sku.slice(3) : product.sku}
                       </td>
                       {/* Name */}
                       <td style={{ padding: '12px 16px' }}>
@@ -786,7 +1024,7 @@ export default function ProductsPage() {
                       <td style={{ padding: '12px 16px' }} onClick={(e) => e.stopPropagation()}>
                         <div style={{ display: 'flex', gap: 6 }}>
                           <button
-                            onClick={() => navigate(`/products/${product.id}`)}
+                            onClick={() => source !== 'pim' ? navigate(`/products/mp__${source}__${encodeURIComponent(product.sku)}`) : navigate(`/products/${product.id}`)}
                             title="Редактировать"
                             style={{
                               background: 'rgba(99,102,241,0.1)',

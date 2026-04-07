@@ -2,7 +2,7 @@ import React, { useState, useEffect, useCallback } from 'react';
 import {
   Sparkles, Save, Plus, Trash2, ChevronUp, ChevronDown, RefreshCw,
   Type, List, Table, AlertCircle, ExternalLink, Eye, Edit3,
-  GripVertical, Star, Zap, CheckCircle, Image as ImageIcon, Layout, X,
+  GripVertical, Star, Zap, CheckCircle, Image as ImageIcon, Layout, X, Upload,
 } from 'lucide-react';
 import { api } from '../lib/api';
 import { useToast } from './Toast';
@@ -238,7 +238,7 @@ function RichPreview({ blocks, productImages }: { blocks: Block[]; productImages
         }
         if (btype === 'callout') {
           const b = block as CalloutBlock;
-          const c = CALLOUT_COLORS[b.style];
+          const c = CALLOUT_COLORS[b.style] ?? CALLOUT_COLORS.info;
           return <div key={i} style={{ background: c.bg, borderLeft: `4px solid ${c.border}`, borderRadius: '0 10px 10px 0', padding: '16px 20px', marginBottom: 20 }}><b style={{ fontSize: 15 }}>{b.title}</b><p style={{ marginTop: 6, color: '#333', fontSize: 14 }}>{b.text}</p></div>;
         }
         return null;
@@ -255,6 +255,7 @@ export default function RichContentEditor({ product }: { product: any }) {
   const [landingJson, setLandingJson] = useState<any>({});
   const [generating, setGenerating] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [pushing, setPushing] = useState(false);
   const [view, setView] = useState<'edit' | 'preview' | 'landing' | 'templates'>('edit');
   const [landingUrl, setLandingUrl] = useState('');
   const [templates, setTemplates] = useState<any[]>([]);
@@ -265,7 +266,15 @@ export default function RichContentEditor({ product }: { product: any }) {
     if (!product?.id) return;
     api.get(`/products/${product.id}/rich-content`)
       .then(r => {
-        if (r.data.rich_content?.length) setBlocks(r.data.rich_content);
+        if (r.data.rich_content?.length) {
+          // Normalize {type, data: {...}} -> {type, ...} for legacy stored blocks
+          const normalized = r.data.rich_content.map((b: any) =>
+            b && typeof b === 'object' && b.data && typeof b.data === 'object'
+              ? { type: b.type, ...b.data }
+              : b
+          );
+          setBlocks(normalized);
+        }
         if (r.data.landing_json && Object.keys(r.data.landing_json).length) setLandingJson(r.data.landing_json);
       })
       .catch(() => {});
@@ -315,18 +324,32 @@ export default function RichContentEditor({ product }: { product: any }) {
 
   const handleGenerate = async () => {
     setGenerating(true);
+    toast('AI анализирует фото и генерирует контент…', 'info');
     try {
-      const res = await api.post(`/products/${product.id}/ai-generate-rich`);
-      const newBlocks = res.data.rich_content || [];
-      const newLanding = res.data.landing_json || {};
-      setBlocks(newBlocks);
-      setLandingJson(newLanding);
-      await api.put(`/products/${product.id}/rich-content`, {
-        rich_content: newBlocks,
-        landing_json: newLanding,
-      });
-      setTimeout(() => { refreshLanding(selectedTemplate); setView('landing'); }, 300);
-      toast('Готово — переключаю на лендинг', 'success');
+      const startRes = await api.post(`/products/${product.id}/ai-generate-rich`);
+      const taskId = startRes.data.task_id;
+      if (!taskId) throw new Error('Нет task_id');
+
+      // Poll for completion
+      let done = false;
+      for (let i = 0; i < 180; i++) {
+        await new Promise(r => setTimeout(r, 3000));
+        const statusRes = await api.get(`/products/${product.id}/ai-generate-rich/status/${taskId}`);
+        const s = statusRes.data.status;
+        if (s === 'done') {
+          const newBlocks = statusRes.data.rich_content || [];
+          const newLanding = statusRes.data.landing_json || {};
+          setBlocks(newBlocks);
+          setLandingJson(newLanding);
+          setTimeout(() => { refreshLanding(selectedTemplate); setView('landing'); }, 300);
+          toast('Готово — переключаю на лендинг', 'success');
+          done = true;
+          break;
+        } else if (s === 'error') {
+          throw new Error(statusRes.data.error || 'Ошибка генерации');
+        }
+      }
+      if (!done) throw new Error('Таймаут: генерация заняла слишком долго');
     } catch (e: any) {
       toast('Ошибка генерации: ' + (e?.message ?? ''), 'error');
     } finally { setGenerating(false); }
@@ -342,6 +365,26 @@ export default function RichContentEditor({ product }: { product: any }) {
     finally { setSaving(false); }
   };
 
+  const handlePushToOzon = async () => {
+    if (!product?.id) return;
+    setPushing(true);
+    try {
+      const res = await api.post(`/products/${product.id}/push-rich-content`);
+      const sc = res.data?.status_code;
+      const resp = res.data?.response;
+      if (sc === 200) {
+        const taskId = resp?.result?.task_id;
+        toast(taskId ? `Выгружено в Ozon, task_id: ${taskId}` : 'Выгружено в Ozon', 'success');
+      } else {
+        const msg = resp?.message || resp?.error || JSON.stringify(resp).slice(0, 120);
+        toast(`Ozon: ${msg}`, 'error');
+      }
+    } catch (e: any) {
+      const msg = e?.response?.data?.detail || e?.message || 'Ошибка выгрузки';
+      toast(msg, 'error');
+    } finally { setPushing(false); }
+  };
+
   const c = {
     root: { display: 'flex', flexDirection: 'column' as const, height: '88vh', background: '#0c0c18', borderRadius: 12, overflow: 'hidden', border: '1px solid rgba(255,255,255,0.06)' },
     toolbar: { height: 48, display: 'flex', alignItems: 'center', gap: 8, padding: '0 16px', borderBottom: '1px solid rgba(255,255,255,0.07)', background: '#0f0f1e', flexShrink: 0 },
@@ -349,10 +392,11 @@ export default function RichContentEditor({ product }: { product: any }) {
     sidebar: { width: 320, flexShrink: 0, borderRight: '1px solid rgba(255,255,255,0.07)', display: 'flex', flexDirection: 'column' as const, background: '#0d0d1a', overflow: 'hidden' },
     editorScroll: { flex: 1, overflowY: 'auto' as const, padding: 14 },
     previewArea: { flex: 1, overflow: 'auto', padding: 24, background: '#e8e8ee' },
-    btn: (v: 'primary' | 'ghost' | 'success' = 'ghost'): React.CSSProperties => ({
+    btn: (v: 'primary' | 'ghost' | 'success' | 'ozon' = 'ghost'): React.CSSProperties => ({
       display: 'flex', alignItems: 'center', gap: 5, padding: '7px 12px', borderRadius: 8, fontSize: 12, fontWeight: 600, cursor: 'pointer', border: '1px solid transparent',
       ...(v === 'primary' ? { background: 'linear-gradient(135deg,#6366f1,#8b5cf6)', color: '#fff' }
         : v === 'success' ? { background: 'linear-gradient(135deg,#10b981,#059669)', color: '#fff' }
+        : v === 'ozon' ? { background: 'linear-gradient(135deg,#005bff,#0041cc)', color: '#fff' }
         : { background: 'rgba(255,255,255,0.07)', color: 'rgba(255,255,255,0.7)', borderColor: 'rgba(255,255,255,0.1)' }),
     }),
     viewBtn: (active: boolean): React.CSSProperties => ({
@@ -379,6 +423,9 @@ export default function RichContentEditor({ product }: { product: any }) {
         </button>
         <button style={{ ...c.btn('success'), opacity: saving ? 0.7 : 1 }} onClick={handleSave} disabled={saving}>
           {saving ? <><RefreshCw size={13} style={{ animation: 'spin 1s linear infinite' }} />Сохранение...</> : <><Save size={13} />Сохранить</>}
+        </button>
+        <button style={{ ...c.btn('ozon'), opacity: pushing ? 0.7 : 1 }} onClick={handlePushToOzon} disabled={pushing} title="Выгрузить rich content в Ozon">
+          {pushing ? <><RefreshCw size={13} style={{ animation: 'spin 1s linear infinite' }} />Выгрузка...</> : <><Upload size={13} />В Ozon</>}
         </button>
       </div>
 

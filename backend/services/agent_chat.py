@@ -350,39 +350,18 @@ async def compose_assistant_reply_with_llm(
     import subprocess, json as _json
     from openai import AsyncOpenAI
 
-    workspace = "/mnt/data/Pimv3"
-    try:
-        tree_out = subprocess.run(
-            ["find", workspace + "/backend", "-type", "f", "-name", "*.py",
-             "-not", "-path", "*/venv/*", "-not", "-path", "*/__pycache__/*"],
-            capture_output=True, text=True, timeout=5
-        ).stdout
-        py_files = [f.replace(workspace + "/", "") for f in tree_out.strip().split("\n") if f][:50]
-        file_tree = "\n".join(py_files)
-    except Exception:
-        file_tree = "(не удалось получить список файлов)"
-
     system = (
-        "Ты — Claude, AI-агент и ассистент разработчика проекта PIMv3.\n"
-        "PIMv3 — PIM-система (Product Information Management) для маркетплейсов: "
-        "Ozon, Wildberries, Яндекс Маркет, Мегамаркет.\n"
-        "Стек: Python 3.12 / FastAPI (порт 4877), React 18 / TypeScript / Vite (фронт), "
-        "PostgreSQL, Redis, Celery, SQLAlchemy async, Alembic.\n"
-        "\nТы умеешь всё то же что Claude Code:\n"
-        "• Анализировать код, находить баги, объяснять архитектуру\n"
-        "• Писать новые функции, endpoint'ы, компоненты, тесты, миграции\n"
-        "• Запускать задачи агентов для автономного выполнения кода\n"
-        "• Отвечать на любые вопросы по Python, FastAPI, React, SQL\n"
-        "\nОтвечай по-русски, кратко и по делу. Показывай код сразу без предисловий.\n"
-        f"\nФайлы backend:\n{file_tree}"
+        "Ты — AI-ассистент PIMv3 (PIM для маркетплейсов Ozon, WB, Яндекс, Мегамаркет).\n"
+        "Стек: Python/FastAPI, React/TypeScript, PostgreSQL.\n"
+        "Отвечай по-русски, кратко, код показывай сразу."
     )
 
     msgs = [{"role": "system", "content": system}]
-    for m in (history or [])[-10:]:
+    for m in (history or [])[-6:]:
         role = m.get("role", "user")
         cnt = m.get("content", "")
         if role in ("user", "assistant") and cnt:
-            msgs.append({"role": role, "content": str(cnt)[:800]})
+            msgs.append({"role": role, "content": str(cnt)[:400]})
 
     ctx_note = ""
     intent = (context or {}).get("intent", "")
@@ -407,7 +386,10 @@ async def compose_assistant_reply_with_llm(
         resp = await client.chat.completions.create(
             model=model, messages=msgs, temperature=0.3, max_tokens=1500,
         )
-        return (resp.choices[0].message.content or "").strip()
+        raw = (resp.choices[0].message.content or "").strip()
+        # Strip <think>...</think> blocks from reasoning models like qwen3
+        raw = re.sub(r'<think>.*?</think>', '', raw, flags=re.DOTALL).strip()
+        return raw
     except Exception as e:
         return f"Ошибка LLM: {e}"
 
