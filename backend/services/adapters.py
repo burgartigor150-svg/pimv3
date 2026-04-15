@@ -2794,42 +2794,6 @@ def get_adapter(
         raise ValueError(f"Unknown connection type: {connection_type}")
 
 
-class YandexMarketAdapter(MarketplaceAdapter):
-    """Адаптер для интеграции с API Яндекс.Маркет."""
-    
-    def __init__(self, api_key: str, client_id: str, store_id: str, warehouse_id: Optional[str] = None):
-        self.api_key = api_key
-        self.client_id = client_id
-        self.store_id = store_id
-        self.warehouse_id = warehouse_id
-        self.base_url = "https://api.partner.market.yandex.ru"
-    
-    async def test_connection(self) -> Dict[str, Any]:
-        """Тестирует подключение к API Яндекс.Маркет, запрашивая информацию о магазине."""
-        import httpx
-        headers = {
-            "Authorization": f"OAuth {self.api_key}",
-            "Client-Id": self.client_id
-        }
-        try:
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                # Пример запроса для проверки подключения: получение информации о кампаниях
-                response = await client.get(f"{self.base_url}/campaigns", headers=headers)
-                response.raise_for_status()
-                data = response.json()
-                return {"status": "success", "campaigns": data.get("campaigns", [])}
-        except Exception as e:
-            raise Exception(f"Ошибка подключения к Яндекс.Маркет: {str(e)}")
-    
-    async def pull_product(self, query: str) -> Dict[str, Any]:
-        """Получает данные товара по артикулу или запросу."""
-        # Заглушка для первой итерации: вернуть пример данных
-        return {
-            "name": "Пример товара из Яндекс.Маркет",
-            "title": "Товар по запросу: " + query,
-            "attributes": {},
-            "images": []
-        }
 from abc import ABC, abstractmethod
 from urllib.parse import urlparse
 
