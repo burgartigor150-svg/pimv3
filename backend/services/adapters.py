@@ -2286,7 +2286,7 @@ class MegamarketAdapter(MarketplaceAdapter):
 
         use_pim_proxy = _mm_public_base_ok_for_proxy_in_json()
         public_base = os.getenv("PUBLIC_API_BASE_URL", "").strip().rstrip("/") if use_pim_proxy else ""
-        if not public_base:
+        if not public_base and short_photos:
             return {
                 "status_code": 400,
                 "response": (
@@ -2366,7 +2366,7 @@ class MegamarketAdapter(MarketplaceAdapter):
             if local_url:
                 local_photos.append(local_url)
 
-        if not local_photos:
+        if not local_photos and short_photos:
             return {
                 "status_code": 400,
                 "response": "Megamarket images unavailable: failed to download/store source images to local /api/v1/uploads.",
