@@ -424,3 +424,46 @@ body {
 
 /* ─── Transitions ────────────────────────────────────────────────────────────── */
 .transition-premium { transition: all 0.25s cubic-bezier(0.16,1,0.3,1); }
+
+/* ─── Dark Select/Option for cross-platform consistency ──────────────────── */
+select, select option {
+  background-color: var(--bg-card, #0f0f1a) !important;
+  color: rgba(255,255,255,0.85) !important;
+  border-color: var(--border-subtle, rgba(255,255,255,0.08));
+}
+select option {
+  background-color: var(--bg-raised, #141422) !important;
+  color: rgba(255,255,255,0.85) !important;
+  padding: 8px 12px;
+}
+select option:hover,
+select option:checked {
+  background-color: var(--indigo-600, #4f46e5) !important;
+  color: #fff !important;
+}
+select:focus {
+  outline: 1px solid var(--indigo-500, #6366f1);
+  outline-offset: -1px;
+}
+/* Force dark dropdown on Windows/Linux */
+@supports (-moz-appearance: none) {
+  select { -moz-appearance: none; }
+}
+select {
+  -webkit-appearance: none;
+  appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='rgba(255,255,255,0.4)' stroke-width='2'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 10px center;
+  padding-right: 32px !important;
+}
+
+/* ─── Slide animations ──────────────────────────────────────────────────── */
+@keyframes slideInRight {
+  from { transform: translateX(100%); opacity: 0; }
+  to { transform: translateX(0); opacity: 1; }
+}
+@keyframes slideInLeft {
+  from { transform: translateX(-100%); opacity: 0; }
+  to { transform: translateX(0); opacity: 1; }
+}

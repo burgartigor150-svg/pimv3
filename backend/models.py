@@ -36,6 +36,11 @@ class Product(Base):
     attributes_data = Column(JSONB, default={}) # Stores key-value based on attribute codes
     images = Column(JSONB, default=[]) # List of image URLs
     completeness_score = Column(Integer, default=0)
+    rich_content = Column(JSONB, nullable=True)  # Rich content blocks for product page
+    landing_json = Column(JSONB, nullable=True)  # Landing page sections
+    social_content = Column(JSONB, nullable=True)
+    landing_template = Column(String, nullable=True, default="dark_premium")  # Social media posts per platform
+    studio_projects = Column(JSONB, nullable=True)  # Saved ContentStudio projects [{name, layers, bg, canvas, ts}]
 
     category = relationship("Category", back_populates="products", lazy="selectin")
 
@@ -49,6 +54,8 @@ class MarketplaceConnection(Base):
     store_id = Column(String, nullable=True)
     # Мегамаркет Assortment API: locationId склада для price/* и stock/*
     warehouse_id = Column(String, nullable=True)
+    store_ids = Column(JSONB, nullable=True, default=[])  # List of store/merchant IDs for multi-store platforms
+    status = Column(String, nullable=True, default="pending")  # connected, error, pending
 
 class SystemSettings(Base):
     __tablename__ = "system_settings"

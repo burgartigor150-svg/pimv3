@@ -1,8 +1,27 @@
-import React, { useEffect, useState, useCallback, useRef } from "react";
+import React, { useEffect, useState, useCallback, useRef, Component } from "react";
+
+// ─── Error Boundary ───────────────────────────────────────────────────────────
+class TabErrorBoundary extends Component<{children: React.ReactNode}, {error: Error | null}> {
+  constructor(props: any) { super(props); this.state = { error: null }; }
+  static getDerivedStateFromError(error: Error) { return { error }; }
+  render() {
+    if (this.state.error) {
+      return React.createElement('div',
+        {style: {padding: 40, color: '#f87171', background: '#1a0a0a', borderRadius: 12, margin: 16}},
+        React.createElement('b', null, 'Ошибка компонента:'),
+        React.createElement('pre', {style: {marginTop: 12, fontSize: 12, whiteSpace: 'pre-wrap', color: '#fca5a5'}},
+          this.state.error.message + ' ' + (this.state.error.stack ?? ''))
+      );
+    }
+    return this.props.children;
+  }
+}
 import { useParams, useNavigate } from "react-router-dom";
 import { api } from "../lib/api";
 import { useToast } from "../components/Toast";
 import ContentStudio from "../components/ContentStudio";
+import RichContentEditor from "../components/RichContentEditor";
+import SocialContentEditor from "../components/SocialContentEditor";
 import {
   ArrowLeft,
   Save,
@@ -23,6 +42,7 @@ import {
   History,
   Upload,
   X,
+  Share2,
 } from "lucide-react";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -84,6 +104,7 @@ interface Connection {
   id: string;
   name: string;
   marketplace: string;
+  type: string;
 }
 
 // ─── Style Constants ──────────────────────────────────────────────────────────
@@ -183,6 +204,8 @@ const TABS = [
   { key: "studio", label: "Студия", Icon: Sparkles },
   { key: "syndication", label: "Синдикация", Icon: Send },
   { key: "history", label: "История", Icon: History },
+  { key: "rich", label: "Rich & Лендинг", Icon: FileText },
+  { key: "social", label: "Соцсети", Icon: Share2 },
 ];
 
 // ─── Component ────────────────────────────────────────────────────────────────
@@ -198,8 +221,20 @@ export default function ProductDetailsPage() {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [enriching, setEnriching] = useState(false);
+  const [enrichConnectionDialog, setEnrichConnectionDialog] = useState(false);
   const [activeTab, setActiveTab] = useState("main");
   const [pushingId, setPushingId] = useState<string | null>(null);
+  const isMpProduct = id?.startsWith('mp__') ?? false;
+  const [mpPlatform, mpSku] = isMpProduct && id ? (() => { const parts = id.split('__'); return [parts[1] || '', decodeURIComponent(parts.slice(2).join('__'))]; })() : ['', ''];
+  const [mpErrors, setMpErrors] = useState<any[]>([]);
+  const [pimId, setPimId] = useState<string | null>(null);
+  const [vendorCode, setVendorCode] = useState<string>("");
+  const [mpBindings, setMpBindings] = useState<any[]>([]);
+  const [mpBindingPlatform, setMpBindingPlatform] = useState<string>("");
+  const [activePlatform, setActivePlatform] = useState<string>("");
+  const [isShadowCard, setIsShadowCard] = useState(false);
+  const [mpAttrsByPlatform, setMpAttrsByPlatform] = useState<Record<string, any[]>>({});
+  const [mpAttrSchemaByPlatform, setMpAttrSchemaByPlatform] = useState<Record<string, any[]>>({});
 
   const [fields, setFields] = useState({
     name: "",
@@ -209,17 +244,78 @@ export default function ProductDetailsPage() {
     category: "",
   });
   const [attributes, setAttributes] = useState<ProductAttribute[]>([]);
+  const [attrFilter, setAttrFilter] = useState('');
+  const [attrSubTab, setAttrSubTab] = useState<'current' | 'schema'>('current');
+  const [catSchemaData, setCatSchemaData] = useState<any>(null);
+  const [catSchemaLoading, setCatSchemaLoading] = useState(false);
+  const [catSchemaTab, setCatSchemaTab] = useState('common');
+  const [catSchemaSearch, setCatSchemaSearch] = useState('');
+  const [autofillLoading, setAutofillLoading] = useState<Record<string, boolean>>({});
+  const [autofillResults, setAutofillResults] = useState<Record<string, any>>({});
 
   const loadData = useCallback(async () => {
     if (!id) return;
     setLoading(true);
     try {
-      const [prodRes, connRes] = await Promise.all([
-        api.get(`/products/${id}`),
-        api.get("/connections"),
-      ]);
+      const connRes = await api.get("/connections");
+      setConnections(connRes.data ?? []);
+
+      if (id.startsWith('mp__')) {
+        // MP marketplace product — load via /mp/product-details
+        const parts = id.split('__');
+        const platform = parts[1] || '';
+        const sku = decodeURIComponent(parts.slice(2).join('__'));
+        const res = await api.get(`/mp/product-details?platform=${encodeURIComponent(platform)}&sku=${encodeURIComponent(sku)}`);
+        const raw = res.data;
+        const p: Product = {
+          id,
+          sku: (raw.sku ?? sku ?? '').replace(/^mp:/, ''),
+          name: raw.name ?? '',
+          brand: raw.brand || raw.attributes_data?.brand || (() => { const plats = (raw.attributes_data || {})._platforms || {}; for (const k in plats) { if (plats[k].brand) return plats[k].brand; } return ''; })(),
+          category: raw.category ?? '',
+          completeness_score: 0,
+          status: 'active',
+          description: raw.description || raw.description_html || '',
+          description_html: raw.description ?? '',
+          media: (raw.photos ?? []).map((url: string, i: number) => ({ id: String(i), url, type: 'image' as const })),
+          attributes: (raw.attributes ?? []).map((a: any) => ({ key: a.name || a.id, value: a.value, type: a.type || 'string', dictionary_options: a.dictionary_options || [], isSuggest: a.isSuggest, is_multiple: a.is_multiple, is_required: a.is_required, error: a.error })),
+          syndication: [],
+          history: [],
+        };
+        setProduct(p);
+        setFields({ name: p.name ?? '', sku: (p.sku ?? '').replace(/^mp:/, ''), description: raw.description ?? '', brand: p.brand || (() => { const plats = (p.attributes_data || {})._platforms || {}; for (const k in plats) { if (plats[k].brand) return plats[k].brand; } return ''; })(), category: String(p.category ?? '') });
+        setAttributes(p.attributes as any);
+        setMpErrors(res.data.errors ?? []);
+
+        // Create/get shadow PIM record so Studio/Rich/Syndication work
+        const attrDict = (res.data.attributes ?? []).reduce((acc: any, a: any) => {
+          if (a.value) acc[a.name || a.id] = a.value;
+          return acc;
+        }, {});
+        const vc = res.data.vendor_code || sku;
+        setVendorCode(vc);
+        const shadowRes = await api.post('/mp/shadow-product', {
+          platform,
+          sku,
+          vendor_code: vc,
+          name: res.data.name,
+          brand: res.data.brand,
+          description: res.data.description,
+          images: res.data.photos ?? [],
+          attributes: attrDict,
+        });
+        setPimId(shadowRes.data.id);
+        // Load MP bindings for this vendor_code
+        try {
+          const bindRes = await api.get(`/mp/bindings?vendor_code=${encodeURIComponent(vc)}`);
+          setMpBindings(bindRes.data.bindings || []);
+        } catch {}
+        return;
+      }
+
+      // PIM product
+      const prodRes = await api.get(`/products/${id}`);
       const raw = prodRes.data;
-      // API returns `images` array and `attributes_data` object — map to expected shape
       const p: Product = {
         ...raw,
         media: raw.media?.length
@@ -236,23 +332,72 @@ export default function ProductDetailsPage() {
       setProduct(p);
       setFields({
         name: p.name ?? "",
-        sku: p.sku ?? "",
+        sku: (p.sku ?? "").replace(/^mp:/, ""),
         description: p.description_html ?? p.description ?? "",
-        brand: p.brand ?? "",
+        brand: p.brand || p.attributes_data?.brand || (() => { const plats = (p.attributes_data || {})._platforms || {}; for (const k in plats) { if (plats[k].brand) return plats[k].brand; } return ""; })(),
         category: getCatName(p.category),
       });
-      // attributes_data is an object {key: {value, type}}, attributes is array
       const attrs = Array.isArray(p.attributes) && p.attributes.length > 0
-        ? p.attributes
+        ? p.attributes.map((a: any) => ({
+            key: a.key ?? a.name ?? a.id,
+            value: a.value ?? '',
+            type: a.type ?? 'string',
+            dictionary_options: Array.isArray(a.dictionary_options) ? a.dictionary_options : [],
+            isSuggest: a.isSuggest,
+            is_multiple: a.is_multiple,
+            is_required: a.is_required,
+            error: a.error,
+          }))
         : p.attributes_data
-          ? Object.entries(p.attributes_data).map(([key, v]: [string, any]) => ({
-              key,
-              value: v?.value ?? String(v ?? ""),
-              type: v?.type ?? "string",
-            }))
+          ? Object.entries(p.attributes_data)
+              .filter(([key]) => !key.startsWith('_'))
+              .map(([key, v]: [string, any]) => ({
+                key,
+                value: v?.value ?? String(v ?? ""),
+                type: v?.type ?? "string",
+                dictionary_options: Array.isArray(v?.dictionary_options) ? v.dictionary_options : [],
+                isSuggest: v?.isSuggest,
+                is_multiple: v?.is_multiple,
+                is_required: v?.is_required,
+                error: v?.error,
+              }))
           : [];
       setAttributes(attrs);
-      setConnections(connRes.data ?? []);
+
+      // If this is a unified shadow-product (sku = mp:vendor_code)
+      if (raw.sku && raw.sku.startsWith('mp:')) {
+        const vc = raw.attributes_data?._vendor_code || raw.sku.slice(3);
+        setVendorCode(vc);
+        setPimId(raw.id);
+        setIsShadowCard(true);
+        // Load bindings (list of platforms)
+        try {
+          const bindRes = await api.get(`/mp/bindings?vendor_code=${encodeURIComponent(vc)}`);
+          const bindings = bindRes.data.bindings || [];
+          setMpBindings(bindings);
+          // Auto-select first platform
+          if (bindings.length > 0) {
+            const firstPlatform = bindings[0].platform;
+            setActivePlatform(firstPlatform);
+            setMpBindingPlatform(firstPlatform);
+            // Load attrs for first platform
+            try {
+              const liveRes = await api.get(`/mp/product-details?platform=${encodeURIComponent(firstPlatform)}&sku=${encodeURIComponent(vc)}`);
+              const liveAttrs = (liveRes.data?.attributes || []).map((a: any) => ({
+                key: a.name || a.id, value: a.value ?? '', type: a.type || 'string',
+                is_required: a.is_required, error: a.error, dictionary_options: a.dictionary_options || [], isSuggest: a.isSuggest, is_multiple: a.is_multiple,
+              }));
+              setMpAttrsByPlatform(prev => ({ ...prev, [firstPlatform]: liveAttrs }));
+              setMpAttrSchemaByPlatform(prev => ({ ...prev, [firstPlatform]: liveRes.data?.attributes || [] }));
+              setAttributes(liveAttrs);
+              if (liveRes.data?.photos?.length) {
+                setProduct(prev => prev ? { ...prev, media: liveRes.data.photos.map((url: string, i: number) => ({ id: String(i), url, type: 'image' as const })) } : prev);
+              }
+              setMpErrors(liveRes.data?.errors || []);
+            } catch {}
+          }
+        } catch {}
+      }
     } catch {
       toast("Ошибка загрузки продукта", "error");
     } finally {
@@ -260,15 +405,88 @@ export default function ProductDetailsPage() {
     }
   }, [id, toast]);
 
+  const switchPlatform = async (platform: string) => {
+    // Save current platform's edited attributes to cache before switching
+    const currentPlatform = activePlatform || mpBindingPlatform || mpPlatform;
+    if (currentPlatform && currentPlatform !== platform) {
+      setMpAttrsByPlatform(prev => ({ ...prev, [currentPlatform]: attributes }));
+    }
+
+    setActivePlatform(platform);
+    setAttrFilter("");
+    setMpBindingPlatform(platform);
+    // Use cached attrs if available
+    if (mpAttrsByPlatform[platform]) {
+      setAttributes(mpAttrsByPlatform[platform]);
+      return;
+    }
+    try {
+      const vc = vendorCode;
+      const liveRes = await api.get(`/mp/product-details?platform=${encodeURIComponent(platform)}&sku=${encodeURIComponent(vc)}`);
+      const liveAttrs = (liveRes.data?.attributes || []).map((a: any) => ({
+        key: a.name || a.id, value: a.value ?? '', type: a.type || 'string', dictionary_options: a.dictionary_options || [], isSuggest: a.isSuggest, is_multiple: a.is_multiple,
+        is_required: a.is_required, error: a.error,
+      }));
+      setMpAttrsByPlatform(prev => ({ ...prev, [platform]: liveAttrs }));
+      setMpAttrSchemaByPlatform(prev => ({ ...prev, [platform]: liveRes.data?.attributes || [] }));
+      setAttributes(liveAttrs);
+      if (liveRes.data?.photos?.length) {
+        setProduct(prev => prev ? { ...prev, media: liveRes.data.photos.map((url: string, i: number) => ({ id: String(i), url, type: 'image' as const })) } : prev);
+      }
+      setMpErrors(liveRes.data?.errors || []);
+    } catch {}
+  };
+
   useEffect(() => {
     loadData();
   }, [loadData]);
 
   const handleSave = async () => {
-    if (!id) return;
+    let effectiveId = (isMpProduct && pimId) ? pimId : id;
+
+    // Auto-create shadow product if MP product without PIM record
+    if (isMpProduct && !pimId) {
+      try {
+        const shadowRes = await api.post('/mp/shadow-product', {
+          platform: mpPlatform,
+          sku: mpSku,
+          vendor_code: vendorCode || mpSku,
+          name: fields.name,
+          brand: fields.brand,
+          description: fields.description,
+          images: product?.media?.map((m: any) => m.url) || [],
+        });
+        const newPimId = shadowRes.data?.id;
+        if (newPimId) {
+          setPimId(newPimId);
+          effectiveId = newPimId;
+        }
+      } catch (e) {
+        toast("Не удалось создать запись в каталоге", "error");
+        return;
+      }
+    }
+
+    if (!effectiveId) return;
     setSaving(true);
     try {
-      const res = await api.put(`/products/${id}`, { ...fields, attributes });
+      // Convert attributes array to attributes_data dict for the backend
+      const attributes_data: Record<string, any> = {};
+      for (const attr of attributes) {
+        if (attr.key) {
+          attributes_data[attr.key] = attr.value ?? '';
+        }
+      }
+      const payload: any = {
+        name: fields.name,
+        description_html: fields.description,
+        attributes_data,
+      };
+      // Only include images if product has media
+      if (product?.media?.length) {
+        payload.images = product.media.map(m => m.url);
+      }
+      const res = await api.put(`/products/${effectiveId}`, payload);
       setProduct(res.data);
       toast("Продукт сохранён", "success");
     } catch {
@@ -278,25 +496,139 @@ export default function ProductDetailsPage() {
     }
   };
 
-  const handleEnrich = async () => {
-    if (!id) return;
+  const runEnrichWithConnection = async (connectionId: string) => {
+    let effectiveId = (isMpProduct && pimId) ? pimId : id;
+
+    // Auto-create shadow product if MP product without PIM record
+    if (isMpProduct && !pimId && !effectiveId) {
+      try {
+        const shadowRes = await api.post('/mp/shadow-product', {
+          platform: mpPlatform,
+          sku: mpSku,
+          vendor_code: vendorCode || mpSku,
+          name: fields.name,
+          brand: fields.brand,
+          description: fields.description,
+          images: product?.media?.map((m: any) => m.url) || [],
+        });
+        const newPimId = shadowRes.data?.id;
+        if (newPimId) {
+          setPimId(newPimId);
+          effectiveId = newPimId;
+        }
+      } catch (e) {
+        toast("\u041d\u0435 \u0443\u0434\u0430\u043b\u043e\u0441\u044c \u0441\u043e\u0437\u0434\u0430\u0442\u044c \u0437\u0430\u043f\u0438\u0441\u044c", "error");
+        return;
+      }
+    }
+
+    if (!effectiveId) return;
     setEnriching(true);
     try {
-      const res = await api.post(`/ai/enrich/${id}`);
+      const res = await api.post('/syndicate/agent', {
+        product_id: effectiveId,
+        connection_id: connectionId,
+        push: false,
+        public_base_url: window.location.origin,
+      });
       const d = res.data;
-      setFields((f) => ({
-        name: d.name ?? f.name,
-        sku: d.sku ?? f.sku,
-        description: d.description ?? f.description,
-        brand: d.brand ?? f.brand,
-        category: d.category ?? f.category,
-      }));
-      if (d.attributes) setAttributes(d.attributes);
-      toast("AI обогащение выполнено", "success");
-    } catch {
-      toast("Ошибка AI обогащения", "error");
+      if (d.mapped_payload) {
+        const mp = d.mapped_payload;
+        setFields((f: any) => ({
+          name: mp["Наименование карточки"] || mp.name || f.name,
+          sku: f.sku,
+          description: mp["Описание"] || mp.description || f.description,
+          brand: mp["Бренд"] || mp.brand || f.brand,
+          category: f.category,
+        }));
+        // Update attributes from mapped_payload
+        const skipKeys = new Set(["categoryId", "offer_id", "name", "Бренд", "brand", "Описание", "description", "Фото", "images", "Наименование карточки"]);
+        const newAttrs: any[] = [];
+        for (const [key, val] of Object.entries(mp)) {
+          if (skipKeys.has(key) || key.startsWith("_")) continue;
+          if (val === null || val === undefined || val === "") continue;
+          newAttrs.push({
+            key,
+            value: Array.isArray(val) ? val.join(", ") : String(val),
+            type: "string",
+          });
+        }
+        if (newAttrs.length > 0) {
+          // Merge with existing: update values for existing keys, add new ones
+          const existing = [...attributes];
+          for (const na of newAttrs) {
+            const idx = existing.findIndex((a: any) => a.key === na.key);
+            if (idx >= 0) {
+              existing[idx] = { ...existing[idx], value: na.value };
+            } else {
+              existing.push(na);
+            }
+          }
+          setAttributes(existing);
+        }
+      }
+      toast(d.status === 'success' ? 'AI обогащение выполнено' : (d.message || 'Завершено с замечаниями'), d.status === 'success' ? 'success' : 'warning');
+    } catch (err: any) {
+      toast(err?.response?.data?.detail || "Ошибка AI обогащения", "error");
     } finally {
       setEnriching(false);
+    }
+  };
+
+  const handleEnrich = async () => {
+    let effectiveId = (isMpProduct && pimId) ? pimId : id;
+
+    // Auto-create shadow product if MP product without PIM record
+    if (isMpProduct && !pimId) {
+      try {
+        const shadowRes = await api.post('/mp/shadow-product', {
+          platform: mpPlatform,
+          sku: mpSku,
+          vendor_code: vendorCode || mpSku,
+          name: fields.name,
+          brand: fields.brand,
+          description: fields.description,
+          images: product?.media?.map((m: any) => m.url) || [],
+        });
+        const newPimId = shadowRes.data?.id;
+        if (newPimId) {
+          setPimId(newPimId);
+          effectiveId = newPimId;
+        }
+      } catch (e) {
+        toast("\u041d\u0435 \u0443\u0434\u0430\u043b\u043e\u0441\u044c \u0441\u043e\u0437\u0434\u0430\u0442\u044c \u0437\u0430\u043f\u0438\u0441\u044c \u0432 \u043a\u0430\u0442\u0430\u043b\u043e\u0433\u0435", "error");
+        return;
+      }
+    }
+
+    if (!effectiveId) return;
+
+    if (isMpProduct || isShadowCard) {
+      const platform = activePlatform || mpBindingPlatform || mpPlatform;
+      const platformConns = connections.filter((c: any) => c.type === platform);
+      if (platformConns.length === 0) {
+        toast("Нет подключений для этого маркетплейса", "error");
+        return;
+      }
+      if (platformConns.length === 1) {
+        await runEnrichWithConnection(platformConns[0].id);
+      } else {
+        setEnrichConnectionDialog(true);
+      }
+    } else {
+      // Simple PIM enrichment
+      setEnriching(true);
+      try {
+        const res = await api.post(`/ai/enrich/${effectiveId}`);
+        const d = res.data;
+        setFields((f: any) => ({
+          name: d.name ?? f.name, sku: d.sku ?? f.sku,
+          description: d.description ?? f.description,
+          brand: d.brand ?? f.brand, category: d.category ?? f.category,
+        }));
+        toast("AI обогащение выполнено", "success");
+      } catch { toast("Ошибка AI обогащения", "error"); }
+      finally { setEnriching(false); }
     }
   };
 
@@ -304,21 +636,74 @@ export default function ProductDetailsPage() {
     if (!id) return;
     setPushingId(connectionId);
     try {
-      await api.post(`/syndication/push/${id}`, { connection_id: connectionId });
-      toast("Продукт отправлен на маркетплейс", "success");
-      const res = await api.get(`/products/${id}`);
-      setProduct(res.data);
-    } catch {
-      toast("Ошибка синдикации", "error");
+      let effectiveId = (isMpProduct && pimId) ? pimId : id;
+
+      // Auto-create shadow PIM record for MP products without PIM ID
+      if (isMpProduct && !pimId) {
+        try {
+          const shadowRes = await api.post('/mp/shadow-product', {
+            platform: mpPlatform,
+            sku: mpSku,
+            vendor_code: vendorCode || mpSku,
+            name: fields.name,
+            brand: fields.brand,
+            description: fields.description,
+            images: product?.media?.map((m: any) => m.url) || [],
+          });
+          const newPimId = shadowRes.data?.id;
+          if (newPimId) {
+            setPimId(newPimId);
+            effectiveId = newPimId;
+          } else {
+            toast("Не удалось создать PIM-запись для отправки", "error");
+            setPushingId(null);
+            return;
+          }
+        } catch {
+          toast("Не удалось создать PIM-запись", "error");
+          setPushingId(null);
+          return;
+        }
+      }
+
+      const res = await api.post('/syndicate/agent', {
+        product_id: effectiveId,
+        connection_id: connectionId,
+        push: true,
+        public_base_url: window.location.origin,
+      });
+      const d = res.data;
+      if (d.status === "preflight_blocked") {
+        const missing = (d.preflight_missing || []).map((m: any) => m.field).join(", ");
+        toast(`Не хватает полей: ${missing}`, "warning");
+      } else if (d.status === "error" || d.ok === false || d.error) {
+        toast(d.message || d.error || "Ошибка при отправке", "error");
+      } else {
+        toast(d.message || "Продукт отправлен на маркетплейс", "success");
+      }
+      // Reload product to update syndication status
+      const prodRes = await api.get(`/products/${effectiveId}`);
+      setProduct(prodRes.data);
+    } catch (err: any) {
+      const detail = err?.response?.data?.detail || err?.response?.data?.message || "Ошибка синдикации";
+      toast(typeof detail === "string" ? detail : JSON.stringify(detail), "error");
     } finally {
       setPushingId(null);
     }
   };
 
-  const handleRemoveMedia = (mediaId: string) => {
-    setProduct((p) =>
-      p ? { ...p, media: p.media.filter((m) => m.id !== mediaId) } : p
-    );
+  const handleRemoveMedia = async (mediaId: string) => {
+    const effectiveId = (isMpProduct && pimId) ? pimId : id;
+    setProduct((p) => {
+      if (!p) return p;
+      const updated = p.media.filter((m) => m.id !== mediaId);
+      // Save updated images to DB
+      if (effectiveId) {
+        const urls = updated.map((m) => m.url);
+        api.put(`/products/${effectiveId}`, { images: urls }).catch(() => {});
+      }
+      return { ...p, media: updated };
+    });
     toast("Изображение удалено", "success");
   };
 
@@ -490,11 +875,17 @@ export default function ProductDetailsPage() {
           </div>
           <p style={{ fontSize: 12, color: "rgba(255,255,255,0.3)", margin: "3px 0 0" }}>
             SKU: {product.sku || "—"}
+            {isMpProduct && (
+              <span style={{ marginLeft: 10, background: 'rgba(99,102,241,0.15)', color: '#a5b4fc', borderRadius: 6, padding: '2px 8px', fontSize: 11, fontWeight: 600 }}>
+                {mpPlatform.toUpperCase()}
+              </span>
+            )}
           </p>
         </div>
 
         {/* Action buttons */}
         <div style={{ display: "flex", gap: 10, flexShrink: 0 }}>
+          
           <button
             onClick={handleEnrich}
             disabled={enriching}
@@ -541,6 +932,7 @@ export default function ProductDetailsPage() {
         {TABS.map(({ key, label, Icon }) => (
           <button
             key={key}
+            type="button"
             onClick={() => setActiveTab(key)}
             style={{
               display: "flex",
@@ -599,7 +991,7 @@ export default function ProductDetailsPage() {
                 />
               </div>
               <div>
-                <label style={labelStyle}>Артикул (SKU)</label>
+                <label style={labelStyle}>Артикул продавца</label>
                 <input
                   style={inputStyle}
                   value={fields.sku}
@@ -608,12 +1000,26 @@ export default function ProductDetailsPage() {
                 />
               </div>
               <div>
+                <label style={labelStyle}>SKU маркетплейса</label>
+                <input
+                  style={{...inputStyle, opacity: 0.6}}
+                  value={(() => {
+                    const attrs = product?.attributes_data || {};
+                    const plats = attrs._platforms || {};
+                    const p = plats[activePlatform || mpPlatform || Object.keys(plats)[0] || ''] || {};
+                    return p.marketplace_product_id || '';
+                  })()}
+                  readOnly
+                  placeholder="Не привязан"
+                />
+              </div>
+              <div>
                 <label style={labelStyle}>Бренд</label>
                 <input
                   style={inputStyle}
                   value={fields.brand}
                   onChange={(e) => setFields((f) => ({ ...f, brand: e.target.value }))}
-                  placeholder="Название бренда"
+                  placeholder="Не указан"
                 />
               </div>
               <div>
@@ -622,7 +1028,7 @@ export default function ProductDetailsPage() {
                   style={inputStyle}
                   value={fields.category}
                   onChange={(e) => setFields((f) => ({ ...f, category: e.target.value }))}
-                  placeholder="Электроника / Телефоны"
+                  placeholder="Категория не указана"
                 />
               </div>
             </div>
@@ -633,7 +1039,7 @@ export default function ProductDetailsPage() {
                 style={textareaStyle}
                 value={fields.description}
                 onChange={(e) => setFields((f) => ({ ...f, description: e.target.value }))}
-                placeholder="Подробное описание товара…"
+                placeholder="Нажмите «AI обогатить» для генерации описания"
                 rows={6}
               />
             </div>
@@ -643,6 +1049,213 @@ export default function ProductDetailsPage() {
         {/* ──────────── Атрибуты ──────────── */}
         {activeTab === "attributes" && (
           <div style={{ ...card, overflow: "hidden" }}>
+            {/* Sub-tab switcher: Current attrs vs Category Schema */}
+            <div style={{ display: "flex", borderBottom: "1px solid rgba(255,255,255,0.06)" }}>
+              {(["current", "schema"] as const).map(st => (
+                <button key={st} onClick={() => {
+                  setAttrSubTab(st);
+                  if (st === 'schema' && !catSchemaData && !catSchemaLoading) {
+                    const catId = product?.category && typeof product.category === 'object' ? (product.category as any).id : null;
+                    if (catId) {
+                      setCatSchemaLoading(true);
+                      api.get(`/categories/${catId}/marketplace-attributes`).then(r => {
+                        setCatSchemaData(r.data);
+                        const mps = Object.keys(r.data.marketplaces || {});
+                        if ((r.data.common_count || 0) > 0) setCatSchemaTab('common');
+                        else if (mps.length > 0) setCatSchemaTab(mps[0]);
+                      }).catch(console.error).finally(() => setCatSchemaLoading(false));
+                    }
+                  }
+                }} style={{
+                  flex: 1, padding: "12px 20px", border: "none", cursor: "pointer",
+                  background: attrSubTab === st ? "rgba(99,102,241,0.08)" : "transparent",
+                  borderBottom: attrSubTab === st ? "2px solid #6366f1" : "2px solid transparent",
+                  color: attrSubTab === st ? "rgba(255,255,255,0.9)" : "rgba(255,255,255,0.35)",
+                  fontSize: 13, fontWeight: attrSubTab === st ? 600 : 400, transition: "all 0.15s",
+                }}>
+                  {st === 'current' ? 'Атрибуты товара' : 'Схема категории'}
+                </button>
+              ))}
+            </div>
+
+            {/* ── Category Schema sub-tab ── */}
+            {attrSubTab === 'schema' && (
+              <div style={{ padding: 0 }}>
+                {catSchemaLoading && (
+                  <div style={{ textAlign: "center", padding: "48px 0" }}>
+                    <div style={{ display: "inline-block", width: 24, height: 24, border: "2px solid rgba(99,102,241,0.3)", borderTopColor: "#6366f1", borderRadius: "50%", animation: "spin 0.8s linear infinite" }} />
+                    <p style={{ fontSize: 12, color: "rgba(255,255,255,0.3)", marginTop: 10 }}>Загружаем атрибуты со всех маркетплейсов...</p>
+                    <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
+                  </div>
+                )}
+                {!catSchemaLoading && !catSchemaData && (
+                  <div style={{ textAlign: "center", padding: "48px 24px", color: "rgba(255,255,255,0.25)" }}>
+                    <p>Нет данных о категории товара</p>
+                  </div>
+                )}
+                {!catSchemaLoading && catSchemaData && (() => {
+                  const MP_COLORS: Record<string, string> = { ozon: '#005bff', megamarket: '#00b33c', wildberries: '#cb11ab', yandex: '#fc0', wb: '#cb11ab' };
+                  const mpC = (t: string) => MP_COLORS[t] || '#6366f1';
+                  const mpL = (t: string) => ({ ozon: 'Ozon', megamarket: 'Мегамаркет', wildberries: 'Wildberries', yandex: 'Яндекс Маркет', wb: 'Wildberries' }[t] || t);
+                  const tabs: { key: string; label: string; count: number; color: string }[] = [];
+                  if ((catSchemaData.common_count || 0) > 0) tabs.push({ key: 'common', label: 'Общие (ИИ)', count: catSchemaData.common_count, color: '#6366f1' });
+                  for (const [mp, d] of Object.entries(catSchemaData.marketplaces || {})) tabs.push({ key: mp, label: mpL(mp), count: (d as any).total || 0, color: mpC(mp) });
+
+                  let attrs: any[] = [];
+                  if (catSchemaTab === 'common') {
+                    attrs = (catSchemaData.common_attributes || []).map((ca: any) => ({
+                      id: ca.normalized, name: ca.name,
+                      type: (Object.values(ca.marketplaces || {}) as any[])[0]?.type || '',
+                      is_required: ca.is_required_any, _common: true, _variants: ca.marketplaces,
+                    }));
+                  } else {
+                    const mp = catSchemaData.marketplaces?.[catSchemaTab];
+                    attrs = mp ? (mp.attributes || []) : [];
+                  }
+                  const q = catSchemaSearch.trim().toLowerCase();
+                  const filtered = q ? attrs.filter((a: any) => (a.name || '').toLowerCase().includes(q) || String(a.id || '').toLowerCase().includes(q)) : attrs;
+
+                  return (
+                    <>
+                      {/* Stats */}
+                      <div style={{ display: "flex", gap: 8, padding: "12px 16px", flexWrap: "wrap", borderBottom: "1px solid rgba(255,255,255,0.06)" }}>
+                        {Object.entries(catSchemaData.marketplaces || {}).map(([mp, d]: [string, any]) => (
+                          <div key={mp} style={{ background: `${mpC(mp)}10`, border: `1px solid ${mpC(mp)}30`, borderRadius: 8, padding: "6px 12px", fontSize: 11 }}>
+                            <span style={{ color: mpC(mp), fontWeight: 700 }}>{d.total}</span>
+                            <span style={{ color: "rgba(255,255,255,0.35)", marginLeft: 4 }}>{mpL(mp)}</span>
+                          </div>
+                        ))}
+                        {(catSchemaData.common_count || 0) > 0 && (
+                          <div style={{ background: "rgba(99,102,241,0.1)", border: "1px solid rgba(99,102,241,0.3)", borderRadius: 8, padding: "6px 12px", fontSize: 11 }}>
+                            <span style={{ color: "#6366f1", fontWeight: 700 }}>{catSchemaData.common_count}</span>
+                            <span style={{ color: "rgba(255,255,255,0.35)", marginLeft: 4 }}>общих</span>
+                          </div>
+                        )}
+                        {/* Autofill button */}
+                        <button
+                          disabled={Object.values(autofillLoading).some(Boolean)}
+                          onClick={async () => {
+                            const sourceAttrs: Record<string, any> = {};
+                            attributes.forEach((a: any) => { if (a.value) sourceAttrs[a.key] = a.value; });
+                            if (Object.keys(sourceAttrs).length === 0) { alert('Нет заполненных атрибутов для маппинга'); return; }
+                            const mps = Object.entries(catSchemaData.marketplaces || {});
+                            for (const [mp, d] of mps) {
+                              setAutofillLoading(prev => ({ ...prev, [mp]: true }));
+                              try {
+                                const res = await api.post(`/products/${product?.id || 'unknown'}/autofill-mp-attributes`, {
+                                  target_platform: mp,
+                                  target_category_id: (d as any).category_id,
+                                  source_attributes: sourceAttrs,
+                                });
+                                setAutofillResults(prev => ({ ...prev, [mp]: res.data }));
+                              } catch (e) { console.error(e); }
+                              setAutofillLoading(prev => ({ ...prev, [mp]: false }));
+                            }
+                          }}
+                          style={{
+                            background: "rgba(16,185,129,0.15)", border: "1px solid rgba(16,185,129,0.3)",
+                            borderRadius: 8, padding: "6px 14px", fontSize: 11, fontWeight: 600,
+                            color: "#10b981", cursor: "pointer", whiteSpace: "nowrap",
+                            opacity: Object.values(autofillLoading).some(Boolean) ? 0.5 : 1,
+                          }}
+                        >
+                          {Object.values(autofillLoading).some(Boolean) ? 'ИИ заполняет...' : 'ИИ автозаполнение'}
+                        </button>
+                      </div>
+                      {/* Autofill results */}
+                      {Object.keys(autofillResults).length > 0 && catSchemaTab !== 'common' && autofillResults[catSchemaTab] && (
+                        <div style={{ padding: "12px 16px", borderBottom: "1px solid rgba(255,255,255,0.06)", background: "rgba(16,185,129,0.04)" }}>
+                          <div style={{ fontSize: 12, fontWeight: 600, color: "#10b981", marginBottom: 8, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+                            <span>ИИ заполнил {autofillResults[catSchemaTab]?.filled_count || 0} атрибутов для {mpL(catSchemaTab)}</span>
+                            <button onClick={() => {
+                              const filled = autofillResults[catSchemaTab]?.filled || {};
+                              const newAttrs = [...attributes];
+                              for (const [name, value] of Object.entries(filled)) {
+                                const idx = newAttrs.findIndex((a: any) => a.key.toLowerCase() === (name as string).toLowerCase());
+                                if (idx >= 0) {
+                                  newAttrs[idx] = { ...newAttrs[idx], value: value as string };
+                                } else {
+                                  newAttrs.push({ key: name as string, value: value as string, type: 'string' });
+                                }
+                              }
+                              setAttributes(newAttrs);
+                              setAttrSubTab('current');
+                            }} style={{
+                              background: "rgba(16,185,129,0.2)", border: "1px solid rgba(16,185,129,0.4)",
+                              borderRadius: 6, padding: "4px 12px", fontSize: 11, fontWeight: 600,
+                              color: "#10b981", cursor: "pointer",
+                            }}>
+                              Применить к товару
+                            </button>
+                          </div>
+                          <div style={{ display: "flex", flexDirection: "column", gap: 4, maxHeight: 200, overflowY: "auto" }}>
+                            {Object.entries(autofillResults[catSchemaTab]?.filled || {}).map(([k, v]: [string, any]) => (
+                              <div key={k} style={{ display: "flex", gap: 8, fontSize: 11 }}>
+                                <span style={{ color: "rgba(255,255,255,0.5)", minWidth: 180 }}>{k}</span>
+                                <span style={{ color: "rgba(255,255,255,0.85)", fontWeight: 500 }}>{String(v)}</span>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+                      {/* Errors */}
+                      {Object.keys(catSchemaData.errors || {}).length > 0 && (
+                        <div style={{ padding: "8px 16px", borderBottom: "1px solid rgba(255,255,255,0.06)", fontSize: 11, color: "rgba(255,255,255,0.4)" }}>
+                          {Object.entries(catSchemaData.errors).map(([mp, e]: [string, any]) => <div key={mp}><span style={{ color: "#f87171" }}>{mpL(mp)}:</span> {e}</div>)}
+                        </div>
+                      )}
+                      {/* Tabs */}
+                      <div style={{ display: "flex", borderBottom: "1px solid rgba(255,255,255,0.06)", overflowX: "auto" }}>
+                        {tabs.map(t => (
+                          <button key={t.key} onClick={() => { setCatSchemaTab(t.key); setCatSchemaSearch(''); }} style={{
+                            background: "none", border: "none", padding: "10px 16px", cursor: "pointer",
+                            borderBottom: catSchemaTab === t.key ? `2px solid ${t.color}` : "2px solid transparent",
+                            color: catSchemaTab === t.key ? "rgba(255,255,255,0.9)" : "rgba(255,255,255,0.3)",
+                            fontSize: 12, fontWeight: catSchemaTab === t.key ? 600 : 400, whiteSpace: "nowrap",
+                          }}>
+                            <span style={{ display: "inline-block", width: 6, height: 6, borderRadius: "50%", background: t.color, marginRight: 6, opacity: catSchemaTab === t.key ? 1 : 0.4 }} />
+                            {t.label}
+                            <span style={{ marginLeft: 6, background: catSchemaTab === t.key ? `${t.color}22` : "rgba(255,255,255,0.05)", color: catSchemaTab === t.key ? t.color : "rgba(255,255,255,0.25)", padding: "1px 6px", borderRadius: 12, fontSize: 10, fontWeight: 600 }}>{t.count}</span>
+                          </button>
+                        ))}
+                      </div>
+                      {/* Search */}
+                      <div style={{ display: "flex", gap: 8, padding: "8px 16px", borderBottom: "1px solid rgba(255,255,255,0.06)", alignItems: "center" }}>
+                        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="rgba(255,255,255,0.25)" strokeWidth="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+                        <input value={catSchemaSearch} onChange={e => setCatSchemaSearch(e.target.value)} placeholder="Поиск..." style={{ background: "transparent", border: "none", outline: "none", color: "rgba(255,255,255,0.85)", fontSize: 12, flex: 1 }} />
+                        <span style={{ fontSize: 10, color: "rgba(255,255,255,0.2)" }}>{filtered.length} / {attrs.length}</span>
+                      </div>
+                      {/* Table */}
+                      {filtered.length === 0 ? (
+                        <div style={{ textAlign: "center", padding: "32px 0", fontSize: 12, color: "rgba(255,255,255,0.2)" }}>Нет атрибутов</div>
+                      ) : (
+                        <div style={{ maxHeight: 500, overflowY: "auto" }}>
+                          <table className="table-premium" style={{ minWidth: 500, fontSize: 12 }}>
+                            <thead><tr><th style={{ width: 40 }}>#</th><th>ID</th><th>Название</th><th>Тип</th><th>Обяз.</th>{catSchemaTab === 'common' && <th>МП</th>}{catSchemaTab !== 'common' && <th>Словарь</th>}</tr></thead>
+                            <tbody>
+                              {filtered.map((a: any, i: number) => (
+                                <tr key={a.id || i}>
+                                  <td style={{ color: "rgba(255,255,255,0.15)", fontSize: 10 }}>{i+1}</td>
+                                  <td><span style={{ fontFamily: "monospace", fontSize: 10, color: mpC(catSchemaTab === 'common' ? '' : catSchemaTab) }}>{a.id}</span></td>
+                                  <td style={{ color: "rgba(255,255,255,0.85)", fontWeight: 500 }}>{a.name}</td>
+                                  <td><span className="badge badge-neutral" style={{ fontSize: 10 }}>{a.type || '—'}</span></td>
+                                  <td>{a.is_required ? <span className="badge badge-error" style={{ fontSize: 10 }}>Да</span> : <span style={{ color: "rgba(255,255,255,0.15)", fontSize: 10 }}>Нет</span>}</td>
+                                  {catSchemaTab === 'common' && <td><div style={{ display: "flex", gap: 3, flexWrap: "wrap" }}>{Object.keys(a._variants || {}).map((mp: string) => <span key={mp} style={{ background: `${mpC(mp)}18`, color: mpC(mp), padding: "1px 6px", borderRadius: 4, fontSize: 9, fontWeight: 600 }}>{mpL(mp)}</span>)}</div></td>}
+                                  {catSchemaTab !== 'common' && <td>{a.dictionary_options?.length > 0 ? <span style={{ fontSize: 10, color: "rgba(255,255,255,0.35)" }}>{a.dictionary_options.length} знач.</span> : <span style={{ color: "rgba(255,255,255,0.12)", fontSize: 10 }}>—</span>}</td>}
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      )}
+                    </>
+                  );
+                })()}
+              </div>
+            )}
+
+            {/* ── Current attrs sub-tab ── */}
+            {attrSubTab === 'current' && (<>
             <div
               style={{
                 display: "flex",
@@ -681,6 +1294,11 @@ export default function ProductDetailsPage() {
                     {attributes.length}
                   </span>
                 )}
+                {mpErrors.length > 0 && (
+                  <span style={{ fontSize: 11, padding: "2px 7px", borderRadius: 20, background: "rgba(248,113,113,0.15)", color: "#f87171", fontWeight: 600, display: "flex", alignItems: "center", gap: 4 }}>
+                    <AlertCircle size={11} /> {mpErrors.length} ошибок
+                  </span>
+                )}
               </h2>
               <button onClick={addAttr} style={btnSecondary}>
                 <Plus size={14} />
@@ -688,8 +1306,77 @@ export default function ProductDetailsPage() {
               </button>
             </div>
 
+            {/* Error summary for MP */}
+            {isMpProduct && mpErrors.length > 0 && (
+              <div style={{ background: "rgba(248,113,113,0.07)", borderBottom: "1px solid rgba(248,113,113,0.15)", padding: "14px 24px" }}>
+                <div style={{ fontSize: 12, fontWeight: 600, color: "#f87171", marginBottom: 10, display: "flex", alignItems: "center", gap: 6 }}>
+                  <AlertCircle size={13} /> Найдено {mpErrors.length} ошибки — исправьте выделенные поля
+                </div>
+                <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                  {mpErrors.map((e: any, i: number) => (
+                    <div key={i} style={{ display: "flex", gap: 10, alignItems: "flex-start" }}>
+                      <span style={{ color: "#f87171", fontWeight: 600, fontSize: 12, flexShrink: 0 }}>{e.attributeName}</span>
+                      <span style={{ color: "rgba(255,255,255,0.5)", fontSize: 12 }}>{e.message}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+
+            {/* ── MP Platform switcher ── */}
+            {mpBindings.length > 0 && (
+              <div style={{ display: "flex", gap: 6, padding: "10px 24px", borderBottom: "1px solid rgba(255,255,255,0.06)", background: "rgba(255,255,255,0.02)", flexWrap: "wrap", alignItems: "center" }}>
+                <span style={{ fontSize: 11, color: "rgba(255,255,255,0.3)", alignSelf: "center", marginRight: 4 }}>Маркетплейс:</span>
+                {mpBindings.map((b: any) => {
+                  const icons: Record<string,string> = { ozon: "🟦", wb: "🟣", wildberries: "🟣", yandex: "🟡", megamarket: "🟢" };
+                  const isActive = b.platform === (activePlatform || mpBindingPlatform || mpPlatform);
+                  return (
+                    <button
+                      key={b.platform}
+                      type="button"
+                      onClick={() => switchPlatform(b.platform)}
+                      style={{
+                        display: "flex", alignItems: "center", gap: 5, padding: "5px 12px",
+                        borderRadius: 20, fontSize: 12, fontWeight: 600, cursor: "pointer",
+                        border: `1px solid ${isActive ? "rgba(99,102,241,0.4)" : "rgba(255,255,255,0.08)"}`,
+                        background: isActive ? "rgba(99,102,241,0.18)" : "rgba(255,255,255,0.05)",
+                        color: isActive ? "#a5b4fc" : "rgba(255,255,255,0.6)",
+                        transition: "all 0.15s",
+                      }}
+                    >
+                      <span>{icons[b.platform] || "🔘"}</span>
+                      <span style={{ textTransform: "capitalize" }}>{b.platform}</span>
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+            {/* Attribute filter */}
+            {attributes.length > 5 && (
+              <div style={{ display: "flex", gap: 10, padding: "10px 24px", borderBottom: "1px solid rgba(255,255,255,0.06)", alignItems: "center" }}>
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="rgba(255,255,255,0.25)" strokeWidth="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+                <input
+                  value={attrFilter}
+                  onChange={e => setAttrFilter(e.target.value)}
+                  placeholder="Фильтр атрибутов..."
+                  style={{ background: "transparent", border: "none", outline: "none", color: "rgba(255,255,255,0.85)", fontSize: 13, flex: 1 }}
+                />
+                {attrFilter && (
+                  <button onClick={() => setAttrFilter('')} style={{ background: "none", border: "none", color: "rgba(255,255,255,0.3)", cursor: "pointer", fontSize: 14, padding: "0 4px" }}>&times;</button>
+                )}
+                <span style={{ fontSize: 11, color: "rgba(255,255,255,0.2)" }}>
+                  {attributes.filter(a => {
+                    if (!attrFilter.trim()) return true;
+                    const q = attrFilter.trim().toLowerCase();
+                    return a.key.toLowerCase().includes(q) || String(a.value || '').toLowerCase().includes(q);
+                  }).length} / {attributes.length}
+                </span>
+              </div>
+            )}
+
             {/* Header row */}
-            <div
+            {!isMpProduct && <div
               style={{
                 display: "grid",
                 gridTemplateColumns: "1fr 1fr 130px 44px",
@@ -708,7 +1395,7 @@ export default function ProductDetailsPage() {
               <span>Значение</span>
               <span>Тип</span>
               <span />
-            </div>
+            </div>}
 
             {attributes.length === 0 ? (
               <div
@@ -731,7 +1418,109 @@ export default function ProductDetailsPage() {
               </div>
             ) : (
               <>
-                {attributes.map((attr, idx) => (
+                {(isMpProduct || isShadowCard) ? (
+                  // ── MP attrs with errors highlighted + dropdowns ──
+                  // key=activePlatform forces remount on platform switch (needed for defaultValue inputs)
+                  <React.Fragment key={activePlatform || 'mp'}>
+                  {attributes.filter(attr => {
+                    if (!attrFilter.trim()) return true;
+                    const q = attrFilter.trim().toLowerCase();
+                    return attr.key.toLowerCase().includes(q) || String(attr.value || '').toLowerCase().includes(q);
+                  }).map((attr, idx) => {
+                    const hasError = !!(attr as any).error;
+                    const opts: any[] = Array.isArray((attr as any).dictionary_options) ? (attr as any).dictionary_options : [];
+                    const isSuggest = (attr as any).isSuggest;
+                    const isRequired = (attr as any).is_required;
+                    const isEmpty = !attr.value;
+                    return (
+                      <div key={idx} style={{
+                        borderBottom: "1px solid rgba(255,255,255,0.04)",
+                        background: hasError ? "rgba(248,113,113,0.04)" : "transparent",
+                        borderLeft: hasError ? "3px solid rgba(248,113,113,0.6)" : "3px solid transparent",
+                      }}>
+                        <div style={{ display: "grid", gridTemplateColumns: "240px 1fr", padding: "11px 24px 11px 21px", alignItems: "start", gap: 16 }}>
+                          {/* Label */}
+                          <div style={{ paddingTop: 7 }}>
+                            <div style={{ display: "flex", alignItems: "center", gap: 5 }}>
+                              {hasError && <AlertCircle size={12} color="#f87171" style={{ flexShrink: 0 }} />}
+                              <span style={{ fontSize: 13, color: hasError ? "#f87171" : isRequired ? "rgba(255,255,255,0.8)" : "rgba(255,255,255,0.55)", fontWeight: hasError || isRequired ? 600 : 400 }}>
+                                {attr.key}
+                                {isRequired && !hasError && <span style={{ color: "rgba(248,113,113,0.7)", marginLeft: 3 }}>*</span>}
+                              </span>
+                            </div>
+                          </div>
+                          {/* Value or dropdown */}
+                          <div>
+                            {opts.length > 0 && !isSuggest ? (
+                              <select
+                                defaultValue={attr.value}
+                                onChange={(e) => {
+                                  const newAttrs = [...attributes];
+                                  newAttrs[idx] = { ...newAttrs[idx], value: e.target.value };
+                                  setAttributes(newAttrs);
+                                }}
+                                style={{ ...inputStyle, padding: "7px 12px", width: "100%", cursor: "pointer",
+                                  borderColor: hasError ? "rgba(248,113,113,0.5)" : "rgba(255,255,255,0.08)",
+                                  background: hasError ? "rgba(248,113,113,0.08)" : "rgba(255,255,255,0.04)",
+                                  color: "rgba(255,255,255,0.85)" }}
+                              >
+                                <option value="">— выберите —</option>
+                                {opts.map((o: any) => (
+                                  <option key={o.id ?? o.name} value={o.name ?? o.id}>{o.name ?? o.id}</option>
+                                ))}
+                              </select>
+                            ) : isSuggest && opts.length > 0 ? (
+                              <>
+                                <input
+                                  list={`suggest-${idx}`}
+                                  style={{ ...inputStyle, padding: "7px 12px", width: "100%", boxSizing: "border-box",
+                                    borderColor: hasError ? "rgba(248,113,113,0.5)" : "rgba(255,255,255,0.08)",
+                                    background: hasError ? "rgba(248,113,113,0.08)" : "rgba(255,255,255,0.04)",
+                                    color: isEmpty ? "rgba(255,255,255,0.25)" : "rgba(255,255,255,0.9)" }}
+                                  defaultValue={attr.value}
+                                  placeholder={isEmpty ? "Введите или выберите" : undefined}
+                                  onChange={(e) => {
+                                    const newAttrs = [...attributes];
+                                    newAttrs[idx] = { ...newAttrs[idx], value: e.target.value };
+                                    setAttributes(newAttrs);
+                                  }}
+                                />
+                                <datalist id={`suggest-${idx}`}>
+                                  {opts.map((o: any) => (
+                                    <option key={o.id ?? o.name} value={o.name ?? o.id} />
+                                  ))}
+                                </datalist>
+                              </>
+                            ) : (
+                              <input
+                                style={{ ...inputStyle, padding: "7px 12px", width: "100%", boxSizing: "border-box",
+                                  borderColor: hasError ? "rgba(248,113,113,0.5)" : "rgba(255,255,255,0.08)",
+                                  background: hasError ? "rgba(248,113,113,0.08)" : "rgba(255,255,255,0.04)",
+                                  color: isEmpty ? "rgba(255,255,255,0.25)" : "rgba(255,255,255,0.9)" }}
+                                defaultValue={attr.value}
+                                placeholder={isEmpty ? "Не заполнено" : undefined}
+                                onChange={(e) => {
+                                  const newAttrs = [...attributes];
+                                  newAttrs[idx] = { ...newAttrs[idx], value: e.target.value };
+                                  setAttributes(newAttrs);
+                                }}
+                              />
+                            )}
+                            {hasError && (
+                              <div style={{ display: "flex", alignItems: "flex-start", gap: 5, marginTop: 6, fontSize: 12, color: "#f87171", lineHeight: 1.4 }}>
+                                <AlertCircle size={12} style={{ flexShrink: 0, marginTop: 1 }} />
+                                {(attr as any).error}
+                              </div>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })}
+                  </React.Fragment>
+                ) : (
+                  // ── PIM editable attrs ──
+                  attributes.map((attr, idx) => (
                   <div
                     key={idx}
                     style={{
@@ -783,7 +1572,8 @@ export default function ProductDetailsPage() {
                       <Trash2 size={13} />
                     </button>
                   </div>
-                ))}
+                  ))
+                )}
                 <div
                   style={{ padding: "14px 24px", borderTop: "1px solid rgba(255,255,255,0.04)" }}
                 >
@@ -794,6 +1584,7 @@ export default function ProductDetailsPage() {
                 </div>
               </>
             )}
+            </>)}
           </div>
         )}
 
@@ -838,9 +1629,34 @@ export default function ProductDetailsPage() {
                   multiple
                   ref={fileInputRef}
                   style={{ display: "none" }}
-                  onChange={() =>
-                    toast("Загрузка файлов пока не реализована", "info")
-                  }
+                  onChange={async (e) => {
+                    const files = Array.from(e.target.files || []);
+                    if (!files.length) return;
+                    const effectiveId = (isMpProduct && pimId) ? pimId : id;
+                    if (!effectiveId) return;
+                    const newUrls: string[] = [];
+                    for (const file of files) {
+                      try {
+                        const fd = new FormData();
+                        fd.append('file', file);
+                        const res = await api.post('/upload', fd, { headers: { 'Content-Type': 'multipart/form-data' } });
+                        newUrls.push(res.data.url);
+                      } catch { toast('Ошибка загрузки ' + file.name, 'error'); }
+                    }
+                    if (newUrls.length) {
+                      setProduct((p) => {
+                        if (!p) return p;
+                        const existing = p.media.map((m) => m.url);
+                        const added = newUrls.map((url, i) => ({ id: String(Date.now() + i), url, type: 'image' as const }));
+                        const updated = [...p.media, ...added];
+                        const allUrls = [...existing, ...newUrls];
+                        api.put(`/products/${effectiveId}`, { images: allUrls }).catch(() => {});
+                        return { ...p, media: updated };
+                      });
+                      toast(`Загружено ${newUrls.length} фото`, 'success');
+                    }
+                    e.target.value = '';
+                  }}
                 />
                 <button onClick={() => fileInputRef.current?.click()} style={btnSecondary}>
                   <Upload size={15} />
@@ -1040,7 +1856,7 @@ export default function ProductDetailsPage() {
                             marginTop: 2,
                           }}
                         >
-                          {conn.marketplace}
+                          {({megamarket: "Мегамаркет", ozon: "Ozon", wildberries: "Wildberries", yandex: "Яндекс.Маркет"} as Record<string, string>)[conn.type] || conn.type || conn.marketplace}
                         </div>
                       </div>
                     </div>
@@ -1136,10 +1952,7 @@ export default function ProductDetailsPage() {
           </div>
         )}
 
-        {/* ──────────── Студия ──────────── */}
-        {activeTab === "studio" && product && (
-          <ContentStudio product={product} />
-        )}
+        {/* Studio moved outside container */}
 
         {/* ──────────── История ──────────── */}
         {activeTab === "history" && (
@@ -1289,6 +2102,52 @@ export default function ProductDetailsPage() {
           </div>
         )}
       </div>
+
+      {/* ──────────── Студия — полноэкранная, за пределами ограниченного контейнера ──────────── */}
+      {activeTab === "studio" && product && (
+        <TabErrorBoundary key="studio">
+          <div style={{ padding: "0 16px 24px" }}>
+            <ContentStudio product={isMpProduct && pimId ? { ...product, id: pimId } : product} />
+          </div>
+        </TabErrorBoundary>
+      )}
+
+      {activeTab === "rich" && product && (
+        <TabErrorBoundary key="rich">
+          <div style={{ padding: "0 16px 24px" }}>
+            <RichContentEditor product={isMpProduct && pimId ? { ...product, id: pimId } : product} />
+          </div>
+        </TabErrorBoundary>
+      )}
+
+      {activeTab === "social" && product && (
+        <TabErrorBoundary key="social">
+          <SocialContentEditor product={product} />
+        </TabErrorBoundary>
+      )}
+
+      {/* Connection chooser modal for AI enrichment */}
+      {enrichConnectionDialog && (
+        <div style={{position:'fixed', inset:0, zIndex:9999, display:'flex', alignItems:'center', justifyContent:'center'}}>
+          <div onClick={() => setEnrichConnectionDialog(false)} style={{position:'absolute', inset:0, background:'rgba(0,0,0,0.6)'}} />
+          <div style={{position:'relative', background:'#12121f', borderRadius:16, padding:32, maxWidth:400, width:'90%', border:'1px solid rgba(99,102,241,0.2)'}}>
+            <h3 style={{margin:'0 0 16px', fontSize:18, fontWeight:700, color:'#fff'}}>Выберите подключение</h3>
+            <p style={{fontSize:13, color:'rgba(255,255,255,0.4)', marginBottom:20}}>AI заполнит атрибуты для выбранного маркетплейса</p>
+            <div style={{display:'flex', flexDirection:'column' as const, gap:8}}>
+              {connections.filter((c: any) => c.type === (activePlatform || mpPlatform)).map((c) => (
+                <button key={c.id} onClick={() => { setEnrichConnectionDialog(false); runEnrichWithConnection(c.id); }}
+                  style={{padding:'12px 16px', borderRadius:10, border:'1px solid rgba(99,102,241,0.2)', background:'rgba(99,102,241,0.06)', color:'#fff', cursor:'pointer', textAlign:'left' as const, fontSize:14}}>
+                  {c.name || c.type}
+                </button>
+              ))}
+            </div>
+            <button onClick={() => setEnrichConnectionDialog(false)} style={{marginTop:16, width:'100%', padding:'10px', borderRadius:8, border:'1px solid rgba(255,255,255,0.1)', background:'transparent', color:'rgba(255,255,255,0.5)', cursor:'pointer'}}>
+              Отмена
+            </button>
+          </div>
+        </div>
+      )}
+
     </div>
   );
 }

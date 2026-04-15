@@ -13,6 +13,9 @@ import {
   CheckSquare,
   Square,
   Loader2,
+  RefreshCw,
+  SlidersHorizontal,
+  Filter,
 } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import { api } from '../lib/api';
@@ -31,6 +34,100 @@ interface Product {
   status: string;
   image_url?: string;
 }
+
+// ─── Searchable Select Component ──────────────────────────────────────────────
+function SearchableSelect({ options, value, onChange, placeholder }: {
+  options: { id: string; name: string }[];
+  value: string;
+  onChange: (v: string) => void;
+  placeholder?: string;
+}) {
+  const [open, setOpen] = React.useState(false);
+  const [query, setQuery] = React.useState('');
+  const ref = React.useRef<HTMLDivElement>(null);
+  const inputRef = React.useRef<HTMLInputElement>(null);
+
+  React.useEffect(() => {
+    const handler = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+    };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, []);
+
+  React.useEffect(() => {
+    if (open && inputRef.current) inputRef.current.focus();
+  }, [open]);
+
+  const filtered = options.filter(o =>
+    o.name.toLowerCase().includes(query.toLowerCase())
+  );
+  const selected = options.find(o => o.id === value);
+
+  return (
+    <div ref={ref} style={{ position: 'relative' }}>
+      <div
+        onClick={() => setOpen(!open)}
+        style={{
+          padding: '10px 14px', borderRadius: 10, cursor: 'pointer', fontSize: 13,
+          background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.08)',
+          color: value ? 'rgba(255,255,255,0.85)' : 'rgba(255,255,255,0.35)',
+          display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+        }}
+      >
+        <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+          {selected?.name || placeholder || 'Выберите…'}
+        </span>
+        <span style={{ color: 'rgba(255,255,255,0.3)', fontSize: 10, marginLeft: 8 }}>▼</span>
+      </div>
+      {open && (
+        <div style={{
+          position: 'absolute', top: '100%', left: 0, right: 0, zIndex: 100, marginTop: 4,
+          background: '#12121f', border: '1px solid rgba(99,102,241,0.2)', borderRadius: 12,
+          boxShadow: '0 16px 48px rgba(0,0,0,0.5)', overflow: 'hidden', maxHeight: 320,
+          display: 'flex', flexDirection: 'column',
+        }}>
+          <div style={{ padding: '8px 10px', borderBottom: '1px solid rgba(255,255,255,0.06)' }}>
+            <input
+              ref={inputRef}
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder={placeholder || 'Поиск…'}
+              style={{
+                width: '100%', padding: '8px 10px', boxSizing: 'border-box', fontSize: 13,
+                background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.08)',
+                borderRadius: 8, color: 'rgba(255,255,255,0.85)', outline: 'none',
+              }}
+            />
+          </div>
+          <div style={{ overflowY: 'auto', maxHeight: 260 }}>
+            {filtered.length === 0 ? (
+              <div style={{ padding: '16px 14px', fontSize: 12, color: 'rgba(255,255,255,0.25)', textAlign: 'center' }}>
+                Ничего не найдено
+              </div>
+            ) : filtered.map(o => (
+              <div
+                key={o.id}
+                onClick={() => { onChange(o.id); setOpen(false); setQuery(''); }}
+                style={{
+                  padding: '9px 14px', cursor: 'pointer', fontSize: 13,
+                  color: o.id === value ? '#818cf8' : 'rgba(255,255,255,0.7)',
+                  background: o.id === value ? 'rgba(99,102,241,0.1)' : 'transparent',
+                  borderLeft: o.id === value ? '3px solid #6366f1' : '3px solid transparent',
+                }}
+                onMouseEnter={(e) => (e.currentTarget.style.background = 'rgba(255,255,255,0.05)')}
+                onMouseLeave={(e) => (e.currentTarget.style.background = o.id === value ? 'rgba(99,102,241,0.1)' : 'transparent')}
+              >
+                {o.name}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function getCatName(cat: CategoryVal): string {
   if (!cat) return '';
   if (typeof cat === 'object') return (cat as any).name ?? '';
@@ -87,13 +184,25 @@ function CompletenessBar({ value }: { value: number }) {
 }
 
 function StatusBadge({ status }: { status: string }) {
-  const map: Record<string, { bg: string; color: string; label: string }> = {
-    active:   { bg: 'rgba(16,185,129,0.12)',  color: '#10b981', label: 'Активный' },
-    draft:    { bg: 'rgba(245,158,11,0.12)',  color: '#f59e0b', label: 'Черновик' },
-    archived: { bg: 'rgba(248,113,113,0.12)', color: '#f87171', label: 'Архив' },
-    default:  { bg: 'rgba(255,255,255,0.06)', color: 'rgba(255,255,255,0.45)', label: status },
-  };
-  const s = map[status] ?? map.default;
+  const s = (() => {
+    const st = (status || '').toLowerCase();
+    if (['active', 'ok', 'ready', 'has_card_can_update'].some(v => st.includes(v)))
+      return { bg: 'rgba(16,185,129,0.12)', color: '#10b981', label: 'Активный' };
+    if (['draft', 'pending', 'processing', 'moderation'].some(v => st.includes(v)))
+      return { bg: 'rgba(245,158,11,0.12)', color: '#f59e0b', label: 'На модерации' };
+    if (['error', 'ошибк', 'has_card_can_update_errors', 'invalid'].some(v => st.includes(v)))
+      return { bg: 'rgba(248,113,113,0.12)', color: '#f87171', label: 'Есть ошибки' };
+    if (['archived', 'archive', 'disabled'].some(v => st.includes(v)))
+      return { bg: 'rgba(255,255,255,0.06)', color: 'rgba(255,255,255,0.35)', label: 'Архив' };
+    if (['inactive', 'paused', 'blocked'].some(v => st.includes(v)))
+      return { bg: 'rgba(248,113,113,0.08)', color: '#f87171', label: 'Неактивный' };
+    // Russian status labels from MM
+    if (st.includes('есть ошибки') || st.includes('ошибки'))
+      return { bg: 'rgba(248,113,113,0.12)', color: '#f87171', label: 'Есть ошибки' };
+    if (st.includes('готов') || st.includes('активн'))
+      return { bg: 'rgba(16,185,129,0.12)', color: '#10b981', label: 'Активный' };
+    return { bg: 'rgba(255,255,255,0.06)', color: 'rgba(255,255,255,0.45)', label: status };
+  })();
   return (
     <span
       style={{
@@ -332,6 +441,120 @@ function ImportModal({ connections, onClose, onDone }: ImportModalProps) {
   );
 }
 
+// ─── MP Product Detail Modal ──────────────────────────────────────────────────
+
+interface MpDetail {
+  name: string; brand: string; category: string; description: string;
+  photos: string[]; attributes: { id: string; name: string; value: string }[];
+  sku: string; status: string;
+}
+
+function MpProductModal({ product, platform, onClose }: { product: Product; platform: string; onClose: () => void }) {
+  const [detail, setDetail] = useState<MpDetail | null>(null);
+  const [loadingDetail, setLoadingDetail] = useState(true);
+  const [photoIdx, setPhotoIdx] = useState(0);
+  const { toast } = useToast();
+
+  useEffect(() => {
+    setLoadingDetail(true);
+    const catId = typeof product.category === 'string' ? product.category : '';
+    api.get(`/mp/product-details?platform=${encodeURIComponent(platform)}&sku=${encodeURIComponent(product.sku)}&category_id=${encodeURIComponent(catId)}`)
+      .then((r) => setDetail({ ...r.data, status: product.status }))
+      .catch(() => toast('Не удалось загрузить детали товара', 'error'))
+      .finally(() => setLoadingDetail(false));
+  }, [product.sku, platform]);
+
+  const photos = detail?.photos?.length ? detail.photos : (product.image_url ? [product.image_url] : []);
+  const attrList = detail?.attributes?.filter((a) => a.value && a.value !== 'None' && a.value !== 'undefined') ?? [];
+
+  return (
+    <div
+      style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.8)', backdropFilter: 'blur(10px)', zIndex: 200, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 24 }}
+      onClick={(e) => e.target === e.currentTarget && onClose()}
+    >
+      <div style={{ background: '#0d0d1a', border: '1px solid rgba(255,255,255,0.1)', borderRadius: 20, width: '100%', maxWidth: 860, maxHeight: '92vh', overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
+        {/* Header */}
+        <div style={{ padding: '24px 28px 20px', borderBottom: '1px solid rgba(255,255,255,0.07)', display: 'flex', gap: 20, alignItems: 'flex-start' }}>
+          {/* Photo gallery */}
+          <div style={{ flexShrink: 0, position: 'relative' }}>
+            <div style={{ width: 100, height: 100, borderRadius: 12, background: 'rgba(255,255,255,0.04)', overflow: 'hidden', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+              {photos[photoIdx] ? (
+                <img src={photos[photoIdx]} alt="" style={{ width: '100%', height: '100%', objectFit: 'contain' }} onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }} />
+              ) : (
+                <Package size={32} style={{ color: 'rgba(255,255,255,0.15)' }} />
+              )}
+            </div>
+            {photos.length > 1 && (
+              <div style={{ display: 'flex', gap: 4, marginTop: 6, justifyContent: 'center' }}>
+                {photos.slice(0, 6).map((_, i) => (
+                  <div key={i} onClick={() => setPhotoIdx(i)} style={{ width: 6, height: 6, borderRadius: '50%', background: i === photoIdx ? '#6366f1' : 'rgba(255,255,255,0.2)', cursor: 'pointer' }} />
+                ))}
+              </div>
+            )}
+          </div>
+
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ fontSize: 18, fontWeight: 700, marginBottom: 8, lineHeight: 1.35 }}>
+              {loadingDetail ? product.name : (detail?.name || product.name)}
+            </div>
+            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 8 }}>
+              {(detail?.brand || product.brand) && (
+                <span style={{ background: 'rgba(99,102,241,0.15)', color: '#a5b4fc', borderRadius: 6, padding: '3px 10px', fontSize: 12, fontWeight: 600 }}>
+                  {detail?.brand || product.brand}
+                </span>
+              )}
+              {(detail?.category || (typeof product.category === 'string' && product.category)) && (
+                <span style={{ background: 'rgba(255,255,255,0.06)', color: 'rgba(255,255,255,0.5)', borderRadius: 6, padding: '3px 10px', fontSize: 12 }}>
+                  {detail?.category || String(product.category)}
+                </span>
+              )}
+              <StatusBadge status={product.status} />
+            </div>
+            <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.3)', marginBottom: 4 }}>SKU: {product.sku.startsWith('mp:') ? product.sku.slice(3) : product.sku}</div>
+            {detail?.description && (
+              <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.45)', marginTop: 8, lineHeight: 1.5, maxHeight: 60, overflow: 'hidden' }}>
+                {detail.description}
+              </div>
+            )}
+          </div>
+
+          <button onClick={onClose} style={{ background: 'none', border: 'none', color: 'rgba(255,255,255,0.4)', cursor: 'pointer', padding: 4, flexShrink: 0 }}>
+            <X size={20} />
+          </button>
+        </div>
+
+        {/* Body */}
+        <div style={{ flex: 1, overflowY: 'auto', padding: '20px 28px 28px' }}>
+          {loadingDetail ? (
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', paddingTop: 40, gap: 10, color: 'rgba(255,255,255,0.35)' }}>
+              <Loader2 size={20} style={{ animation: 'spin 1s linear infinite' }} />
+              Загружаем атрибуты…
+            </div>
+          ) : attrList.length > 0 ? (
+            <>
+              <div style={{ fontSize: 12, fontWeight: 600, color: 'rgba(255,255,255,0.35)', marginBottom: 14, textTransform: 'uppercase', letterSpacing: '0.06em' }}>
+                Атрибуты · {attrList.length}
+              </div>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '2px 24px' }}>
+                {attrList.map((a, i) => (
+                  <div key={i} style={{ padding: '8px 0', borderBottom: '1px solid rgba(255,255,255,0.04)' }}>
+                    <div style={{ fontSize: 11, color: 'rgba(255,255,255,0.3)', marginBottom: 3 }}>{a.name}</div>
+                    <div style={{ fontSize: 13, color: 'rgba(255,255,255,0.85)', wordBreak: 'break-word' }}>{a.value}</div>
+                  </div>
+                ))}
+              </div>
+            </>
+          ) : (
+            <div style={{ color: 'rgba(255,255,255,0.25)', fontSize: 14, textAlign: 'center', paddingTop: 40 }}>
+              Атрибуты не загружены
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ─── Main Component ───────────────────────────────────────────────────────────
 
 export default function ProductsPage() {
@@ -343,40 +566,107 @@ export default function ProductsPage() {
   const [pages, setPages] = useState(1);
   const [page, setPage] = useState(1);
   const [search, setSearch] = useState('');
+  const [filterOpen, setFilterOpen] = useState(false);
+  const [filterBrand, setFilterBrand] = useState('');
+  const [filterStatus, setFilterStatus] = useState('');
   const [category, setCategory] = useState('');
   const [loading, setLoading] = useState(true);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [showImport, setShowImport] = useState(false);
   const [connections, setConnections] = useState<Connection[]>([]);
+  const [categories, setCategories] = useState<{id: string; name: string}[]>([]);
   const [aiLoading, setAiLoading] = useState(false);
   const [bulkDeleteLoading, setBulkDeleteLoading] = useState(false);
+  const [source, setSource] = useState<string>('pim');
+  const [storeFilter, setStoreFilter] = useState<string>('');
+  const [availableStores, setAvailableStores] = useState<{id: string; name: string}[]>([]);
+  const [syncing, setSyncing] = useState(false);
+  const [syncLog, setSyncLog] = useState<string[]>([]);
+  const [syncDone, setSyncDone] = useState(0);
   const searchTimeout = useRef<ReturnType<typeof setTimeout>>();
 
-  const fetchProducts = useCallback(async (p = page, s = search, cat = category) => {
+  const fetchProducts = useCallback(async (p = page, s = search, cat = category, src = source) => {
     setLoading(true);
     try {
-      const res = await api.get<ProductsResponse>(
-        `/products?page=${p}&limit=50&search=${encodeURIComponent(s)}&category=${encodeURIComponent(cat)}`
-      );
-      const rawData = res.data;
-      const items = Array.isArray(rawData) ? rawData : (rawData.items ?? []);
-      setProducts(items);
-      setTotal(Array.isArray(rawData) ? rawData.length : (rawData.total ?? items.length));
-      setPages(Array.isArray(rawData) ? 1 : (rawData.pages ?? 1));
+      if (src === 'pim') {
+        const res = await api.get<ProductsResponse>(
+          `/products?page=${p}&limit=50&search=${encodeURIComponent(s)}&category=${encodeURIComponent(cat)}`
+        );
+        const rawData = res.data;
+        const items = Array.isArray(rawData) ? rawData : (rawData.items ?? []);
+        setProducts(items);
+        setTotal(Array.isArray(rawData) ? rawData.length : (rawData.total ?? items.length));
+        setPages(Array.isArray(rawData) ? 1 : (rawData.pages ?? 1));
+      } else {
+        const storeParam = storeFilter ? `&store_id=${encodeURIComponent(storeFilter)}` : '';
+        const res = await api.get(`/mp/products?platform=${src}&page=${p}&limit=50${storeParam}`);
+        if (res.data.available_stores) setAvailableStores(res.data.available_stores);
+        const items = (res.data.items ?? []).map((it: any) => {
+          const attrs = Array.isArray(it.attributes) ? it.attributes : (it.attributes ? Object.keys(it.attributes) : []);
+          const filledAttrs = attrs.filter((a: any) => {
+            const val = typeof a === 'object' ? (a.value ?? a.values) : a;
+            return val !== undefined && val !== null && val !== '' && !(Array.isArray(val) && val.length === 0);
+          });
+          const completeness = attrs.length > 0 ? Math.round((filledAttrs.length / attrs.length) * 100) : (it.name && it.brand ? 40 : 10);
+          const rawStatus = String(it.status || 'active').toLowerCase();
+          return {
+            id: it.sku || String(Math.random()),
+            sku: it.sku || '',
+            name: it.name || '',
+            brand: it.brand || '',
+            category: it.category || '',
+            completeness,
+            status: rawStatus,
+            image_url: it.image_url || '',
+          };
+        });
+        setProducts(items);
+        setTotal(res.data.total ?? items.length);
+        setPages(res.data.has_more ? p + 1 : p);
+      }
     } catch (e: any) {
       toast(e?.message ?? 'Ошибка загрузки товаров', 'error');
     } finally {
       setLoading(false);
     }
-  }, [page, search, category, toast]);
+  }, [page, search, category, source, toast]);
 
-  useEffect(() => { fetchProducts(); }, [page, category]);
+  useEffect(() => { fetchProducts(page, search, category, source); }, [page, category, source, storeFilter]);
+
+  const handleSyncShadows = async () => {
+    setSyncing(true);
+    setSyncLog(['Запуск синхронизации...']);
+    setSyncDone(0);
+    try {
+      await api.post('/mp/sync-shadows');
+      const poll = async () => {
+        try {
+          const res = await api.get('/mp/sync-shadows/status');
+          const s = res.data;
+          setSyncLog(s.log || []);
+          setSyncDone(s.done || 0);
+          if (s.running) {
+            setTimeout(poll, 1500);
+          } else {
+            setSyncing(false);
+            toast(`Синхронизация завершена: ${s.done} товаров, ${s.errors} ошибок`, s.errors > 0 ? 'error' : 'success');
+            fetchProducts();
+          }
+        } catch { setSyncing(false); }
+      };
+      poll();
+    } catch {
+      setSyncing(false);
+      toast('Ошибка запуска синхронизации', 'error');
+    }
+  };
+
 
   useEffect(() => {
     clearTimeout(searchTimeout.current);
     searchTimeout.current = setTimeout(() => {
       setPage(1);
-      fetchProducts(1, search, category);
+      fetchProducts(1, search, category, source);
     }, 400);
     return () => clearTimeout(searchTimeout.current);
   }, [search]);
@@ -384,6 +674,17 @@ export default function ProductsPage() {
   useEffect(() => {
     api.get<Connection[]>('/connections').then((r) => {
       setConnections(Array.isArray(r.data) ? r.data : []);
+    });
+    api.get('/categories').then((r) => {
+      const cats = Array.isArray(r.data) ? r.data : [];
+      // Deduplicate by name, keep unique names only
+      const seen = new Set<string>();
+      const unique = cats.filter((c: any) => {
+        if (seen.has(c.name)) return false;
+        seen.add(c.name);
+        return true;
+      });
+      setCategories(unique.map((c: any) => ({ id: c.id, name: c.name })));
     });
   }, []);
 
@@ -511,7 +812,16 @@ export default function ProductsPage() {
               {total.toLocaleString()}
             </span>
           </div>
-          <div style={{ marginLeft: 'auto' }}>
+          <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 8 }}>
+            <button
+              onClick={handleSyncShadows}
+              disabled={syncing}
+              style={{ padding: '10px 18px', fontSize: 14, display: 'flex', alignItems: 'center', gap: 8, borderRadius: 10, border: '1px solid rgba(99,102,241,0.3)', background: 'rgba(99,102,241,0.1)', color: '#a5b4fc', cursor: syncing ? 'not-allowed' : 'pointer', opacity: syncing ? 0.7 : 1 }}
+              title="Создать shadow-записи для всех товаров МП"
+            >
+              <RefreshCw size={15} style={syncing ? { animation: 'spin 1s linear infinite' } : {}} />
+              {syncing ? `Синхронизация... ${syncDone}` : 'Синхронизировать МП'}
+            </button>
             <button
               className="btn-glow"
               onClick={() => setShowImport(true)}
@@ -523,41 +833,183 @@ export default function ProductsPage() {
           </div>
         </div>
 
-        {/* Filter bar */}
-        <div style={{ display: 'flex', gap: 12, marginBottom: 20 }}>
-          <div style={{ flex: 1, maxWidth: 360, position: 'relative' }}>
-            <Search
-              size={15}
+        {/* Source tabs */}
+        <div style={{ display: 'flex', gap: 6, marginBottom: 16, flexWrap: 'wrap' }}>
+          {(['pim', ...connections.map((c: Connection) => c.type).filter((v: string, i: number, a: string[]) => a.indexOf(v) === i)] as string[]).map((src: string) => {
+            const LABELS: Record<string, string> = { pim: 'PIM', ozon: 'Ozon', megamarket: 'Megamarket', wildberries: 'Wildberries', wb: 'Wildberries', yandex: 'Яндекс' };
+            const COLORS: Record<string, string> = { pim: '#6366f1', ozon: '#005bff', megamarket: '#ff9900', wildberries: '#cb3e76', wb: '#cb3e76', yandex: '#ffcc00' };
+            const label = LABELS[src] ?? src;
+            const color = COLORS[src] ?? '#8888cc';
+            const active = source === src;
+            return (
+              <button
+                key={src}
+                onClick={() => { setSource(src); setStoreFilter(''); setPage(1); setSelected(new Set()); }}
+                style={{
+                  padding: '6px 16px', borderRadius: 20, fontSize: 12, fontWeight: 600,
+                  cursor: 'pointer', border: `1px solid ${active ? color : 'rgba(255,255,255,0.1)'}`,
+                  background: active ? color + '22' : 'transparent',
+                  color: active ? color : 'rgba(255,255,255,0.45)',
+                  transition: 'all 0.15s',
+                }}
+              >
+                {label}
+              </button>
+            );
+          })}
+        </div>
+
+        {/* Store filter for multi-store platforms */}
+        {source !== 'pim' && availableStores.length > 1 && (
+          <div style={{ display: 'flex', gap: 8, marginBottom: 12, alignItems: 'center' }}>
+            <span style={{ fontSize: 11, color: 'rgba(255,255,255,0.3)' }}>Магазин:</span>
+            <select
+              value={storeFilter}
+              onChange={e => { setStoreFilter(e.target.value); setPage(1); }}
               style={{
-                position: 'absolute',
-                left: 12,
-                top: '50%',
-                transform: 'translateY(-50%)',
-                color: 'rgba(255,255,255,0.25)',
+                background: '#0f0f1a', border: '1px solid rgba(255,255,255,0.08)', borderRadius: 8,
+                padding: '5px 10px', color: 'rgba(255,255,255,0.8)', fontSize: 12, cursor: 'pointer', outline: 'none',
               }}
-            />
+            >
+              <option value="">Все магазины</option>
+              {availableStores.map((s: any) => (
+                <option key={s.id} value={s.id}>{s.name}</option>
+              ))}
+            </select>
+          </div>
+        )}
+
+
+        {/* Sync progress log */}
+        {(syncing || syncLog.length > 0) && (
+          <div style={{ marginBottom: 12, padding: '10px 14px', background: 'rgba(99,102,241,0.07)', border: '1px solid rgba(99,102,241,0.15)', borderRadius: 8, fontSize: 11, color: 'rgba(255,255,255,0.5)', maxHeight: 80, overflowY: 'auto' }}>
+            {syncLog.slice(-5).map((l: string, i: number) => <div key={i}>{l}</div>)}
+          </div>
+        )}
+        {/* Search & Filter bar */}
+        <div style={{ display: 'flex', gap: 12, marginBottom: 20, alignItems: 'center' }}>
+          <div style={{ flex: 1, position: 'relative' }}>
+            <Search size={15} style={{ position: 'absolute', left: 14, top: '50%', transform: 'translateY(-50%)', color: 'rgba(255,255,255,0.25)' }} />
             <input
               className="input-premium"
-              style={{ width: '100%', paddingLeft: 36, paddingRight: 12, paddingTop: 10, paddingBottom: 10, boxSizing: 'border-box' }}
-              placeholder="Поиск по названию, SKU…"
+              style={{ width: '100%', paddingLeft: 40, paddingRight: 16, paddingTop: 12, paddingBottom: 12, boxSizing: 'border-box', fontSize: 14, borderRadius: 12 }}
+              placeholder="Поиск по названию, артикулу, бренду, СП-коду…"
               value={search}
               onChange={(e) => setSearch(e.target.value)}
             />
           </div>
-          <select
-            className="input-premium"
-            style={{ padding: '10px 14px', minWidth: 180 }}
-            value={category}
-            onChange={(e) => { setCategory(e.target.value); setPage(1); }}
+          <button
+            onClick={() => setFilterOpen(true)}
+            style={{
+              display: 'flex', alignItems: 'center', gap: 8, padding: '12px 20px', borderRadius: 12,
+              background: (category || filterBrand || filterStatus) ? 'rgba(99,102,241,0.15)' : 'rgba(255,255,255,0.04)',
+              border: `1px solid ${(category || filterBrand || filterStatus) ? 'rgba(99,102,241,0.4)' : 'rgba(255,255,255,0.08)'}`,
+              color: (category || filterBrand || filterStatus) ? '#818cf8' : 'rgba(255,255,255,0.5)',
+              cursor: 'pointer', fontSize: 13, fontWeight: 600, whiteSpace: 'nowrap',
+            }}
           >
-            <option value="">Все категории</option>
-            <option value="electronics">Электроника</option>
-            <option value="clothing">Одежда</option>
-            <option value="food">Продукты</option>
-            <option value="sport">Спорт</option>
-            <option value="home">Дом</option>
-          </select>
+            <SlidersHorizontal size={15} />
+            Фильтры
+            {(category || filterBrand || filterStatus) && (
+              <span style={{ background: '#6366f1', color: '#fff', borderRadius: 99, width: 18, height: 18, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 10, fontWeight: 700 }}>
+                {[category, filterBrand, filterStatus].filter(Boolean).length}
+              </span>
+            )}
+          </button>
         </div>
+
+        {/* Slide-out filter panel */}
+        {filterOpen && (
+          <div style={{ position: 'fixed', inset: 0, zIndex: 9999 }}>
+            <div onClick={() => setFilterOpen(false)} style={{ position: 'absolute', inset: 0, background: 'rgba(0,0,0,0.5)', backdropFilter: 'blur(4px)' }} />
+            <div style={{
+              position: 'absolute', top: 0, right: 0, bottom: 0, width: 380, maxWidth: '90vw',
+              background: '#0a0a14', borderLeft: '1px solid rgba(99,102,241,0.15)',
+              boxShadow: '-20px 0 60px rgba(0,0,0,0.5)', padding: '28px 24px', overflowY: 'auto',
+              animation: 'slideInRight 0.25s ease',
+            }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 28 }}>
+                <h3 style={{ margin: 0, fontSize: 18, fontWeight: 700, color: '#fff', display: 'flex', alignItems: 'center', gap: 10 }}>
+                  <Filter size={18} color="#818cf8" /> Фильтры
+                </h3>
+                <button onClick={() => setFilterOpen(false)} style={{ background: 'none', border: 'none', color: 'rgba(255,255,255,0.4)', cursor: 'pointer', padding: 4 }}>
+                  <X size={20} />
+                </button>
+              </div>
+
+              {/* Search */}
+              <div style={{ marginBottom: 20 }}>
+                <label style={{ fontSize: 11, fontWeight: 700, color: 'rgba(255,255,255,0.35)', textTransform: 'uppercase', letterSpacing: '0.08em', display: 'block', marginBottom: 8 }}>Поиск</label>
+                <div style={{ position: 'relative' }}>
+                  <Search size={14} style={{ position: 'absolute', left: 12, top: '50%', transform: 'translateY(-50%)', color: 'rgba(255,255,255,0.2)' }} />
+                  <input
+                    className="input-premium"
+                    style={{ width: '100%', paddingLeft: 36, padding: '10px 12px 10px 36px', boxSizing: 'border-box', fontSize: 13, borderRadius: 10 }}
+                    placeholder="Название, артикул, бренд, СП-код…"
+                    value={search}
+                    onChange={(e) => setSearch(e.target.value)}
+                    autoFocus
+                  />
+                </div>
+              </div>
+
+              {/* Category — searchable */}
+              <div style={{ marginBottom: 20 }}>
+                <label style={{ fontSize: 11, fontWeight: 700, color: 'rgba(255,255,255,0.35)', textTransform: 'uppercase', letterSpacing: '0.08em', display: 'block', marginBottom: 8 }}>Категория</label>
+                <SearchableSelect
+                  options={[{ id: '', name: 'Все категории' }, ...categories]}
+                  value={category}
+                  onChange={(v) => { setCategory(v); setPage(1); }}
+                  placeholder="Поиск категории…"
+                />
+              </div>
+
+              {/* Brand filter */}
+              <div style={{ marginBottom: 20 }}>
+                <label style={{ fontSize: 11, fontWeight: 700, color: 'rgba(255,255,255,0.35)', textTransform: 'uppercase', letterSpacing: '0.08em', display: 'block', marginBottom: 8 }}>Бренд</label>
+                <input
+                  className="input-premium"
+                  style={{ width: '100%', padding: '10px 14px', boxSizing: 'border-box', fontSize: 13, borderRadius: 10 }}
+                  placeholder="Введите бренд…"
+                  value={filterBrand}
+                  onChange={(e) => setFilterBrand(e.target.value)}
+                />
+              </div>
+
+              {/* Status filter */}
+              <div style={{ marginBottom: 28 }}>
+                <label style={{ fontSize: 11, fontWeight: 700, color: 'rgba(255,255,255,0.35)', textTransform: 'uppercase', letterSpacing: '0.08em', display: 'block', marginBottom: 8 }}>Статус</label>
+                <select
+                  className="input-premium"
+                  style={{ width: '100%', padding: '10px 14px', boxSizing: 'border-box', fontSize: 13, borderRadius: 10 }}
+                  value={filterStatus}
+                  onChange={(e) => setFilterStatus(e.target.value)}
+                >
+                  <option value="">Все статусы</option>
+                  <option value="active">Активные</option>
+                  <option value="draft">Черновики</option>
+                  <option value="archived">Архив</option>
+                </select>
+              </div>
+
+              {/* Action buttons */}
+              <div style={{ display: 'flex', gap: 10 }}>
+                <button
+                  onClick={() => { setSearch(''); setCategory(''); setFilterBrand(''); setFilterStatus(''); setPage(1); }}
+                  style={{ flex: 1, padding: '11px 16px', borderRadius: 10, border: '1px solid rgba(255,255,255,0.1)', background: 'transparent', color: 'rgba(255,255,255,0.5)', cursor: 'pointer', fontSize: 13, fontWeight: 600 }}
+                >
+                  Сбросить
+                </button>
+                <button
+                  onClick={() => { setFilterOpen(false); setPage(1); fetchProducts(1, search, category, source); }}
+                  style={{ flex: 1, padding: '11px 16px', borderRadius: 10, border: 'none', background: 'linear-gradient(135deg, #6366f1, #7c3aed)', color: '#fff', cursor: 'pointer', fontSize: 13, fontWeight: 700 }}
+                >
+                  Применить
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
 
         {/* Bulk actions bar */}
         {selected.size > 0 && (
@@ -696,7 +1148,7 @@ export default function ProductsPage() {
                   return (
                     <tr
                       key={product.id}
-                      onClick={() => navigate(`/products/${product.id}`)}
+                      onClick={() => source !== 'pim' ? navigate(`/products/mp__${source}__${encodeURIComponent(product.sku)}`) : navigate(`/products/${product.id}`)}
                       style={{
                         borderBottom:
                           idx < products.length - 1 ? '1px solid rgba(255,255,255,0.04)' : 'none',
@@ -748,7 +1200,7 @@ export default function ProductsPage() {
                       </td>
                       {/* SKU */}
                       <td style={{ padding: '12px 16px', color: 'rgba(255,255,255,0.45)', fontSize: 12, fontFamily: 'monospace' }}>
-                        {product.sku}
+                        {product.sku.startsWith('mp:') ? product.sku.slice(3) : product.sku}
                       </td>
                       {/* Name */}
                       <td style={{ padding: '12px 16px' }}>
@@ -786,7 +1238,7 @@ export default function ProductsPage() {
                       <td style={{ padding: '12px 16px' }} onClick={(e) => e.stopPropagation()}>
                         <div style={{ display: 'flex', gap: 6 }}>
                           <button
-                            onClick={() => navigate(`/products/${product.id}`)}
+                            onClick={() => source !== 'pim' ? navigate(`/products/mp__${source}__${encodeURIComponent(product.sku)}`) : navigate(`/products/${product.id}`)}
                             title="Редактировать"
                             style={{
                               background: 'rgba(99,102,241,0.1)',

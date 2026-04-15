@@ -51,7 +51,7 @@ export const LoginPage: React.FC = () => {
       const res = await axios.post('/api/v1/auth/login', fd, {
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
       });
-      login(res.data.access_token, res.data.role, email);
+      login(res.data.access_token, res.data.role, email, res.data.refresh_token);
       navigate('/');
     } catch (err: any) {
       setError(err.response?.status === 401 ? 'Неверный email или пароль' : 'Ошибка подключения к серверу');

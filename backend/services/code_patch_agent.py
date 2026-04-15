@@ -3412,11 +3412,17 @@ async def generate_code_patch_proposal(
     knowledge_context = _build_knowledge_context(rewrite_plan)
     file_tree = _build_file_tree(workspace_root)
     tests_list = _list_tests(workspace_root)
-    baseline_tests = _run_baseline_tests(workspace_root)
+    # Run baseline tests in a thread to avoid blocking the agent start
+    baseline_tests = await asyncio.get_event_loop().run_in_executor(
+        None, _run_baseline_tests, workspace_root
+    )
     memory_context = _load_memory_context(description or title, workspace_root)  # [#5]
 
-    # [#5] Task decomposition — try to split into parallel subtasks
-    subtasks = await _decompose_task(client, model, title, description)
+    # [#5] Task decomposition — only for complex tasks (description > 200 chars)
+    if len(description) > 200:
+        subtasks = await _decompose_task(client, model, title, description)
+    else:
+        subtasks = []
 
     if len(subtasks) >= 2:
         log.info(f"Decomposed into {len(subtasks)} subtasks: {[s['title'] for s in subtasks]}")

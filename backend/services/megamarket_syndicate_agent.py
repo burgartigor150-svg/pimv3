@@ -11,7 +11,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from backend.services.adapters import MegamarketAdapter
 from backend.services.ai_service import get_client_and_model
 from backend.services.agent_memory import get_agent_memory
-from backend.services.attribute_star_map import search_attribute_star_map
+from backend.services.attribute_star_map import search_attribute_star_map, resolve_product_attributes
 from backend.services.knowledge_hub import search_knowledge
 
 _log = logging.getLogger("pim.megamarket_agent")
@@ -698,6 +698,19 @@ class MegamarketSyndicateAgent:
 
         src = {k: v for k, v in self.pim.items() if not k.startswith("__") and v not in (None, "", [], {})}
 
+        # ── Звёздная карта: готовые значения из векторной базы ────────────
+        # Для каждого MM-атрибута категории уже известно какой атрибут источника
+        # соответствует и (для словарных полей) какое значение выбрать из словаря.
+        # AI не должен угадывать то, что уже известно.
+        star_resolved: dict = {}
+        try:
+            star_resolved = resolve_product_attributes(
+                product_attrs=src,
+                mm_category_id=self.category_id,
+            )
+        except Exception:
+            star_resolved = {}
+
         def _norm(s: str) -> str:
             return _re.sub(r"[^a-zа-яё0-9]", "", str(s).lower())
 
@@ -762,6 +775,19 @@ class MegamarketSyndicateAgent:
             already = self.working_flat.get(nm)
             if already not in (None, "", [], {}):
                 analysis.append({"field": nm, "status": "already_set", "current_value": already})
+                continue
+
+            # Проверяем звёздную карту — если есть готовое значение, сразу ставим
+            if nm in star_resolved:
+                star_val = star_resolved[nm]
+                analysis.append({
+                    "field": nm,
+                    "status": "star_map_resolved",
+                    "suggestion": star_val,
+                    "source": "attribute_star_map",
+                    "explanation": "Значение найдено в векторной карте атрибутов (звёздная карта). Подставлено автоматически.",
+                    "confidence": "high",
+                })
                 continue
 
             suggestion: Any = None
@@ -1061,6 +1087,27 @@ class MegamarketSyndicateAgent:
         sys_prompt = SYSTEM_PROMPT
         if not self.allow_submit:
             sys_prompt += "\n\nВ этом запуске submit запрещен. Используй get_schema/get_dictionary/set_fields/get_errors/finish."
+
+        # ── Предварительное применение звёздной карты ────────────────────
+        # До запуска AI заполняем working_flat значениями из карты атрибутов.
+        # AI увидит их как already_set и не будет тратить токены на угадывание.
+        try:
+            src = {k: v for k, v in self.pim.items() if not k.startswith("__") and v not in (None, "", [], {})}
+            pre_resolved = resolve_product_attributes(
+                product_attrs=src,
+                mm_category_id=self.category_id,
+            )
+            pre_applied = []
+            for field, value in pre_resolved.items():
+                if self.working_flat.get(field) in (None, "", [], {}):
+                    self.working_flat[field] = value
+                    pre_applied.append(field)
+            if pre_applied:
+                _log.info("star_map pre-applied %d fields for sku=%s cat=%s: %s",
+                          len(pre_applied), self.sku, self.category_id, pre_applied)
+        except Exception as _e:
+            _log.warning("star_map pre-apply failed: %s", _e)
+
         memory_bootstrap = self._tool_recall_memory(
             query=json.dumps(
                 {

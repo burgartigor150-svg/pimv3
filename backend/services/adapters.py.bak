@@ -1,0 +1,2674 @@
+"""
+HTTP-адаптеры маркетплейсов (единый контракт MarketplaceAdapter для синдикации и Selector).
+
+Документация API:
+- Ozon Seller: https://docs.ozon.ru/api/seller/
+- Яндекс Маркет Partner API v2: https://yandex.ru/dev/market/partner-api/doc/ru/
+- Wildberries: https://dev.wildberries.ru/
+- Мегамаркет Assortment: кабинет партнёра / merchantIntegration assortment v1
+"""
+import base64
+import hashlib
+import ipaddress
+import httpx
+import json
+import logging
+import os
+import re
+from difflib import SequenceMatcher
+from abc import ABC, abstractmethod
+from typing import Dict, Any, Optional, List
+
+
+
+
+class MarketplaceAdapter(ABC):
+    def __init__(self, api_key: str, client_id: str = None, store_id: str = None, warehouse_id: str = None):
+        self.api_key = api_key
+        self.client_id = client_id
+        self.store_id = store_id
+        self.warehouse_id = warehouse_id
+
+    @abstractmethod
+    async def push_product(self, mapped_payload: Dict[str, Any]) -> Dict[str, Any]:
+        pass
+
+    @abstractmethod
+    async def pull_product(self, sku: str) -> Optional[Dict[str, Any]]:
+        pass
+
+    @abstractmethod
+    async def search_categories(self, query: str) -> List[Dict[str, Any]]:
+        pass
+
+    @abstractmethod
+    async def get_category_schema(self, category_id: str) -> Dict[str, Any]:
+        pass
+
+    @abstractmethod
+    async def get_dictionary(self, category_id: str, dictionary_id: str) -> List[Dict[str, Any]]:
+        pass
+
+    @abstractmethod
+    async def get_async_errors(self, sku: str) -> Optional[str]:
+        pass
+
+    async def list_products(self, page: int = 1, limit: int = 50) -> Dict[str, Any]:
+        raise NotImplementedError
+
+class OzonAdapter(MarketplaceAdapter):
+    def _ozon_headers(self) -> Dict[str, str]:
+        return {
+            "Client-Id": self.client_id or "",
+            "Api-Key": self.api_key,
+            "Content-Type": "application/json",
+        }
+
+    async def _build_ozon_v2_import_body(self, flat: Dict[str, Any]) -> Dict[str, Any]:
+        """Плоский mapped_payload (ключи = name из схемы Ozon) -> POST /v2/product/import."""
+        flat = dict(flat or {})
+        prebuilt = flat.get("items")
+        if isinstance(prebuilt, list) and prebuilt:
+            return {"items": prebuilt}
+
+        cat_key = flat.get("categoryId") or flat.get("category_id")
+        offer_id = str(flat.get("offer_id") or flat.get("Артикул (SKU)") or "").strip()
+        name = str(flat.get("name") or flat.get("Название") or offer_id or "Товар").strip()
+
+        desc_id: Optional[int] = None
+        type_id: Optional[int] = None
+        if cat_key and "_" in str(cat_key):
+            parts = str(cat_key).split("_", 1)
+            try:
+                desc_id = int(parts[0])
+                type_id = int(parts[1])
+            except (ValueError, IndexError):
+                desc_id, type_id = None, None
+
+        schema_attrs: List[Dict[str, Any]] = []
+        if desc_id is not None and type_id is not None:
+            sch = await self.get_category_schema(f"{desc_id}_{type_id}")
+            raw_attrs = sch.get("attributes") or []
+            schema_attrs = raw_attrs if isinstance(raw_attrs, list) else []
+
+        by_name: Dict[str, Dict[str, Any]] = {}
+        for row in schema_attrs:
+            if not isinstance(row, dict):
+                continue
+            an = row.get("name")
+            if an and str(an) not in by_name:
+                by_name[str(an)] = row
+
+        dict_cache: Dict[tuple[str, int], List[Dict[str, Any]]] = {}
+        attributes: List[Dict[str, Any]] = []
+        seen_aid: set[int] = set()
+
+        for sch_name, row in by_name.items():
+            if sch_name not in flat:
+                continue
+            raw = flat[sch_name]
+            if raw is None:
+                continue
+            if isinstance(raw, str) and not raw.strip():
+                continue
+            aid = row.get("id")
+            if aid is None:
+                aid = row.get("attribute_id")
+            if aid is None:
+                continue
+            try:
+                aid_int = int(aid)
+            except (TypeError, ValueError):
+                continue
+            if aid_int in seen_aid:
+                continue
+
+            dict_raw = row.get("dictionary_id") if row.get("dictionary_id") is not None else row.get("dictionaryId")
+            try:
+                dict_id_int = int(dict_raw) if dict_raw is not None else 0
+            except (TypeError, ValueError):
+                dict_id_int = 0
+
+            attr_type = str(row.get("type") or row.get("attribute_type") or "").lower()
+            parts = raw if isinstance(raw, list) else [raw]
+            values_out: List[Dict[str, Any]] = []
+
+            for part in parts:
+                if part is None:
+                    continue
+                if isinstance(part, str) and not part.strip():
+                    continue
+
+                if dict_id_int > 0 and cat_key:
+                    ck = str(cat_key)
+                    cache_key = (ck, dict_id_int)
+                    if cache_key not in dict_cache:
+                        dict_cache[cache_key] = await self.get_dictionary(ck, str(dict_id_int))
+                    matched = _ozon_pick_dictionary_match(str(part), dict_cache[cache_key])
+                    if matched:
+                        values_out.append(
+                            {
+                                "dictionary_value_id": matched["dictionary_value_id"],
+                                "value": matched["value"],
+                            }
+                        )
+                    else:
+                        values_out.append({"value": str(part).strip()})
+                elif "bool" in attr_type:
+                    s = str(part).strip().lower()
+                    values_out.append({"value": "true" if s in ("1", "true", "yes", "да", "y") else "false"})
+                else:
+                    values_out.append({"value": str(part).strip()})
+
+            if not values_out:
+                continue
+            seen_aid.add(aid_int)
+            attributes.append({"complex_id": 0, "id": aid_int, "values": values_out})
+
+        item: Dict[str, Any] = {
+            "offer_id": offer_id,
+            "name": name,
+            "currency_code": str(flat.get("currency_code") or "RUB"),
+            "vat": str(flat.get("vat") or flat.get("НДС") or "0.2"),
+            "attributes": attributes,
+        }
+
+        if desc_id is not None and type_id is not None:
+            item["description_category_id"] = desc_id
+            item["type_id"] = type_id
+
+        desc = flat.get("description") or flat.get("Описание") or flat.get("HTML описание")
+        if isinstance(desc, str) and desc.strip():
+            item["description"] = desc.strip()
+
+        imgs = flat.get("Фото") or flat.get("images") or flat.get("Изображения")
+        if isinstance(imgs, str):
+            imgs = [imgs]
+        if isinstance(imgs, list):
+            urls = [str(u).strip() for u in imgs if u is not None and str(u).strip()]
+            if urls:
+                item["images"] = urls
+
+        for pk in ("price", "Цена", "Цена, ₽", "Цена до скидки"):
+            if pk not in flat or flat[pk] in (None, ""):
+                continue
+            item["price"] = str(flat[pk]).replace(",", ".").strip()
+            break
+
+        bc = flat.get("barcode") or flat.get("Баркод") or flat.get("Штрихкод")
+        if bc not in (None, ""):
+            item["barcode"] = str(bc).strip()
+
+        if flat.get("old_price") not in (None, ""):
+            item["old_price"] = str(flat["old_price"]).replace(",", ".").strip()
+
+        for src_key, ozon_key in (("weight", "weight"), ("depth", "depth"), ("width", "width"), ("height", "height")):
+            if src_key in flat and flat[src_key] not in (None, ""):
+                try:
+                    item[ozon_key] = int(float(str(flat[src_key]).replace(",", ".")))
+                except (TypeError, ValueError):
+                    pass
+        if any(k in item for k in ("depth", "width", "height")):
+            item.setdefault("dimension_unit", str(flat.get("dimension_unit") or "mm"))
+        if "weight" in item:
+            item.setdefault("weight_unit", str(flat.get("weight_unit") or "g"))
+
+        item.setdefault("complex_attributes", [])
+        return {"items": [item]}
+
+    async def push_product(self, mapped_payload: Dict[str, Any]) -> Dict[str, Any]:
+        headers = self._ozon_headers()
+        body = await self._build_ozon_v2_import_body(mapped_payload)
+        async with ozon_httpx_client(60.0) as client:
+            res = await client.post(
+                "https://api-seller.ozon.ru/v2/product/import",
+                headers=headers,
+                json=body,
+            )
+        return {"status_code": res.status_code, "response": res.text}
+
+    async def pull_product(self, sku: str) -> Optional[Dict[str, Any]]:
+        headers = self._ozon_headers()
+        if sku.isdigit():
+            payload = {
+                "filter": {
+                    "product_id": [int(sku)],
+                    "visibility": "ALL"
+                },
+                "limit": 1
+            }
+            payload_info = {
+                "product_id": int(sku)
+            }
+        else:
+            payload = {
+                "filter": {
+                    "offer_id": [sku],
+                    "visibility": "ALL"
+                },
+                "limit": 1
+            }
+            payload_info = {
+                "offer_id": sku
+            }
+        payload_list: Dict[str, Any] = {"limit": 1}
+        if sku.isdigit():
+            payload_list["product_id"] = [int(sku)]
+        else:
+            payload_list["offer_id"] = [sku]
+
+        def _safe_json(res: httpx.Response) -> Dict[str, Any]:
+            try:
+                parsed = res.json()
+                return parsed if isinstance(parsed, dict) else {"result": parsed}
+            except Exception:
+                return {"_raw_text": res.text}
+
+        def _attr_values(attr_row: Dict[str, Any]) -> List[str]:
+            vals = attr_row.get("values")
+            out: List[str] = []
+            if isinstance(vals, list):
+                for v in vals:
+                    if not isinstance(v, dict):
+                        s = str(v).strip()
+                        if s:
+                            out.append(s)
+                        continue
+                    cand = v.get("value")
+                    if cand in (None, ""):
+                        cand = v.get("dictionary_value")
+                    if cand in (None, ""):
+                        cand = v.get("value_id")
+                    if cand in (None, ""):
+                        cand = v.get("dictionary_value_id")
+                    s = str(cand).strip() if cand is not None else ""
+                    if s:
+                        out.append(s)
+            return out
+
+        async with ozon_httpx_client(60.0) as client:
+            res_attrs = await client.post("https://api-seller.ozon.ru/v4/product/info/attributes", headers=headers, json=payload)
+            res_list = await client.post("https://api-seller.ozon.ru/v3/product/info/list", headers=headers, json=payload_list)
+
+            raw_attrs = _safe_json(res_attrs)
+            raw_list = _safe_json(res_list)
+
+            attrs_items = raw_attrs.get("result", [])
+            item_attrs = attrs_items[0] if isinstance(attrs_items, list) and attrs_items else {}
+            # v3/product/info/list returns {"items": [...]} directly (no "result" wrapper)
+            list_items_raw = raw_list.get("items") or _ozon_product_info_items(raw_list)
+            item_list = list_items_raw[0] if list_items_raw else {}
+            # Use item_list as info_result (replaces v2/product/info)
+            info_result = item_list if isinstance(item_list, dict) else {}
+
+            merged: Dict[str, Any] = {}
+            if isinstance(item_list, dict):
+                merged.update(item_list)
+            if isinstance(item_attrs, dict):
+                # attributes payload is the most complete source for characteristic fields
+                merged.update(item_attrs)
+            if isinstance(info_result, dict):
+                for k, v in info_result.items():
+                    if k not in merged or merged.get(k) in (None, "", [], {}):
+                        merged[k] = v
+
+            if not merged:
+                return None
+
+            attrs_rows = merged.get("attributes")
+            if not isinstance(attrs_rows, list):
+                attrs_rows = []
+            merged["attributes"] = attrs_rows
+
+            # Keep all Ozon responses for full-source mode (no dropped fields).
+            merged["_ozon_raw"] = {
+                "attrs_status": res_attrs.status_code,
+                "list_status": res_list.status_code,
+                "attrs": raw_attrs,
+                "list": raw_list,
+            }
+
+            source_flat: Dict[str, Any] = {}
+            for k, v in merged.items():
+                if k in {"attributes", "_ozon_raw"}:
+                    continue
+                if v not in (None, ""):
+                    source_flat[str(k)] = v
+            for a in attrs_rows:
+                if not isinstance(a, dict):
+                    continue
+                nm = str(a.get("name") or "").strip()
+                if not nm:
+                    continue
+                vals = _attr_values(a)
+                if not vals:
+                    continue
+                source_flat[nm] = vals if len(vals) > 1 else vals[0]
+
+            # Explicitly expose key commerce fields from v2/product/info.
+            for fk, sk in (
+                ("weight", "Вес упаковки (г)"),
+                ("depth", "Длина упаковки (мм)"),
+                ("width", "Ширина упаковки (мм)"),
+                ("height", "Высота упаковки (мм)"),
+                ("price", "Цена"),
+                ("old_price", "Цена до скидки"),
+                ("barcode", "Штрихкод"),
+            ):
+                fv = info_result.get(fk)
+                if fv not in (None, ""):
+                    source_flat[sk] = fv
+                    source_flat[fk] = fv
+
+            merged["_ozon_source_flat"] = source_flat
+            return merged
+            
+    async def search_categories(self, query: str) -> List[Dict[str, Any]]:
+        headers = {
+            "Client-Id": self.client_id or "",
+            "Api-Key": self.api_key,
+            "Content-Type": "application/json"
+        }
+        async with ozon_httpx_client(60.0) as client:
+            res = await client.post("https://api-seller.ozon.ru/v1/description-category/tree", headers=headers)
+            if res.status_code == 200:
+                tree = res.json().get("result", [])
+                results = []
+                query_lower = query.lower()
+                def traverse(nodes, path):
+                    for node in nodes:
+                        current_path = path + " / " + node.get("category_name", "") if path else node.get("category_name", "")
+                        type_name = node.get("type_name", "")
+                        if query_lower in current_path.lower() or query_lower in type_name.lower():
+                            if "description_category_id" in node and "type_id" in node:
+                                cat_id = f"{node['description_category_id']}_{node['type_id']}"
+                                results.append({"id": cat_id, "name": f"{current_path} -> {type_name}"})
+                        if "children" in node:
+                            traverse(node["children"], current_path)
+                traverse(tree, "")
+                results.sort(key=lambda x: len(x["name"]))
+                return results[:15]
+            return []
+
+    async def get_category_schema(self, category_id: str) -> Dict[str, Any]:
+        headers = {
+            "Client-Id": self.client_id or "",
+            "Api-Key": self.api_key,
+            "Content-Type": "application/json"
+        }
+        parts = category_id.split("_")
+        if len(parts) != 2: return {}
+        payload = {
+            "description_category_id": int(parts[0]),
+            "type_id": int(parts[1]),
+            "language": "DEFAULT"
+        }
+        async with ozon_httpx_client(60.0) as client:
+            res = await client.post("https://api-seller.ozon.ru/v1/description-category/attribute", headers=headers, json=payload)
+            if res.status_code == 200:
+                return {"attributes": res.json().get("result", [])}
+            return {}
+
+    async def get_dictionary(self, category_id: str, dictionary_id: str) -> List[Dict[str, Any]]:
+        parts = category_id.split("_")
+        if len(parts) != 2: return []
+        headers = {
+            "Client-Id": self.client_id or "",
+            "Api-Key": self.api_key,
+            "Content-Type": "application/json"
+        }
+        payload = {
+            "description_category_id": int(parts[0]),
+            "type_id": int(parts[1]),
+            "dictionary_id": int(dictionary_id),
+            "limit": 500
+        }
+        async with ozon_httpx_client(60.0) as client:
+            res = await client.post("https://api-seller.ozon.ru/v1/description-category/attribute/values", headers=headers, json=payload)
+            if res.status_code == 200:
+                return res.json().get("result", [])
+            return []
+
+    async def get_async_errors(self, sku: str) -> Optional[str]:
+        """Ошибки модерации/загрузки по offer_id — Seller API v3 (items внутри result)."""
+        headers = self._ozon_headers()
+        payload = {"offer_id": [str(sku)], "visibility": "ALL"}
+        try:
+            async with ozon_httpx_client(60.0) as client:
+                res = await client.post(
+                    "https://api-seller.ozon.ru/v3/product/info/list",
+                    headers=headers,
+                    json=payload,
+                )
+            if res.status_code != 200:
+                return None
+            data = res.json()
+            items = _ozon_product_info_items(data)
+            if not items:
+                return None
+            first = items[0]
+            errs = first.get("errors")
+            if errs is None:
+                errs = first.get("error")
+            if errs is None:
+                return None
+            if isinstance(errs, str):
+                return errs
+            if isinstance(errs, dict):
+                errs = [errs]
+            if isinstance(errs, list) and len(errs) > 0:
+                return json.dumps(errs, ensure_ascii=False)
+        except Exception as e:
+            _log.debug("Ozon get_async_errors: %s", e)
+        return None
+
+    async def test_connection(self) -> Dict[str, Any]:
+        """Проверяет подключение к Ozon Seller API через дерево категорий."""
+        headers = self._ozon_headers()
+        try:
+            async with ozon_httpx_client(15.0) as client:
+                res = await client.post(
+                    "https://api-seller.ozon.ru/v1/description-category/tree",
+                    headers=headers,
+                    json={},
+                )
+            if res.status_code == 200:
+                data = res.json()
+                cat_count = len((data.get("result") or []))
+                return {"status": "ok", "categories": cat_count}
+            elif res.status_code == 401:
+                raise Exception("Неверный Client-Id или Api-Key")
+            elif res.status_code == 403:
+                raise Exception("Нет прав доступа. Проверьте права ключа в кабинете Ozon.")
+            else:
+                raise Exception(f"Ozon API вернул {res.status_code}: {res.text[:200]}")
+        except Exception:
+            raise
+
+    async def list_products(self, page: int = 1, limit: int = 50, last_id: str = "") -> Dict[str, Any]:
+        headers = self._ozon_headers()
+        page_size = min(limit, 100)
+
+        async with ozon_httpx_client(30.0) as client:
+            res = await client.post(
+                "https://api-seller.ozon.ru/v3/product/list",
+                headers=headers,
+                json={"filter": {"visibility": "ALL"}, "last_id": last_id, "limit": page_size},
+            )
+        if res.status_code != 200:
+            return {"items": [], "total": 0, "has_more": False}
+        data = res.json().get("result", {})
+        chunk = data.get("items", [])
+        total = data.get("total", 0)
+        next_last_id = data.get("last_id", "")
+
+        # Fetch rich info
+        product_ids = [it.get("product_id") for it in chunk if it.get("product_id")]
+        info_by_id: Dict[str, Any] = {}
+        if product_ids:
+            async with ozon_httpx_client(30.0) as client2:
+                res2 = await client2.post(
+                    "https://api-seller.ozon.ru/v3/product/info/list",
+                    headers=headers,
+                    json={"product_id": product_ids},
+                )
+            if res2.status_code == 200:
+                resp2 = res2.json()
+                info_items = resp2.get("items") or (resp2.get("result") or {}).get("items") or []
+                for inf in info_items:
+                    info_by_id[str(inf.get("id") or inf.get("product_id") or "")] = inf
+
+        items = []
+        for it in chunk:
+            pid = str(it.get("product_id") or "")
+            info = info_by_id.get(pid) or {}
+            imgs = info.get("images") or info.get("primary_image") or []
+            img = (imgs[0] if isinstance(imgs, list) and imgs else imgs) or ""
+            attrs = info.get("attributes") or []
+            brand = ""
+            for a in attrs:
+                if str(a.get("attribute_id")) in ("85", "4191", "31") or (a.get("name") or "").lower() in ("бренд", "brand", "торговая марка"):
+                    vals = a.get("values") or []
+                    if vals:
+                        brand = str(vals[0].get("value") or "")
+                        break
+            items.append({
+                "sku": str(it.get("offer_id") or pid),
+                "name": str(info.get("name") or it.get("name") or ""),
+                "brand": brand,
+                "category": str(info.get("category_id") or ""),
+                "image_url": img,
+                "status": "archived" if (info.get("is_archived") or info.get("archived")) else str(info.get("visibility") or "active").lower(),
+                "attributes": attrs,
+                "_raw": info or it,
+            })
+        has_more = bool(next_last_id) and len(chunk) >= page_size
+        return {"items": items, "total": total, "has_more": has_more, "next_last_id": next_last_id if has_more else ""}
+
+    async def push_rich_content(self, offer_id: str, blocks: list) -> dict:
+        """Конвертирует наши rich-блоки в формат Ozon и отправляет через /v2/product/import."""
+        widgets = []
+
+        for b in (blocks or []):
+            t = b.get("type", "")
+
+            if t == "hero":
+                title = b.get("title", "")
+                subtitle = b.get("subtitle", "")
+                badge = b.get("badge", "")
+                text_parts = []
+                if badge:
+                    text_parts.append(badge)
+                if subtitle:
+                    text_parts.append(subtitle)
+                if title:
+                    widgets.append({
+                        "widgetName": "raShowcase",
+                        "type": "chess",
+                        "blocks": [{
+                            "title": {"content": [title], "size": "size4", "align": "left", "color": "color1"},
+                            "text": {"content": text_parts or [""], "size": "size2", "align": "left", "color": "color1"},
+                        }]
+                    })
+
+            elif t == "text":
+                html = b.get("html", "")
+                import re
+                plain = re.sub(r"<[^>]+>", " ", html).strip()
+                plain = re.sub(r"\s+", " ", plain)
+                if plain:
+                    widgets.append({
+                        "widgetName": "raTextBlock",
+                        "text": {"size": "size2", "color": "color1", "content": [plain]}
+                    })
+
+            elif t == "callout":
+                title = b.get("title", "")
+                text = b.get("text", "")
+                parts = []
+                if title:
+                    parts.append(title)
+                if text:
+                    parts.append(text)
+                if parts:
+                    widgets.append({
+                        "widgetName": "raTextBlock",
+                        "text": {"size": "size2", "color": "color1", "content": parts}
+                    })
+
+            elif t == "features":
+                feat_title = b.get("title", "")
+                items = b.get("items", [])
+                blocks_out = []
+                for item in (items or [])[:6]:
+                    item_title = item.get("title", "")
+                    item_desc = item.get("desc", "")
+                    if item_title or item_desc:
+                        blocks_out.append({
+                            "title": {"content": [item_title], "size": "size3", "align": "left", "color": "color1"},
+                            "text": {"content": [item_desc] if item_desc else [""], "size": "size2", "align": "left", "color": "color1"},
+                        })
+                if blocks_out:
+                    if feat_title:
+                        widgets.append({
+                            "widgetName": "raTextBlock",
+                            "text": {"size": "size4", "color": "color1", "content": [feat_title]}
+                        })
+                    widgets.append({
+                        "widgetName": "raShowcase",
+                        "type": "chess",
+                        "blocks": blocks_out[:6]
+                    })
+
+            elif t == "specs":
+                spec_title = b.get("title", "Характеристики")
+                rows = b.get("rows", [])
+                if rows:
+                    lines = [f"{r[0]}: {r[1]}" for r in rows if len(r) >= 2]
+                    if lines:
+                        if spec_title:
+                            widgets.append({
+                                "widgetName": "raTextBlock",
+                                "text": {"size": "size4", "color": "color1", "content": [spec_title]}
+                            })
+                        widgets.append({
+                            "widgetName": "raTextBlock",
+                            "text": {"size": "size2", "color": "color1", "content": lines}
+                        })
+
+        if not widgets:
+            return {"error": "Нет блоков для выгрузки"}
+
+        rich_content = {"content": widgets, "version": 0.3}
+        body = {"items": [{"offer_id": offer_id, "rich_content": rich_content}]}
+        headers = self._ozon_headers()
+        import httpx as _httpx
+        async with _httpx.AsyncClient(timeout=60.0) as client:
+            res = await client.post(
+                "https://api-seller.ozon.ru/v2/product/import",
+                headers=headers,
+                json=body,
+            )
+        try:
+            resp_json = res.json()
+        except Exception:
+            resp_json = {"raw": res.text}
+        return {"status_code": res.status_code, "response": resp_json}
+
+
+class WbAdapter(MarketplaceAdapter):
+    async def test_connection(self) -> Dict[str, Any]:
+        """Проверяет подключение через GET /content/v2/catalog."""
+        headers = {"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"}
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            res = await client.get(
+                "https://content-api.wildberries.ru/content/v2/catalog",
+                headers=headers,
+            )
+        if res.status_code == 200:
+            return {"status": "success", "message": "Wildberries подключён"}
+        return {"status": "error", "message": f"Ошибка подключения: HTTP {res.status_code}"}
+
+    async def push_product(self, mapped_payload: Dict[str, Any]) -> Dict[str, Any]:
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json"
+        }
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            res = await client.post("https://content-api.wildberries.ru/content/v2/cards/upload", headers=headers, json=[mapped_payload])
+            return {"status_code": res.status_code, "response": res.text}
+            
+    async def pull_product(self, sku: str) -> Optional[Dict[str, Any]]:
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json"
+        }
+        payload = {
+            "settings": {"filter": {"vendorCode": sku}, "cursor": {"limit": 1}}
+        }
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            res = await client.post("https://content-api.wildberries.ru/content/v2/get/cards/list", headers=headers, json=payload)
+            if res.status_code == 200:
+                cards = res.json().get("cards", [])
+                return cards[0] if cards else None
+            return None
+
+    async def search_categories(self, query: str) -> List[Dict[str, Any]]:
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json"
+        }
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            res = await client.get(f"https://content-api.wildberries.ru/content/v2/object/all?name={query}&top=15", headers=headers)
+            if res.status_code == 200:
+                data = res.json().get("data", [])
+                return [{"id": str(item["subjectID"]), "name": f"{item.get('parentName', '')} / {item['subjectName']}"} for item in data]
+            return []
+            
+    async def get_category_schema(self, category_id: str) -> Dict[str, Any]:
+        headers = {"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"}
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            res = await client.get(
+                f"https://content-api.wildberries.ru/content/v2/object/charcs/{category_id}",
+                headers=headers,
+            )
+        if res.status_code != 200:
+            return {}
+        raw = res.json().get("data") or []
+        # Нормализуем поля к единому формату
+        attributes = []
+        for ch in raw:
+            if not isinstance(ch, dict):
+                continue
+            attributes.append({
+                "id": ch.get("charcID") or ch.get("id"),
+                "name": ch.get("name", ""),
+                "type": str(ch.get("charcType", "")),
+                "is_required": bool(ch.get("required", False)),
+                "unit": ch.get("unitName"),
+                "maxCount": ch.get("maxCount"),
+                "dictionary_options": None,  # WB не возвращает словарь в этом endpoint
+            })
+        return {"attributes": attributes}
+
+    async def get_dictionary(self, category_id: str, dictionary_id: str) -> List[Dict[str, Any]]:
+        """
+        Справочник значений характеристики предмета (subject).
+        dictionary_id — charcID из ответа GET /content/v2/object/charcs/{subjectId}.
+        """
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+        }
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            res = await client.get(
+                f"https://content-api.wildberries.ru/content/v2/object/charcs/{category_id}",
+                headers=headers,
+            )
+            if res.status_code != 200:
+                return []
+            rows = res.json().get("data") or []
+        want = str(dictionary_id).strip()
+        for ch in rows:
+            if not isinstance(ch, dict):
+                continue
+            cid = str(ch.get("charcID") or ch.get("id") or "")
+            if cid != want:
+                continue
+            out: List[Dict[str, Any]] = []
+            for vv in ch.get("charcValues") or ch.get("values") or []:
+                if isinstance(vv, dict):
+                    vid = vv.get("id")
+                    val = vv.get("value") or vv.get("name") or ""
+                    out.append({"id": "" if vid is None else str(vid), "name": str(val), "value": str(val)})
+                else:
+                    s = str(vv)
+                    out.append({"id": s, "name": s, "value": s})
+            return out
+        return []
+
+    async def list_products(self, page: int = 1, limit: int = 50, cursor: dict = None) -> Dict[str, Any]:
+        headers = {"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"}
+        cursor_payload = {"limit": limit}
+        if cursor:
+            cursor_payload.update(cursor)
+        payload = {"settings": {"cursor": cursor_payload, "sort": {"ascending": False}}}
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            res = await client.post(
+                "https://content-api.wildberries.ru/content/v2/get/cards/list",
+                headers=headers,
+                json=payload,
+            )
+        if res.status_code != 200:
+            return {"items": [], "total": 0, "has_more": False}
+        data = res.json()
+        cards = data.get("cards", [])
+        resp_cursor = data.get("cursor", {})
+        items = []
+        for c in cards:
+            photos = c.get("photos") or []
+            if photos and isinstance(photos[0], dict):
+                img = photos[0].get("big") or photos[0].get("c516x688") or ""
+            else:
+                nm_id = c.get("nmID")
+                img = f"https://basket-01.wbbasket.ru/vol{nm_id // 100000}/part{nm_id // 1000}/{nm_id}/images/big/1.webp" if nm_id else ""
+            attrs = c.get("characteristics") or []
+            items.append({
+                "sku": str(c.get("vendorCode") or ""),
+                "name": str(c.get("title") or ""),
+                "brand": str(c.get("brand") or ""),
+                "category": str(c.get("subjectName") or ""),
+                "image_url": img,
+                "status": "active",
+                "attributes": attrs,
+                "_raw": c,
+            })
+        total = resp_cursor.get("total", len(items))
+        has_more = len(cards) >= limit and bool(resp_cursor.get("updatedAt"))
+        next_cursor = {"updatedAt": resp_cursor["updatedAt"], "nmID": resp_cursor["nmID"]} if has_more and resp_cursor.get("updatedAt") and resp_cursor.get("nmID") else None
+        return {"items": items, "total": total, "has_more": has_more, "next_cursor": next_cursor}
+
+    async def get_async_errors(self, sku: str) -> Optional[str]:
+        return None
+
+
+# Док.: https://yandex.ru/dev/market/partner-api/doc/ru/
+YANDEX_PARTNER_API_BASE = "https://api.partner.market.yandex.ru/v2"
+
+
+class YandexAdapter(MarketplaceAdapter):
+    """
+    Яндекс Маркет Partner API v2.
+    Подключение: api_key = Api-Key токен (рекомендуется) или OAuth-токен;
+    client_id = oauth_client_id только для OAuth;
+    store_id = businessId (идентификатор кабинета, целое число), см. GET /v2/campaigns.
+    """
+
+    def _headers(self) -> Dict[str, str]:
+        h: Dict[str, str] = {"Content-Type": "application/json"}
+        if self.client_id:
+            h["Authorization"] = f"OAuth oauth_token={self.api_key}, oauth_client_id={self.client_id}"
+        else:
+            h["Api-Key"] = self.api_key
+        return h
+
+    def _business_id(self) -> Optional[int]:
+        if not self.store_id or not str(self.store_id).strip():
+            return None
+        try:
+            return int(str(self.store_id).strip())
+        except ValueError:
+            return None
+
+    async def test_connection(self) -> Dict[str, Any]:
+        """Проверяет подключение через GET /v2/campaigns."""
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            res = await client.get(
+                f"{YANDEX_PARTNER_API_BASE}/campaigns",
+                headers=self._headers(),
+                params={"limit": 1},
+            )
+        if res.status_code == 200:
+            js = res.json()
+            if js.get("status") == "OK":
+                campaigns = (js.get("result") or {}).get("campaigns") or []
+                name = campaigns[0].get("domain", "Яндекс.Маркет") if campaigns else "Яндекс.Маркет"
+                return {"status": "success", "message": f"Подключено: {name}"}
+        return {"status": "error", "message": f"Ошибка подключения: HTTP {res.status_code}"}
+
+    async def push_product(self, mapped_payload: Dict[str, Any]) -> Dict[str, Any]:
+        bid = self._business_id()
+        if bid is None:
+            return {
+                "status_code": 400,
+                "response": "Яндекс Маркет: укажите store_id подключения = businessId кабинета (целое число).",
+            }
+        url = f"{YANDEX_PARTNER_API_BASE}/businesses/{bid}/offer-mappings/update"
+        async with httpx.AsyncClient(timeout=120.0) as client:
+            res = await client.post(url, headers=self._headers(), json=mapped_payload)
+            return {"status_code": res.status_code, "response": res.text}
+
+    async def pull_product(self, sku: str) -> Optional[Dict[str, Any]]:
+        bid = self._business_id()
+        if bid is None:
+            return None
+        body = {"offerIds": [str(sku).strip()]}
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            res = await client.post(
+                f"{YANDEX_PARTNER_API_BASE}/businesses/{bid}/offer-mappings",
+                headers=self._headers(),
+                params={"language": "RU"},
+                json=body,
+            )
+        if res.status_code != 200:
+            return None
+        js = res.json()
+        if js.get("status") != "OK":
+            return None
+        mappings = (js.get("result") or {}).get("offerMappings") or []
+        if not mappings:
+            return None
+        row = mappings[0]
+        if isinstance(row, dict):
+            offer = row.get("offer") or {}
+            mapping = row.get("mapping") or {}
+            return {
+                "source": "yandex_market",
+                "offer": offer,
+                "mapping": mapping,
+                "offerId": offer.get("offerId"),
+                "name": offer.get("name"),
+                "vendorCode": offer.get("vendorCode"),
+                "description": offer.get("description"),
+                "params": offer.get("params"),
+            }
+        return None
+
+    def _walk_category_tree(self, node: Any, path: List[str], q: str, out: List[Dict[str, Any]], limit: int) -> None:
+        if len(out) >= limit or not isinstance(node, dict):
+            return
+        name = (node.get("name") or "").strip()
+        cid = node.get("id")
+        branch = path + ([name] if name else [])
+        children = node.get("children")
+        if children is None:
+            children = []
+        if not children:
+            if cid is not None:
+                full = " / ".join(branch) if branch else str(name)
+                if q in full.lower():
+                    out.append({"id": str(int(cid)), "name": full})
+            return
+        for ch in children:
+            if ch is not None:
+                self._walk_category_tree(ch, branch, q, out, limit)
+
+    async def search_categories(self, query: str) -> List[Dict[str, Any]]:
+        q = (query or "").strip().lower()
+        if not q:
+            return []
+        async with httpx.AsyncClient(timeout=120.0) as client:
+            res = await client.post(
+                f"{YANDEX_PARTNER_API_BASE}/categories/tree",
+                headers=self._headers(),
+                json={"language": "RU"},
+            )
+        if res.status_code != 200:
+            return []
+        js = res.json()
+        if js.get("status") != "OK":
+            return []
+        root = js.get("result")
+        if not isinstance(root, dict):
+            return []
+        out: List[Dict[str, Any]] = []
+        self._walk_category_tree(root, [], q, out, 20)
+        out.sort(key=lambda x: len(x["name"]))
+        return out[:15]
+
+    async def get_category_schema(self, category_id: str) -> Dict[str, Any]:
+        """POST /v2/category/{categoryId}/parameters — характеристики листовой категории."""
+        try:
+            cid = int(str(category_id).strip())
+        except ValueError:
+            return {}
+        params_q: Dict[str, Any] = {}
+        bid = self._business_id()
+        if bid is not None:
+            params_q["businessId"] = bid
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            res = await client.post(
+                f"{YANDEX_PARTNER_API_BASE}/category/{cid}/parameters",
+                headers=self._headers(),
+                params=params_q,
+                json={},
+            )
+        if res.status_code != 200:
+            return {}
+        js = res.json()
+        if js.get("status") != "OK":
+            return {}
+        result = js.get("result") or {}
+        raw_params = result.get("parameters") or []
+        attributes: List[Dict[str, Any]] = []
+        for p in raw_params:
+            if not isinstance(p, dict):
+                continue
+            opts: List[Dict[str, Any]] = []
+            for v in p.get("values") or []:
+                if isinstance(v, dict) and v.get("value") is not None:
+                    opts.append(
+                        {
+                            "id": v.get("id"),
+                            "name": str(v.get("value")),
+                            "dictionary_value_id": v.get("id"),
+                        }
+                    )
+            attributes.append(
+                {
+                    "id": p.get("id"),
+                    "name": p.get("name"),
+                    "type": p.get("type"),
+                    "is_required": bool(p.get("required")),
+                    "description": p.get("description"),
+                    "multivalue": p.get("multivalue"),
+                    "allowCustomValues": p.get("allowCustomValues"),
+                    "dictionary_options": opts if opts else None,
+                }
+            )
+        return {"attributes": attributes, "categoryId": result.get("categoryId"), "source": "yandex_market"}
+
+    async def get_dictionary(self, category_id: str, dictionary_id: str) -> List[Dict[str, Any]]:
+        """Значения enum-параметра: повторно запрашиваем параметры категории и вырезаем по id параметра."""
+        schema = await self.get_category_schema(category_id)
+        want = str(dictionary_id).strip()
+        for a in schema.get("attributes") or []:
+            if str(a.get("id")) == want:
+                opts = a.get("dictionary_options") or []
+                return [{"id": str(o.get("id", "")), "value": o.get("name", "")} for o in opts if isinstance(o, dict)]
+        return []
+
+    async def get_async_errors(self, sku: str) -> Optional[str]:
+        pulled = await self.pull_product(sku)
+        if not pulled:
+            return None
+        offer = pulled.get("offer") or {}
+        st = offer.get("cardStatus")
+        if st == "HAS_CARD_CAN_UPDATE_ERRORS":
+            return json.dumps({"cardStatus": st, "offerId": offer.get("offerId")}, ensure_ascii=False)
+        return None
+
+    async def _get_business_id(self) -> Optional[int]:
+        """Returns businessId: from store_id or auto-fetched via /campaigns."""
+        bid = self._business_id()
+        if bid is not None:
+            return bid
+        # Auto-fetch first businessId via campaigns
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            res = await client.get(
+                f"{YANDEX_PARTNER_API_BASE}/campaigns",
+                headers=self._headers(),
+                params={"limit": 5},
+            )
+        if res.status_code != 200:
+            return None
+        js = res.json()
+        # API v2 returns {"campaigns": [...]} directly (no status wrapper)
+        campaigns = js.get("campaigns") or (js.get("result") or {}).get("campaigns") or []
+        if not campaigns:
+            return None
+        # businessId is on campaign.business.id
+        biz = campaigns[0].get("business") or {}
+        bid_val = biz.get("id")
+        if bid_val:
+            return int(bid_val)
+        return None
+
+    async def list_products(self, page: int = 1, limit: int = 50, page_token: str = None) -> Dict[str, Any]:
+        bid = await self._get_business_id()
+        if bid is None:
+            return {"items": [], "total": 0, "has_more": False, "next_page_token": None}
+        params: Dict[str, Any] = {"language": "RU", "limit": limit}
+        if page_token:
+            params["page_token"] = page_token
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            res = await client.post(
+                f"{YANDEX_PARTNER_API_BASE}/businesses/{bid}/offer-mappings",
+                headers=self._headers(),
+                params=params,
+                json={},
+            )
+        if res.status_code != 200:
+            return {"items": [], "total": 0, "has_more": False, "next_page_token": None}
+        js = res.json()
+        if js.get("status") != "OK":
+            return {"items": [], "total": 0, "has_more": False, "next_page_token": None}
+        result = js.get("result") or {}
+        mappings = result.get("offerMappings") or []
+        next_token = result.get("paging", {}).get("nextPageToken")
+        items = []
+        for row in mappings:
+            offer = row.get("offer") or {}
+            pics = offer.get("pictures") or []
+            mapping_info = row.get("mapping") or {}
+            items.append({
+                "sku": str(offer.get("offerId") or ""),
+                "name": str(offer.get("name") or ""),
+                "brand": str(offer.get("vendor") or ""),
+                "category": str(mapping_info.get("marketCategoryName") or offer.get("category") or ""),
+                "image_url": pics[0] if pics else "",
+                "status": str(offer.get("cardStatus") or "active").lower(),
+                "attributes": offer,
+                "_raw": offer,
+            })
+        return {"items": items, "total": len(items), "has_more": bool(next_token), "next_page_token": next_token}
+
+class MegamarketAdapter(MarketplaceAdapter):
+    @staticmethod
+    def _norm_attr_name(name: str) -> str:
+        text = str(name or "").strip().lower().replace("ё", "е")
+        text = re.sub(r"[^0-9a-zа-я]+", " ", text)
+        return re.sub(r"\s+", " ", text).strip()
+
+    async def search_categories(self, query: str) -> List[Dict[str, Any]]:
+        headers = megamarket_request_headers(self.api_key, for_post=False)
+        async with megamarket_httpx_client(60.0) as client:
+            try:
+                res = await client.get("https://partner.megamarket.ru/api/merchantIntegration/assortment/v1/categoryTree/get", headers=headers)
+                _log.debug("MM CAT SEARCH: %s", res.status_code)
+                if res.status_code == 200:
+                    tree = res.json().get("data", [])
+                    results = []
+                    query_lower = query.lower()
+                    def traverse(nodes, parent_path):
+                        for node in nodes:
+                            path = f"{parent_path} -> {node.get('name', '')}" if parent_path else node.get('name', '')
+                            # Документация MM: только категория 6-го уровня. Если в ответе есть level — фильтруем.
+                            if not node.get("children"):
+                                lvl = node.get("level")
+                                skip_leaf = False
+                                if lvl is not None:
+                                    try:
+                                        skip_leaf = int(lvl) != 6
+                                    except (TypeError, ValueError):
+                                        skip_leaf = False
+                                if not skip_leaf:
+                                    path_lower = path.lower()
+                                    if query_lower in path_lower:
+                                        results.append({"id": str(node["id"]), "name": path})
+                                    else:
+                                        words = [w[:-1] if len(w) > 4 else w for w in query_lower.split() if len(w) >= 3]
+                                        if words and any(w in path_lower for w in words):
+                                            results.append({"id": str(node["id"]), "name": path})
+                            if "children" in node:
+                                traverse(node["children"], path)
+                    traverse(tree, "")
+                    results.sort(key=lambda x: len(x["name"]))
+                    return results[:20]
+            except Exception as e:
+                _log.warning("MM CAT SEARCH ERROR: %s", e)
+        return []
+
+    async def get_category_schema(self, category_id: str) -> Dict[str, Any]:
+        headers = megamarket_request_headers(self.api_key, for_post=True)
+        async with megamarket_httpx_client(60.0) as client:
+            try:
+                res = await client.post("https://partner.megamarket.ru/api/merchantIntegration/assortment/v1/infomodel/get", headers=headers, json={"data": {"categoryId": int(category_id)}})
+                if res.status_code == 200:
+                    data = res.json().get("data", {})
+                    attrs = data.get("masterAttributes", []) + data.get("contentAttributes", [])
+                    cleaned = []
+                    for a in attrs:
+                        dvals = a.get("dictionaryValues") or a.get("dictionaryList") or []
+                        sample = []
+                        for dv in dvals: # No limits, AI must see EVERYTHING
+                            if isinstance(dv, dict):
+                                sample.append({"id": dv.get("id"), "name": dv.get("name")})
+                            else:
+                                sample.append(dv)
+                        cleaned.append({
+                            "id": str(a.get("attributeId", "")),
+                            "name": a.get("attributeName", ""),
+                            "is_required": a.get("isRequired", False),
+                            "type": a.get("attributeType", ""),
+                            "valueTypeCode": a.get("valueTypeCode", ""),
+                            "isSuggest": a.get("isSuggest"),
+                            "is_multiple": a.get("isMultiple", False),
+                            "dictionary_options": sample
+                        })
+                    return {"attributes": cleaned}
+            except Exception as e:
+                _log.warning("megamarket infomodel get failed: %s", e)
+        return {}
+
+    async def get_dictionary(self, category_id: str, dictionary_id: str) -> List[Dict[str, Any]]:
+        """Справочник значений атрибута из инфомодели (док. MM: enum из infomodel/get)."""
+        schema = await self.get_category_schema(category_id)
+        for a in schema.get("attributes", []):
+            if str(a.get("id", "")) != str(dictionary_id):
+                continue
+            out: List[Dict[str, Any]] = []
+            for opt in a.get("dictionary_options") or []:
+                if isinstance(opt, dict):
+                    oid = opt.get("id")
+                    name = opt.get("name")
+                    out.append(
+                        {
+                            "id": "" if oid is None else str(oid),
+                            "value": "" if name is None else str(name),
+                        }
+                    )
+                else:
+                    s = str(opt)
+                    out.append({"id": s, "value": s})
+            return out
+        return []
+
+    @staticmethod
+    def _mm_sanitize_barcode(barcode: str) -> str:
+        """Док. MM: штрихкод только из цифр."""
+        return "".join(c for c in str(barcode) if c.isdigit())
+
+    def _mm_normalize_enum_attribute_values(self, sch: dict, val: Any) -> List[str]:
+        """
+        Строгое правило: для enum используем только значения из dictionary_options
+        конкретного атрибута.
+        Допускается контролируемое семантическое сопоставление (синонимы/нормализация форм),
+        но результат всегда выбирается только из dictionary_options.
+        Свободные пользовательские значения для enum запрещены.
+        """
+        opts = sch.get("dictionary_options") or []
+        if not opts:
+            return []
+        raw_list = [str(val).strip()] if not isinstance(val, list) else [str(v).strip() for v in val if v is not None and str(v).strip()]
+        raw_list = [x for x in raw_list if x and x.lower() not in ("нет данных", "-", "null", "none")]
+
+        phrase_alias = {
+            "рф": "россия",
+            "российская федерация": "россия",
+            "кнр": "китай",
+            "china": "китай",
+            "открытие налево": "влево",
+            "открытие направо": "вправо",
+        }
+        token_alias = {
+            "белая": "белый",
+            "черная": "черный",
+            "красная": "красный",
+            "серая": "серый",
+            "синяя": "синий",
+            "зеленая": "зеленый",
+            "сенсор": "сенсорное",
+            "сенсорная": "сенсорное",
+            "сенсорный": "сенсорное",
+            "налево": "влево",
+            "направо": "вправо",
+            "китайская": "китай",
+            "китайский": "китай",
+            "российский": "россия",
+            "российская": "россия",
+        }
+
+        def _canonical(s: str) -> str:
+            n = self._norm_attr_name(s)
+            if not n:
+                return ""
+            if n in phrase_alias:
+                n = phrase_alias[n]
+            toks = [token_alias.get(t, t) for t in n.split()]
+            return " ".join(toks).strip()
+
+        out: List[str] = []
+        for rv in raw_list:
+            matched: Optional[str] = None
+            rv_c = _canonical(rv)
+            for o in opts:
+                if isinstance(o, dict):
+                    oid = o.get("id")
+                    oname = str(o.get("name", "")).strip()
+                    if oid is not None and str(oid) == rv:
+                        matched = oname or str(oid)
+                        break
+                    if oname and oname.lower() == rv.lower():
+                        matched = oname
+                        break
+                    if oname:
+                        on_c = _canonical(oname)
+                        if rv_c and on_c:
+                            if rv_c == on_c:
+                                matched = oname
+                                break
+                elif str(o) == rv:
+                    matched = rv
+                    break
+                else:
+                    oname = str(o).strip()
+                    on_c = _canonical(oname)
+                    if rv_c and on_c and rv_c == on_c:
+                        matched = oname
+                        break
+            if matched is not None:
+                out.append(matched)
+        return out
+
+    async def update_price_by_offer_id(self, location_id: str, offer_id: str, price_rubles: float) -> Dict[str, Any]:
+        """POST .../assortment/v1/price/updateByOfferId (цена в рублях → копейки в теле)."""
+        kop = max(0, int(round(float(price_rubles) * 100)))
+        headers = megamarket_request_headers(self.api_key, for_post=True)
+        payload = {"data": {"locationId": str(location_id), "items": [{"offerId": str(offer_id)[:35], "price": kop}]}}
+        async with megamarket_httpx_client(60.0) as client:
+            res = await client.post(
+                "https://partner.megamarket.ru/api/merchantIntegration/assortment/v1/price/updateByOfferId",
+                headers=headers,
+                json=payload,
+            )
+            return {"status_code": res.status_code, "response": res.text}
+
+    async def update_stock_by_offer_id(self, location_id: str, offer_id: str, quantity: int) -> Dict[str, Any]:
+        """POST .../assortment/v1/stock/updateByOfferId"""
+        headers = megamarket_request_headers(self.api_key, for_post=True)
+        payload = {
+            "data": {
+                "locationId": str(location_id),
+                "items": [{"offerId": str(offer_id)[:35], "quantity": max(0, int(quantity))}],
+            }
+        }
+        async with megamarket_httpx_client(60.0) as client:
+            res = await client.post(
+                "https://partner.megamarket.ru/api/merchantIntegration/assortment/v1/stock/updateByOfferId",
+                headers=headers,
+                json=payload,
+            )
+            return {"status_code": res.status_code, "response": res.text}
+
+    async def _mm_fetch_existing_attr_map(self, offer_id: str) -> Dict[int, List[str]]:
+        """
+        По документации MM при обновлении нужно передавать ранее заполненные атрибуты.
+        Берём текущие attributes через card/getAttributes и подмешиваем отсутствующие в новый payload.
+        """
+        out: Dict[int, List[str]] = {}
+        headers = megamarket_request_headers(self.api_key, for_post=True)
+        payload = {
+            "filter": {"offerId": [str(offer_id)]},
+            "sorting": {"fieldName": "goodsId", "order": "asc"},
+            "targetFields": "all",
+        }
+        try:
+            async with megamarket_httpx_client(30.0) as client:
+                res = await client.post(
+                    "https://partner.megamarket.ru/api/merchantIntegration/assortment/v1/card/getAttributes",
+                    headers=headers,
+                    json=payload,
+                )
+            if res.status_code != 200:
+                return out
+            cards = (res.json().get("data", {}) or {}).get("cards", []) or []
+            if not cards or not isinstance(cards[0], dict):
+                return out
+            card0 = cards[0]
+            buckets: List[Any] = []
+            for key in ("masterAttributes", "contentAttributes", "attributes"):
+                val = card0.get(key)
+                if isinstance(val, list):
+                    buckets.extend(val)
+            for row in buckets:
+                if not isinstance(row, dict):
+                    continue
+                aid = row.get("attributeId")
+                try:
+                    aid_int = int(aid)
+                except (TypeError, ValueError):
+                    continue
+                vals_raw = row.get("values") or []
+                vals: List[str] = []
+                for v in vals_raw:
+                    if v is None:
+                        continue
+                    if isinstance(v, dict):
+                        vv = v.get("value")
+                        if vv is not None and str(vv).strip():
+                            vals.append(str(vv).strip())
+                    else:
+                        if str(v).strip():
+                            vals.append(str(v).strip())
+                if vals:
+                    out[aid_int] = vals
+        except Exception as e:
+            _log.debug("MM existing attrs fetch failed: %s", e)
+        return out
+
+    async def push_product(self, mapped_payload: Dict[str, Any]) -> Dict[str, Any]:
+        headers = megamarket_request_headers(self.api_key, for_post=True)
+        
+        cat_id = 0
+        if "categoryId" in mapped_payload:
+            val = mapped_payload.pop("categoryId")
+            if val: cat_id = int(val)
+            
+        if not cat_id:
+            return {"status_code": 400, "response": "Ошибка: Не удалось определить категорию товара в Мегамаркете. Убедитесь, что ИИ подобрал верную категорию, либо укажите её явно."}
+            
+        if "Код товара продавца" in mapped_payload:
+            offer_id_source = mapped_payload["Код товара продавца"]
+        elif "offerId" in mapped_payload:
+            offer_id_source = mapped_payload["offerId"]
+        elif "offer_id" in mapped_payload:
+            offer_id_source = mapped_payload["offer_id"]
+        elif "sku" in mapped_payload:
+            offer_id_source = mapped_payload["sku"]
+        else:
+            offer_id_source = mapped_payload.get("product_id", "fallback-12345")
+        offer_id_str = str(offer_id_source)[:35]
+
+        schema_data = await self.get_category_schema(str(cat_id))
+        schema_items = schema_data.get("attributes", [])
+        schema_dict = {a["name"]: a for a in schema_items}
+        schema_dict_norm = {self._norm_attr_name(a.get("name")): a for a in schema_items if a.get("name")}
+        schema_by_id = {}
+        for a in schema_items:
+            if not isinstance(a, dict):
+                continue
+            aid = a.get("id")
+            try:
+                aid_int = int(str(aid))
+            except Exception:
+                continue
+            schema_by_id[aid_int] = a
+
+        # Universal rule-engine: fill attrs by infomodel + generic matching.
+        # Strict source mode: only values derived from source payload/title facts (no invented placeholders).
+        title_blob = " ".join(
+            [
+                str(mapped_payload.get("full_name", "") or ""),
+                str(mapped_payload.get("name", "") or ""),
+                str(mapped_payload.get("Наименование карточки", "") or ""),
+            ]
+        )
+        title_norm = self._norm_attr_name(title_blob)
+        extracted_facts: Dict[str, Any] = {}
+        m_power = re.search(r"(\d{2,5})\s*вт", title_norm)
+        if m_power:
+            try:
+                extracted_facts["power_w"] = int(m_power.group(1))
+            except Exception:
+                pass
+        m_vol = re.search(r"(\d{1,3}(?:[.,]\d+)?)\s*л", title_norm)
+        if m_vol:
+            try:
+                extracted_facts["volume_l"] = float(m_vol.group(1).replace(",", "."))
+            except Exception:
+                pass
+        # Brand extraction from title: source-derived fallback when explicit brand key is absent.
+        title_tokens_raw = re.findall(r"[A-Za-zА-Яа-я0-9][A-Za-zА-Яа-я0-9\\-]{1,24}", title_blob)
+        stop_tokens = {
+            "микроволновая", "печь", "свч", "neochef", "вт", "л", "белая", "белый", "черная",
+            "черный", "серый", "соло", "встраиваемая", "отдельностоящая",
+        }
+        for tok in title_tokens_raw:
+            t = tok.strip()
+            if len(t) < 2:
+                continue
+            tn = self._norm_attr_name(t)
+            if not tn or tn in stop_tokens:
+                continue
+            # likely brand token: uppercase short token (LG, BOSCH, etc.)
+            if t.isupper() and any(c.isalpha() for c in t):
+                extracted_facts["brand"] = t
+                break
+        if "соло" in title_norm:
+            extracted_facts["type"] = "соло"
+        elif "встраиваем" in title_norm:
+            extracted_facts["type"] = "встраиваемая"
+        for clr in ("белый", "черный", "серый", "красный", "синий", "зеленый", "желтый", "розовый", "коричневый"):
+            if clr in title_norm:
+                extracted_facts["color"] = clr
+                break
+
+        def _is_empty(v: Any) -> bool:
+            return v is None or (isinstance(v, str) and not v.strip())
+
+        def _get_src(*keys: str) -> Any:
+            for kk in keys:
+                if kk in mapped_payload and not _is_empty(mapped_payload.get(kk)):
+                    return mapped_payload.get(kk)
+            for kk in keys:
+                if kk in extracted_facts and not _is_empty(extracted_facts.get(kk)):
+                    return extracted_facts.get(kk)
+            return None
+
+        def _to_float(v: Any) -> Optional[float]:
+            if v is None:
+                return None
+            try:
+                return float(str(v).replace(",", ".").strip())
+            except Exception:
+                return None
+
+        def _mm_to_cm(v: Any) -> Optional[str]:
+            f = _to_float(v)
+            if f is None:
+                return None
+            # If value looks like mm, convert to cm.
+            if f > 120:
+                f = f / 10.0
+            return f"{f:g}"
+
+        def _tokens(s: str) -> set[str]:
+            return set(self._norm_attr_name(s).split())
+
+        def _best_payload_value_for_attr(attr_name: str) -> tuple[Any, float, str]:
+            attr_norm = self._norm_attr_name(attr_name)
+            attr_tokens = _tokens(attr_name)
+            best_score = 0.0
+            best_val: Any = None
+            best_key = ""
+            for k, v in mapped_payload.items():
+                if _is_empty(v):
+                    continue
+                k_norm = self._norm_attr_name(k)
+                if not k_norm:
+                    continue
+                seq = SequenceMatcher(None, attr_norm, k_norm).ratio()
+                k_tokens = _tokens(k_norm)
+                tok = (len(attr_tokens & k_tokens) / max(len(attr_tokens), len(k_tokens))) if attr_tokens and k_tokens else 0.0
+                score = seq * 0.65 + tok * 0.35
+                if score > best_score:
+                    best_score = score
+                    best_val = v
+                    best_key = k
+            return best_val, best_score, best_key
+
+        def _to_number(v: Any) -> Optional[float]:
+            if v is None:
+                return None
+            if isinstance(v, (int, float)):
+                return float(v)
+            txt = str(v).replace(",", ".")
+            m = re.search(r"-?\d+(?:\.\d+)?", txt)
+            if not m:
+                return None
+            try:
+                return float(m.group(0))
+            except Exception:
+                return None
+
+        def _pick_by_keywords(keywords: List[str], fallback_keys: List[str]) -> Any:
+            # 1) try mapped payload by keyword coverage
+            best = None
+            best_score = 0.0
+            kw = set(keywords)
+            for k, v in mapped_payload.items():
+                if _is_empty(v):
+                    continue
+                toks = _tokens(str(k))
+                if not toks:
+                    continue
+                score = len(kw & toks)
+                if score > best_score:
+                    best_score = score
+                    best = v
+            if best is not None and best_score > 0:
+                return best
+            # 2) fallback explicit aliases
+            return _get_src(*fallback_keys)
+
+        def _string_source_values() -> List[str]:
+            vals: List[str] = []
+            for v in mapped_payload.values():
+                if v is None:
+                    continue
+                if isinstance(v, list):
+                    for x in v:
+                        s = str(x).strip()
+                        if s:
+                            vals.append(s)
+                elif isinstance(v, (str, int, float, bool)):
+                    s = str(v).strip()
+                    if s:
+                        vals.append(s)
+            return vals
+
+        def _best_dictionary_value_from_all_sources(sch: dict) -> Optional[str]:
+            opts = sch.get("dictionary_options") or []
+            if not opts:
+                return None
+            src_vals = _string_source_values()
+            if not src_vals:
+                return None
+            best_score = 0.0
+            best_name: Optional[str] = None
+            for o in opts:
+                if isinstance(o, dict):
+                    oname = str(o.get("name") or "").strip()
+                else:
+                    oname = str(o).strip()
+                if not oname:
+                    continue
+                onorm = self._norm_attr_name(oname)
+                for sv in src_vals:
+                    snorm = self._norm_attr_name(sv)
+                    if not snorm:
+                        continue
+                    sc = SequenceMatcher(None, snorm, onorm).ratio()
+                    if snorm in onorm or onorm in snorm:
+                        sc = max(sc, 0.80)
+                    if sc > best_score:
+                        best_score = sc
+                        best_name = oname
+            return best_name if best_score >= 0.66 else None
+
+        # Universal fill by infomodel:
+        # - strict verified-only: no fabricated placeholders/default literals
+        # - optional attrs: fill only with high-confidence match to avoid noise
+        for sch in schema_items:
+            if not isinstance(sch, dict):
+                continue
+            attr_name = str(sch.get("name") or "").strip()
+            if not attr_name or not _is_empty(mapped_payload.get(attr_name)):
+                continue
+            is_required = bool(sch.get("is_required"))
+            vt = str(sch.get("valueTypeCode") or "").lower()
+            candidate, candidate_score, candidate_key = _best_payload_value_for_attr(attr_name)
+            # Universal confidence gating by value type.
+            optional_threshold = 0.56
+            if vt == "enum":
+                optional_threshold = 0.36
+            elif vt in {"boolean", "bool"}:
+                optional_threshold = 0.46
+            elif vt in {"float", "double", "decimal", "number", "int", "integer", "long"}:
+                optional_threshold = 0.48
+            if not is_required and candidate_score < optional_threshold:
+                candidate = None
+            attr_norm = self._norm_attr_name(attr_name)
+            cand_key_norm = self._norm_attr_name(candidate_key)
+            # Prevent semantically-wrong fuzzy matches for sensitive fields.
+            if "модел" in attr_norm:
+                cand_model = _get_src("model", "model_number", "model_code", "model_full", "Наименование модели", "Модель")
+                if cand_model is not None:
+                    candidate = cand_model
+            if "направлен" in attr_norm and "двер" in attr_norm:
+                cand_dir = _get_src("door_opening_direction", "Направление открывания дверцы")
+                if cand_dir is not None:
+                    candidate = cand_dir
+            if "грил" in attr_norm and candidate is not None and "грил" not in cand_key_norm:
+                candidate = None
+            if "конвекц" in attr_norm and candidate is not None and "конвекц" not in cand_key_norm:
+                candidate = None
+
+            def _semantic_fallback_for_attr() -> Any:
+                # Cross-schema aliases to preserve richer PIM data beyond required minimum.
+                if "комплект поставки" in attr_norm:
+                    return _get_src("package_contents", "equipment", "included_accessories", "Комплект поставки")
+                if "наименование модели" in attr_norm or "модел" in attr_norm:
+                    return _get_src("model", "model_number", "model_code", "model_full", "Наименование модели")
+                if "код производителя" in attr_norm:
+                    # Никогда не подставляем seller SKU как код производителя.
+                    return _get_src("manufacturer_code", "model_number", "Артикул производителя")
+                if "страна производ" in attr_norm:
+                    return _get_src("country_of_origin", "Страна-производитель", "country")
+                if "код тн вэд" in attr_norm or "тн вэд" in attr_norm:
+                    return _get_src("hs_code", "Код ТН ВЭД")
+                if "описание товара" in attr_norm or attr_norm == "описание":
+                    return _get_src("description", "Описание", "full_name", "name")
+                if "материал корпуса" in attr_norm:
+                    return _get_src("body_material", "case_material", "material", "Материал корпуса")
+                if "внутрен" in attr_norm and "покрыт" in attr_norm:
+                    return _get_src("internal_coating_material", "internal_coating", "Внутреннее покрытие камеры")
+                if "диаметр" in attr_norm and "поворот" in attr_norm:
+                    return _get_src("turntable_diameter_cm", "Диаметр поворотного стола, см")
+                if "цвет" in attr_norm:
+                    return _get_src("color", "Цвет")
+                if "тип" in attr_norm:
+                    return _get_src("type", "microwave_type", "installation_type", "Тип")
+                if "вид" in attr_norm:
+                    return _get_src("installation_type", "type", "Вид")
+                if "дисплей" in attr_norm:
+                    return _get_src("display", "features")
+                if "артикул производ" in attr_norm:
+                    return _get_src("model_number", "model_info", "manufacturer_code", "Артикул производителя")
+                if "направлен" in attr_norm and "двер" in attr_norm:
+                    return _get_src("door_opening_direction", "Направление открывания дверцы", "door_opening")
+                if "тип гриля" in attr_norm:
+                    return _get_src("grill_type", "Тип гриля")
+                if "мощност" in attr_norm and "вт" in attr_norm:
+                    return _get_src("power_w", "microwave_power_w", "total_power_w", "power_consumption_w", "power")
+                if "объем" in attr_norm and ("л" in attr_norm or "лит" in attr_norm):
+                    return _get_src("volume_l", "volume_liters", "internal_volume_l")
+                return None
+
+            # --- Числовые семантические алиасы (работает для float/integer/number) ---
+            if candidate is None and "мощност" in attr_norm:
+                if "микроволн" in attr_norm or "свч" in attr_norm:
+                    candidate = _to_number(_get_src("microwave_power_w", "power_w", "power"))
+                elif "грил" in attr_norm:
+                    candidate = _to_number(_get_src("grill_power_w", "grill_power"))
+                elif "конвекц" in attr_norm:
+                    candidate = _to_number(_get_src("convection_power_w", "convection_power"))
+                else:
+                    candidate = _to_number(_get_src("microwave_power_w", "total_power_w", "power_w", "power"))
+            if candidate is None and "объем" in attr_norm and ("л" in attr_norm or "лит" in attr_norm):
+                candidate = _to_number(_get_src("volume_liters", "volume_l", "internal_volume_l", "volume"))
+            if candidate is None and "диаметр" in attr_norm and "поворот" in attr_norm:
+                candidate = _to_number(_get_src("turntable_diameter_cm", "turntable_diameter"))
+            if candidate is None and "температур" in attr_norm:
+                candidate = _to_number(_get_src("temperature", "max_temperature", "min_temperature"))
+
+            # --- Размеры: ставим ПРАВИЛЬНОЕ измерение по имени атрибута ---
+            if candidate is None and ("высота" in attr_norm or "ширина" in attr_norm or "глубина" in attr_norm or "длина" in attr_norm):
+                if "высот" in attr_norm:
+                    raw = _get_src("height_mm", "height")
+                elif "ширин" in attr_norm:
+                    raw = _get_src("width_mm", "width")
+                elif "глубин" in attr_norm or "длин" in attr_norm:
+                    raw = _get_src("depth_mm", "depth", "length")
+                else:
+                    raw = None
+                if raw is not None:
+                    # Если значение в мм (> 50) и атрибут ожидает см — конвертируем
+                    num_raw = _to_number(raw)
+                    if num_raw is not None:
+                        if "см" in attr_norm and num_raw > 50:
+                            candidate = _mm_to_cm(raw)
+                        elif "упаков" in attr_norm and num_raw > 50:
+                            # Размеры упаковки MM ожидает в мм (без конвертации)
+                            candidate = num_raw
+                        else:
+                            candidate = num_raw
+            if candidate is None and "вес" in attr_norm:
+                raw_w = _get_src("product_weight_g", "weight_g", "weight", "Вес (упаковки)")
+                if raw_w is not None:
+                    num_w = _to_number(raw_w)
+                    if num_w is not None:
+                        # Переводим г→кг если значение > 100 и атрибут в кг
+                        if num_w > 100 and "кг" in attr_norm:
+                            candidate = round(num_w / 1000, 3)
+                        else:
+                            candidate = num_w
+            if candidate is None and "бренд" in attr_norm:
+                candidate = _get_src("brand", "Бренд", "manufacturer", "vendor")
+            if candidate is None and "цвет" in attr_norm:
+                candidate = _get_src("color", "Цвет")
+            if candidate is None and "код" in attr_norm and "товар" in attr_norm:
+                candidate = _get_src("offer_id", "Артикул (SKU)", "sku", "Код товара продавца")
+            if candidate is None and ("механизм" in attr_norm or "направлен" in attr_norm) and "двер" in attr_norm:
+                candidate = _get_src("door_opening_direction", "Направление открывания дверцы", "door_opening")
+            if candidate is None and "быстрый" in attr_norm and "старт" in attr_norm:
+                # Быстрый старт = есть ли упоминание в features/one_button_control
+                v_feat = _get_src("features", "one_button_control", "quick_start")
+                if v_feat:
+                    candidate = any(kw in str(v_feat).lower() for kw in ("быстр", "quick", "автостарт", "одн кноп"))
+            if candidate is None and "управлен" in attr_norm:
+                candidate = _get_src("control_type", "Управление")
+            if candidate is None and ("тип" in attr_norm and "тип" == attr_norm[:3]):
+                candidate = _get_src("type", "microwave_type", "installation_type", "Тип")
+            if candidate is None and "вид" in attr_norm and len(attr_norm) <= 5:
+                candidate = _get_src("installation_type", "type", "Вид")
+
+            if vt == "enum":
+                # For required enums with no candidate, _mm_normalize_enum_attribute_values will pick first dictionary value.
+                if candidate is None:
+                    candidate = _semantic_fallback_for_attr()
+                if candidate is not None:
+                    mapped_payload[attr_name] = candidate
+                continue
+
+            sch_type = str(sch.get("type", "")).lower()
+            attr_name_norm = self._norm_attr_name(str(sch.get("name", "")))
+            is_bool = (
+                sch_type in {"boolean", "bool"}
+                or vt in {"boolean", "bool"}
+                or "bool" in vt
+                or any(x in attr_name_norm for x in ("быстрый старт", "дисплей", "вкл", "выкл"))
+            )
+            if is_bool:
+                if candidate is None:
+                    attr_tokens = _tokens(attr_name)
+                    cand_bool = _pick_by_keywords(
+                        list(attr_tokens),
+                        ["is_" + "_".join(attr_tokens), "has_" + "_".join(attr_tokens), "quick_start", "display", "child_lock"],
+                    )
+                    candidate = cand_bool
+                elif candidate_score < 0.62:
+                    # Avoid converting weak fuzzy hits into false booleans.
+                    candidate = None
+                # Source-driven heuristics for booleans even when no direct candidate found.
+                if candidate is None:
+                    if "автоматическ" in attr_norm and "программ" in attr_norm and _get_src("auto_programs"):
+                        mapped_payload[attr_name] = "true"
+                        continue
+                    if "разморажив" in attr_norm and _get_src("defrost_function", "functions"):
+                        mapped_payload[attr_name] = "true"
+                        continue
+                    if "инвертор" in attr_norm and _get_src("smart_inverter", "inverter_technology"):
+                        mapped_payload[attr_name] = "true"
+                        continue
+                    if "без поворотного стола" in attr_norm:
+                        tt = str(_get_src("turntable", "turntable_type") or "").lower()
+                        if "без" in tt:
+                            mapped_payload[attr_name] = "true"
+                            continue
+                        if "поворот" in tt:
+                            mapped_payload[attr_name] = "false"
+                            continue
+                if candidate is not None:
+                    c = str(candidate).lower().strip()
+                    if c in {"1", "true", "yes", "y", "да"}:
+                        mapped_payload[attr_name] = "true"
+                    elif c in {"0", "false", "no", "n", "нет"}:
+                        mapped_payload[attr_name] = "false"
+                    elif "автоматическ" in attr_norm and "программ" in attr_norm and _get_src("auto_programs"):
+                        mapped_payload[attr_name] = "true"
+                    elif "разморажив" in attr_norm and _get_src("defrost_function", "functions"):
+                        mapped_payload[attr_name] = "true"
+                    elif "инвертор" in attr_norm and _get_src("smart_inverter", "inverter_technology"):
+                        mapped_payload[attr_name] = "true"
+                    elif "без поворотного стола" in attr_norm:
+                        tt = str(_get_src("turntable", "turntable_type") or "").lower()
+                        if "без" in tt:
+                            mapped_payload[attr_name] = "true"
+                        elif "поворот" in tt:
+                            mapped_payload[attr_name] = "false"
+                continue
+
+            if vt in {"float", "double", "decimal", "number", "int", "integer", "long"}:
+                if candidate is None:
+                    if "грил" in attr_norm and "мощност" in attr_norm:
+                        candidate = _pick_by_keywords(["грил", "мощност"], ["grill_power_w", "power_grill_w"])
+                    elif "конвекц" in attr_norm and "мощност" in attr_norm:
+                        candidate = _pick_by_keywords(["конвекц", "мощност"], ["convection_power_w", "power_convection_w"])
+                    elif "мощност" in attr_norm and "вт" in attr_norm and "грил" not in attr_norm and "конвекц" not in attr_norm:
+                        candidate = _pick_by_keywords(["мощност", "вт"], ["microwave_power_w", "total_power_w", "power_consumption_w", "power"])
+                    elif "объем" in attr_norm and ("л" in attr_norm or "лит" in attr_norm):
+                        candidate = _pick_by_keywords(["объем", "л"], ["volume_liters", "internal_volume_l"])
+                    elif "диаметр" in attr_norm and "поворот" in attr_norm:
+                        candidate = _pick_by_keywords(["диаметр", "поворот"], ["turntable_diameter_cm"])
+                    elif "высота" in attr_norm:
+                        candidate = _pick_by_keywords(["высота"], ["height_mm", "height", "Высота (упаковки)"])
+                    elif "ширина" in attr_norm:
+                        candidate = _pick_by_keywords(["ширина"], ["width_mm", "width", "Ширина (упаковки)"])
+                    elif "глубина" in attr_norm or "длина" in attr_norm:
+                        candidate = _pick_by_keywords(["глубина", "длина"], ["depth_mm", "depth", "Длина (упаковки)"])
+                if candidate is None:
+                    candidate = _semantic_fallback_for_attr()
+                num = _to_number(candidate)
+                if num is not None:
+                    if "см" in attr_norm and num > 120:
+                        num = num / 10.0
+                    if "вес" in attr_norm and "кг" in attr_norm and num > 150:
+                        num = num / 1000.0
+                if num is not None:
+                    mapped_payload[attr_name] = f"{num:g}"
+                continue
+
+            if candidate is None:
+                candidate = _semantic_fallback_for_attr()
+            if candidate is None:
+                if "бренд" in attr_norm:
+                    candidate = _pick_by_keywords(["бренд"], ["brand", "manufacturer", "vendor"])
+                elif "цвет" in attr_norm:
+                    candidate = _pick_by_keywords(["цвет"], ["color"])
+                elif "управлен" in attr_norm:
+                    candidate = _pick_by_keywords(["управлен"], ["control_type", "control_interface"])
+                elif ("тип" == attr_norm or attr_norm.startswith("тип ")) and "грил" not in attr_norm and "двер" not in attr_norm:
+                    candidate = _pick_by_keywords(["тип"], ["type", "microwave_type", "installation_type"])
+                elif "вид" == attr_norm or attr_norm.startswith("вид "):
+                    candidate = _pick_by_keywords(["вид"], ["installation_type", "type"])
+            if candidate is not None:
+                mapped_payload[attr_name] = str(candidate).strip()
+        
+        content_attrs = []
+        
+        def _text(k_name, def_val=""): 
+             v = mapped_payload.get(k_name)
+             return str(v).strip() if v else def_val
+             
+        def _num(k_name): 
+             try: return float(str(mapped_payload.get(k_name, "0")).replace(",", "."))
+             except: return 0.0
+             
+        def _num_text(v): return f"{v:g}"
+
+        def _first_non_empty(*keys: str) -> str:
+            for kk in keys:
+                vv = mapped_payload.get(kk)
+                if vv is None:
+                    continue
+                if isinstance(vv, list):
+                    if vv:
+                        s = str(vv[0]).strip()
+                        if s:
+                            return s
+                else:
+                    s = str(vv).strip()
+                    if s:
+                        return s
+            return ""
+
+        def _mm_weight_to_kg(v: Any) -> Optional[float]:
+            if v is None:
+                return None
+            try:
+                f = float(str(v).replace(",", ".").strip())
+            except Exception:
+                return None
+            # эвристика: если больше 150, это почти наверняка граммы
+            if f > 150:
+                f = f / 1000.0
+            return f
+
+        def _mm_dim_to_cm(v: Any) -> Optional[float]:
+            if v is None:
+                return None
+            try:
+                f = float(str(v).replace(",", ".").strip())
+            except Exception:
+                return None
+            # эвристика: >120 трактуем как мм
+            if f > 120:
+                f = f / 10.0
+            return f
+
+        # Master aliases: переводим известные PIM ключи в стандартные ключи MM-пайплайна.
+        if not _text("Наименование карточки"):
+            mapped_payload["Наименование карточки"] = _first_non_empty("full_name", "name", "model_full", "model", "offer_id", "product_code")
+        if not _text("Бренд"):
+            mapped_payload["Бренд"] = _first_non_empty("brand", "manufacturer", "vendor", "brand_name")
+        if not _text("Описание"):
+            mapped_payload["Описание"] = _first_non_empty("description", "full_name", "name")
+        if not _text("Штрихкод"):
+            mapped_payload["Штрихкод"] = _first_non_empty(
+                "Штрихкод",
+                "Штрих-код",
+                "barcode",
+                "Barcode",
+                "ean",
+                "EAN",
+                "gtin",
+                "GTIN",
+                "ean13",
+                "ean_code",
+                "barcodes",
+            )
+        if not _text("Вес (упаковки)"):
+            wkg = _mm_weight_to_kg(mapped_payload.get("weight_g") or mapped_payload.get("weight") or mapped_payload.get("Вес"))
+            if wkg is not None:
+                mapped_payload["Вес (упаковки)"] = f"{wkg:g}"
+        if not _text("Высота (упаковки)"):
+            hcm = _mm_dim_to_cm(mapped_payload.get("height_mm") or mapped_payload.get("height") or mapped_payload.get("Высота, см"))
+            if hcm is not None:
+                mapped_payload["Высота (упаковки)"] = f"{hcm:g}"
+        if not _text("Ширина (упаковки)"):
+            wcm = _mm_dim_to_cm(mapped_payload.get("width_mm") or mapped_payload.get("width") or mapped_payload.get("Ширина, см"))
+            if wcm is not None:
+                mapped_payload["Ширина (упаковки)"] = f"{wcm:g}"
+        if not _text("Длина (упаковки)"):
+            dcm = _mm_dim_to_cm(mapped_payload.get("depth_mm") or mapped_payload.get("depth") or mapped_payload.get("Глубина, см"))
+            if dcm is not None:
+                mapped_payload["Длина (упаковки)"] = f"{dcm:g}"
+
+        _raw_name = _text("Наименование карточки")
+        # Защита: если имя выглядит как код/артикул — ищем настоящее название
+        def _name_is_junk(s: str) -> bool:
+            import re as _re
+            s = s.strip()
+            if len(s) < 4: return True
+            if _re.match(r'^[\d\s\-\.\+]+$', s): return True
+            if _re.match(r'^-\d+$', s): return True
+            return False
+        if _name_is_junk(_raw_name):
+            _raw_name = (
+                _text("full_name") or _text("name") or _text("model_full")
+                or _text("Название") or _text("title") or ""
+            )
+        short_name = (_raw_name or offer_id_str)[:90]
+        brand = _text("Бренд") or "Без бренда"
+        description = (_text("Описание") or short_name)[:2500]
+        def _pick_barcode(v: Any) -> str:
+            candidates: List[str] = []
+            if isinstance(v, (list, tuple, set)):
+                for it in v:
+                    s = self._mm_sanitize_barcode(str(it))
+                    if s:
+                        candidates.append(s)
+            else:
+                raw = str(v or "")
+                # Try to extract code-like chunks first (supports strings like "EAN: 4601234567890").
+                for m in re.findall(r"\d{8,14}", raw):
+                    s = self._mm_sanitize_barcode(m)
+                    if s:
+                        candidates.append(s)
+                s = self._mm_sanitize_barcode(raw)
+                if s:
+                    candidates.append(s)
+            for c in candidates:
+                if len(c) in {8, 12, 13, 14}:
+                    return c
+            return candidates[0] if candidates else ""
+
+        barcode = _pick_barcode(mapped_payload.get("Штрихкод"))
+        weight = _num("Вес (упаковки)")
+        depth = _num("Длина (упаковки)") 
+        height = _num("Высота (упаковки)")
+        width = _num("Ширина (упаковки)")
+        
+        raw_photos = (
+            mapped_payload.get("Фото")
+            or mapped_payload.get("images")
+            or mapped_payload.get("photos")
+            or mapped_payload.get("photo")
+            or mapped_payload.get("Изображения")
+            or mapped_payload.get("Фотографии")
+            or []
+        )
+        short_photos = raw_photos if isinstance(raw_photos, list) else ([raw_photos] if raw_photos else [])
+
+        use_pim_proxy = _mm_public_base_ok_for_proxy_in_json()
+        public_base = os.getenv("PUBLIC_API_BASE_URL", "").strip().rstrip("/") if use_pim_proxy else ""
+        if not public_base:
+            return {
+                "status_code": 400,
+                "response": (
+                    "Megamarket image policy: set PUBLIC_API_BASE_URL to your public HTTPS domain. "
+                    "Images are now downloaded and served from /api/v1/uploads on your host."
+                ),
+            }
+
+        def _guess_ext_from_url(u: str) -> str:
+            p = urlparse(u).path.lower()
+            if p.endswith(".png"):
+                return "png"
+            if p.endswith(".webp"):
+                return "webp"
+            if p.endswith(".gif"):
+                return "gif"
+            if p.endswith(".jpeg") or p.endswith(".jpg"):
+                return "jpg"
+            return "jpg"
+
+        def _guess_ext_from_content_type(ct: str, fallback: str) -> str:
+            c = str(ct or "").lower()
+            if "png" in c:
+                return "png"
+            if "webp" in c:
+                return "webp"
+            if "gif" in c:
+                return "gif"
+            if "jpeg" in c or "jpg" in c:
+                return "jpg"
+            return fallback
+
+        async def _download_to_local_url(source_url: str) -> Optional[str]:
+            """
+            Prod mode: download image bytes and serve from our own /api/v1/uploads URL.
+            """
+            try:
+                s = str(source_url).strip()
+                if not s:
+                    return None
+                if s.startswith("/api/v1/uploads/"):
+                    return f"{public_base}{s}"
+                if s.startswith(public_base + "/api/v1/uploads/"):
+                    return s
+                if s.startswith("/"):
+                    s = f"{public_base}{s}"
+                if not (s.startswith("http://") or s.startswith("https://")):
+                    return None
+                async with httpx.AsyncClient(timeout=25.0, follow_redirects=True, max_redirects=8) as p_client:
+                    r = await p_client.get(s, headers={"User-Agent": "Mozilla/5.0"})
+                    if r.status_code != 200:
+                        return None
+                    ctype = str(r.headers.get("content-type", "")).lower()
+                    if ctype and "image" not in ctype:
+                        return None
+                    body = r.content or b""
+                    if len(body) < 64:
+                        return None
+                    os.makedirs("uploads", exist_ok=True)
+                    ext = _guess_ext_from_content_type(ctype, _guess_ext_from_url(str(r.url)))
+                    key = hashlib.sha1((str(r.url) + f"|{len(body)}").encode()).hexdigest()[:24]
+                    fname = f"mm_{key}.{ext}"
+                    fpath = os.path.join("uploads", fname)
+                    if not os.path.exists(fpath):
+                        with open(fpath, "wb") as f:
+                            f.write(body)
+                    return f"{public_base}/api/v1/uploads/{fname}"
+            except Exception:
+                return None
+
+        local_photos: List[str] = []
+        for p in short_photos:
+            p_str = _mm_unwrap_pim_proxy_photo_url(str(p).strip())
+            if not p_str:
+                continue
+            local_url = await _download_to_local_url(p_str)
+            if local_url:
+                local_photos.append(local_url)
+
+        if not local_photos:
+            return {
+                "status_code": 400,
+                "response": "Megamarket images unavailable: failed to download/store source images to local /api/v1/uploads.",
+            }
+                
+        # Документация MM: от 1 до 16 фотографий
+        short_photos = local_photos[:16]
+        
+        # Mutate the payload so the user's frontend UI shows the proxied URLs instead of raw Ozon
+        if isinstance(raw_photos, list):
+            mapped_payload["Фото"] = short_photos
+        elif mapped_payload.get("Фото"):
+             mapped_payload["Фото"] = short_photos[0] if short_photos else ""
+
+        valid_schema_ids = {int(str(v["id"])) for v in schema_dict.values() if "id" in v and str(v["id"]).isdigit()}
+        _log.debug("MM SCHEMA KEYS: %s keys, valid ids: %s", len(schema_dict.keys()), len(valid_schema_ids))
+
+        def _find_schema_attr_id(name_variants: List[str]) -> Optional[int]:
+            for variant in name_variants:
+                sch = schema_dict_norm.get(self._norm_attr_name(variant))
+                if sch and str(sch.get("id", "")).isdigit():
+                    return int(str(sch["id"]))
+            return None
+
+        # Prefer ids from current infomodel, fallback to historical ids if they exist in schema.
+        name_attr_id = _find_schema_attr_id(["Наименование карточки", "Название товара", "Наименование"]) or (17 if 17 in valid_schema_ids else None)
+        brand_attr_id = _find_schema_attr_id(["Бренд", "Торговая марка"]) or (14 if 14 in valid_schema_ids else None)
+        desc_attr_id = _find_schema_attr_id(["Описание", "Маркетинговое описание"]) or (16 if 16 in valid_schema_ids else None)
+        offer_attr_id = _find_schema_attr_id(["Код товара продавца", "Артикул продавца"]) or (15 if 15 in valid_schema_ids else None)
+        weight_attr_id = _find_schema_attr_id(["Вес (упаковки)", "Вес упаковки", "Вес, кг", "Вес"]) or (33 if 33 in valid_schema_ids else None)
+        depth_attr_id = _find_schema_attr_id(["Длина (упаковки)", "Длина упаковки", "Глубина"]) or (34 if 34 in valid_schema_ids else None)
+        height_attr_id = _find_schema_attr_id(["Высота (упаковки)", "Высота упаковки"]) or (35 if 35 in valid_schema_ids else None)
+        width_attr_id = _find_schema_attr_id(["Ширина (упаковки)", "Ширина упаковки"]) or (36 if 36 in valid_schema_ids else None)
+        photos_attr_id = _find_schema_attr_id(
+            ["Фото", "Фотографии", "Изображения", "Изображение", "Ссылки на изображения", "Ссылка на изображение", "Картинки"]
+        ) or (18 if 18 in valid_schema_ids else None)
+        barcode_attr_id = _find_schema_attr_id(["Штрихкод", "Штрих-код", "EAN", "GTIN", "Баркод"]) or (39 if 39 in valid_schema_ids else None)
+        master_attr_ids = {x for x in [
+            name_attr_id, brand_attr_id, desc_attr_id, offer_attr_id,
+            weight_attr_id, depth_attr_id, height_attr_id, width_attr_id,
+            photos_attr_id, barcode_attr_id
+        ] if x}
+
+        for key, val in mapped_payload.items():
+            if key in [
+                "offerId", "categoryId", "Код товара продавца", "product_id", "Наименование карточки", "Бренд", "Описание",
+                "Штрихкод", "Штрих-код", "EAN", "GTIN", "Вес (упаковки)", "Длина (упаковки)", "Высота (упаковки)",
+                "Ширина (упаковки)", "Фото", "Фотографии", "Изображения", "images", "photos",
+            ]:
+                continue
+            if val is None or str(val).strip() == "":
+                continue
+            
+            sch = schema_dict.get(key) or schema_dict_norm.get(self._norm_attr_name(key))
+            if not sch:
+                _log.debug("MM PIPELINE DROP: %s not in schema_dict", key)
+                continue
+            
+            try: attr_id = int(str(sch["id"]))
+            except: continue
+            if attr_id not in valid_schema_ids: continue
+            
+            # Документация MM: valueTypeCode enum / boolean — см. инфомодель
+            vt = str(sch.get("valueTypeCode", "")).lower()
+            is_bool = sch.get("type") == "boolean" or vt == "boolean"
+            if vt == "enum":
+                vl = self._mm_normalize_enum_attribute_values(sch, val)
+                if not vl:
+                    _log.warning("MM skip enum (нет значения в словаре / isSuggest=false): %s", key)
+                    continue
+            elif is_bool:
+                cleaned = str(val).lower().strip()
+                vl = ["true"] if cleaned in ["true", "1", "да", "yes"] else ["false"]
+            else:
+                def _num_str(raw_val: Any, field_vt: str) -> str:
+                    """Форматирует числовое значение: integer→без дробной, float→:g"""
+                    try:
+                        f = float(str(raw_val).replace(",", ".").strip())
+                        if field_vt in {"int", "integer", "long"}:
+                            return str(int(round(f)))
+                        return f"{f:g}"
+                    except (ValueError, TypeError):
+                        return str(raw_val)
+                if vt in {"int", "integer", "long", "float", "double", "decimal", "number"}:
+                    raw_v = val if not isinstance(val, list) else (val[0] if val else "")
+                    vl = [_num_str(raw_v, vt)]
+                else:
+                    vl = [str(val)] if not isinstance(val, list) else [str(v) for v in val if v]
+            
+            vl = [v for v in vl if v and str(v).lower() not in ["нет данных", "-", "null", "none"]]
+            if vl:
+                # Safely route to master if it historically belonged there, otherwise content
+                if attr_id in master_attr_ids:
+                    pass # handled below globally
+                else:
+                    content_attrs.append({"attributeId": attr_id, "values": vl})
+
+        _log.debug("MM CONTENT ATTRS: %s items", len(content_attrs))
+
+        master_attrs = []
+        used_master_ids = set()
+        def add_master(id_num, str_vals):
+             if id_num in valid_schema_ids and id_num not in used_master_ids and str_vals and any(str_vals):
+                 master_attrs.append({"attributeId": id_num, "values": str_vals})
+                 used_master_ids.add(id_num)
+
+        add_master(name_attr_id, [short_name])
+        add_master(brand_attr_id, [brand])
+        add_master(desc_attr_id, [description])
+        add_master(offer_attr_id, [offer_id_str])
+        add_master(weight_attr_id, [_num_text(weight)])
+        add_master(depth_attr_id, [_num_text(depth)])
+        add_master(height_attr_id, [_num_text(height)])
+        add_master(width_attr_id, [_num_text(width)])
+        if short_photos:
+            add_master(photos_attr_id, short_photos)
+        if barcode and len(barcode) in {8, 12, 13, 14}:
+            add_master(barcode_attr_id, [barcode])
+
+        # Подмешиваем ранее заполненные атрибуты, если в новом payload их нет (требование MM doc).
+        existing_attr_map = await self._mm_fetch_existing_attr_map(offer_id_str)
+        current_attr_ids = {int(a.get("attributeId")) for a in (master_attrs + content_attrs) if str(a.get("attributeId", "")).isdigit()}
+        # Если в источнике нет явного признака гриля — не подтягиваем старые grill-атрибуты из MM.
+        grill_src = _get_src("grill", "has_grill", "grill_type", "grill_power_w", "power_grill_w", "features", "type")
+        grill_evidence = False
+        if grill_src is not None:
+            gs = str(grill_src).lower()
+            grill_evidence = ("грил" in gs) or ("grill" in gs)
+        for ex_id, ex_vals in existing_attr_map.items():
+            if ex_id in current_attr_ids or not ex_vals:
+                continue
+            # Never resend attributes that are not present in current infomodel/category.
+            if ex_id not in valid_schema_ids:
+                continue
+            sch_ex = schema_by_id.get(ex_id)
+            if isinstance(sch_ex, dict):
+                ex_name = self._norm_attr_name(str(sch_ex.get("name") or ""))
+                if "грил" in ex_name and not grill_evidence:
+                    continue
+            if isinstance(sch_ex, dict) and str(sch_ex.get("valueTypeCode", "")).lower() == "enum":
+                ex_vals = self._mm_normalize_enum_attribute_values(sch_ex, ex_vals)
+                if not ex_vals:
+                    continue
+            content_attrs.append({"attributeId": ex_id, "values": ex_vals})
+
+        manufacturer_no = _first_non_empty("manufacturer_code", "Артикул производителя", "model_number", "model_code")
+        card = {
+            "offerId": offer_id_str,
+            "name": short_name,
+            "brand": brand,
+            "description": description,
+            "photos": short_photos,
+            "package": {"weight": int(weight * 1000), "height": int(height * 10), "width": int(width * 10), "length": int(depth * 10)},
+            "masterAttributes": master_attrs,
+            "contentAttributes": content_attrs,
+        }
+        if manufacturer_no and str(manufacturer_no).strip() != offer_id_str:
+            card["manufacturerNo"] = str(manufacturer_no).strip()[:200]
+        if barcode and len(barcode) in {8, 12, 13, 14}:
+            card["barcodes"] = [barcode]
+            
+        merchant_val = None
+        try:
+            if hasattr(self, 'store_id') and self.store_id:
+                merchant_val = int(str(self.store_id).strip())
+            elif hasattr(self, 'client_id') and self.client_id:
+                merchant_val = int(str(self.client_id).strip())
+        except (TypeError, ValueError) as e:
+            _log.debug("megamarket merchantId parse skipped: %s", e)
+            
+        if merchant_val:
+            card["merchantId"] = merchant_val
+
+        payload = {
+            "categoryId": cat_id,
+            "cards": [card]
+        }
+        if merchant_val:
+            payload["merchantId"] = merchant_val
+            
+        _log.debug("MM PAYLOAD categoryId=%s cards=%s", cat_id, len(payload.get("cards", [])))
+        async with megamarket_httpx_client(60.0) as client:
+            res = await client.post("https://partner.megamarket.ru/api/merchantIntegration/assortment/v1/card/save", headers=headers, json=payload)
+            
+            try:
+                data = res.json()
+                if res.status_code == 200 and data.get("data", {}).get("errorTotal", 0) > 0:
+                    return {"status_code": 400, "response": res.text}
+            except Exception:
+                pass
+                
+            return {"status_code": res.status_code, "response": res.text}
+            
+    async def list_products(self, page: int = 1, limit: int = 50) -> Dict[str, Any]:
+        headers = megamarket_request_headers(self.api_key, for_post=True)
+        offset = (page - 1) * limit
+        payload = {"filter": {}, "limit": limit, "offset": offset}
+        async with megamarket_httpx_client(60.0) as client:
+            res = await client.post(
+                "https://partner.megamarket.ru/api/merchantIntegration/assortment/v1/card/get",
+                headers=headers,
+                json=payload,
+            )
+        if res.status_code != 200:
+            return {"items": [], "total": 0, "has_more": False}
+        data = res.json().get("data", {}) or {}
+        cards = data.get("cardsInfo") or []
+        total = data.get("totalCount", len(cards))
+
+        # Fetch rich attributes for all cards in one batch
+        offer_ids = [str(c.get("offerId") or "") for c in cards if c.get("offerId")]
+        attrs_by_id: Dict[str, Any] = {}
+        if offer_ids:
+            attrs_payload = {
+                "filter": {"offerId": offer_ids},
+                "sorting": {"fieldName": "goodsId", "order": "asc"},
+                "targetFields": "all",
+            }
+            async with megamarket_httpx_client(60.0) as client2:
+                res2 = await client2.post(
+                    "https://partner.megamarket.ru/api/merchantIntegration/assortment/v1/card/getAttributes",
+                    headers=headers,
+                    json=attrs_payload,
+                )
+            if res2.status_code == 200:
+                for ac in (res2.json().get("data") or {}).get("cards") or []:
+                    attrs_by_id[str(ac.get("offerId") or "")] = ac
+
+        items = []
+        for c in cards:
+            sku = str(c.get("offerId") or "")
+            st = c.get("status") or {}
+            if isinstance(st, dict):
+                status_str = st.get("name") or st.get("code") or "unknown"
+            else:
+                status_str = str(st).lower()
+            attrs = attrs_by_id.get(sku) or {}
+            photos = attrs.get("photos") or []
+            items.append({
+                "sku": sku,
+                "name": str(attrs.get("name") or sku),
+                "brand": str(attrs.get("brand") or ""),
+                "category": str(attrs.get("categoryId") or ""),
+                "image_url": photos[0].get("url", photos[0]) if photos and isinstance(photos[0], dict) else (photos[0] if photos else ""),
+                "status": status_str,
+                "attributes": attrs.get("contentAttributes") or [],
+                "_raw": {**c, **attrs},
+            })
+        return {"items": items, "total": total, "has_more": (offset + limit) < total}
+
+    async def pull_product(self, sku: str) -> Optional[Dict[str, Any]]:
+        headers = megamarket_request_headers(self.api_key, for_post=True)
+        async with megamarket_httpx_client(60.0) as client:
+            # Assortment API: card/get returns card status/meta, card/getAttributes returns full attributes.
+            card_payload = {"filter": {"offerId": [str(sku)]}, "limit": 1}
+            res_card = await client.post(
+                "https://partner.megamarket.ru/api/merchantIntegration/assortment/v1/card/get",
+                headers=headers,
+                json=card_payload,
+            )
+            if res_card.status_code != 200:
+                return None
+
+            card_info = (res_card.json().get("data", {}) or {}).get("cardsInfo", [])
+            if not card_info:
+                return None
+
+            attrs_payload = {
+                "filter": {"offerId": [str(sku)]},
+                "sorting": {"fieldName": "goodsId", "order": "asc"},
+                "targetFields": "all",
+            }
+            res_attrs = await client.post(
+                "https://partner.megamarket.ru/api/merchantIntegration/assortment/v1/card/getAttributes",
+                headers=headers,
+                json=attrs_payload,
+            )
+            if res_attrs.status_code == 200:
+                attrs_cards = (res_attrs.json().get("data", {}) or {}).get("cards", [])
+                if attrs_cards:
+                    merged = dict(card_info[0])
+                    merged["attributes"] = attrs_cards[0]
+                    return merged
+
+            return card_info[0]
+
+    async def get_async_errors(self, sku: str) -> Optional[str]:
+        """Соответствует POST .../assortment/v1/card/getError (filter + sorting + pagination)."""
+        import json as json_lib
+        headers = megamarket_request_headers(self.api_key, for_post=True)
+        payload = {
+            "filter": {"offerId": [str(sku)]},
+            "sorting": {"fieldName": "goodsId", "order": "asc"},
+            "pagination": {"limit": 50, "offset": 0},
+        }
+        try:
+            async with megamarket_httpx_client(60.0) as client:
+                res = await client.post("https://partner.megamarket.ru/api/merchantIntegration/assortment/v1/card/getError", headers=headers, json=payload)
+                if res.status_code == 200:
+                    data = res.json()
+                    errors = self._mm_extract_error_cards(data)
+                    sku_s = str(sku)
+                    for error_doc in errors:
+                        if str(error_doc.get("offerId", "")) == sku_s:
+                            if self._mm_card_has_errors(error_doc):
+                                err_list = error_doc.get("attributesErrors", [])
+                                if not err_list:
+                                    err_list = error_doc.get("errors", [])
+                                if not err_list:
+                                    err_list = error_doc.get("exportError", [])
+                                return json_lib.dumps(err_list, ensure_ascii=False)
+        except Exception as e:
+            _log.warning("MM Error Polling Failed: %s", e)
+        return None
+
+    @staticmethod
+    def _mm_extract_error_cards(data: Dict[str, Any]) -> List[Dict[str, Any]]:
+        body = data.get("data", {}) or {}
+        cards = body.get("cards", []) or []
+        if not cards:
+            cards = body.get("cardsInfo", []) or []
+        if not cards:
+            cards = body.get("errorCards", []) or []
+        return [c for c in cards if isinstance(c, dict)]
+
+    @staticmethod
+    def _mm_card_has_errors(card: Dict[str, Any]) -> bool:
+        err_list = card.get("attributesErrors", [])
+        if not err_list:
+            err_list = card.get("errors", [])
+        if not err_list:
+            err_list = card.get("exportError", [])
+        if err_list:
+            return True
+        status_raw = card.get("status")
+        if isinstance(status_raw, dict):
+            status_code = status_raw.get("code") or status_raw.get("name")
+        else:
+            status_code = status_raw
+        status_up = str(status_code or "").upper()
+        return status_up in {"ERROR", "CHANGES_REJECTED", "BLOCKED"}
+
+    async def list_error_offer_ids(self, limit: int = 100, offset: int = 0) -> List[str]:
+        """
+        Возвращает offerId карточек с ошибками из MM card/getError.
+        Используется для массового запуска автоисправления.
+        """
+        headers = megamarket_request_headers(self.api_key, for_post=True)
+        payload = {
+            "sorting": {"fieldName": "goodsId", "order": "asc"},
+            "pagination": {"limit": max(1, min(int(limit or 100), 500)), "offset": max(0, int(offset or 0))},
+        }
+        try:
+            async with megamarket_httpx_client(60.0) as client:
+                res = await client.post(
+                    "https://partner.megamarket.ru/api/merchantIntegration/assortment/v1/card/getError",
+                    headers=headers,
+                    json=payload,
+                )
+                if res.status_code != 200:
+                    return []
+                data = res.json()
+                cards = self._mm_extract_error_cards(data)
+                out: List[str] = []
+                seen = set()
+                for card in cards:
+                    offer_id = str(card.get("offerId", "")).strip()
+                    if not offer_id or offer_id in seen:
+                        continue
+                    if self._mm_card_has_errors(card):
+                        out.append(offer_id)
+                        seen.add(offer_id)
+                return out
+        except Exception as e:
+            _log.warning("MM list_error_offer_ids failed: %s", e)
+            return []
+
+    async def test_connection(self) -> Dict[str, Any]:
+        """Проверяет подключение к Megamarket Partner API."""
+        headers = megamarket_request_headers(self.api_key, for_post=False)
+        try:
+            async with megamarket_httpx_client(15.0) as client:
+                res = await client.get(
+                    "https://partner.megamarket.ru/api/merchantIntegration/assortment/v1/categoryTree/get",
+                    headers=headers,
+                )
+            if res.status_code == 200:
+                return {"status": "ok", "message": "Megamarket подключён"}
+            elif res.status_code in (401, 403):
+                raise Exception("Неверный токен Megamarket")
+            else:
+                raise Exception(f"Megamarket API вернул {res.status_code}: {res.text[:200]}")
+        except Exception:
+            raise
+
+def get_adapter(
+    connection_type: str,
+    api_key: str,
+    client_id: str = None,
+    store_id: str = None,
+    warehouse_id: str = None,
+) -> MarketplaceAdapter:
+    if connection_type == "ozon":
+        return OzonAdapter(api_key, client_id, store_id, warehouse_id)
+    elif connection_type in ("wildberries", "wb"):
+        return WbAdapter(api_key, client_id, store_id, warehouse_id)
+    elif connection_type == "yandex":
+        return YandexAdapter(api_key, client_id, store_id, warehouse_id)
+    elif connection_type == "megamarket":
+        return MegamarketAdapter(api_key, client_id, store_id, warehouse_id)
+    else:
+        raise ValueError(f"Unknown connection type: {connection_type}")
+
+
+class YandexMarketAdapter(MarketplaceAdapter):
+    """Адаптер для интеграции с API Яндекс.Маркет."""
+    
+    def __init__(self, api_key: str, client_id: str, store_id: str, warehouse_id: Optional[str] = None):
+        self.api_key = api_key
+        self.client_id = client_id
+        self.store_id = store_id
+        self.warehouse_id = warehouse_id
+        self.base_url = "https://api.partner.market.yandex.ru"
+    
+    async def test_connection(self) -> Dict[str, Any]:
+        """Тестирует подключение к API Яндекс.Маркет, запрашивая информацию о магазине."""
+        import httpx
+        headers = {
+            "Authorization": f"OAuth {self.api_key}",
+            "Client-Id": self.client_id
+        }
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                # Пример запроса для проверки подключения: получение информации о кампаниях
+                response = await client.get(f"{self.base_url}/campaigns", headers=headers)
+                response.raise_for_status()
+                data = response.json()
+                return {"status": "success", "campaigns": data.get("campaigns", [])}
+        except Exception as e:
+            raise Exception(f"Ошибка подключения к Яндекс.Маркет: {str(e)}")
+    
+    async def pull_product(self, query: str) -> Dict[str, Any]:
+        """Получает данные товара по артикулу или запросу."""
+        # Заглушка для первой итерации: вернуть пример данных
+        return {
+            "name": "Пример товара из Яндекс.Маркет",
+            "title": "Товар по запросу: " + query,
+            "attributes": {},
+            "images": []
+        }
+from abc import ABC, abstractmethod
+from urllib.parse import urlparse
+
+_log = logging.getLogger("pim.adapters")
+
+
+# Частый сбой: WAF отдаёт HTML 403 на User-Agent вида python-httpx/… (другой проект может ходить через requests/curl).
+_MM_DEFAULT_UA = (
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/131.0.0.0 Safari/537.36"
+)
+
+
+def megamarket_httpx_client(timeout: float = 60.0) -> httpx.AsyncClient:
+    """Клиент для partner.megamarket.ru. Заголовки только на каждый запрос (без дубля User-Agent)."""
+    proxy = (
+        os.getenv("MEGAMARKET_HTTPS_PROXY", "").strip()
+        or os.getenv("MEGAMARKET_HTTP_PROXY", "").strip()
+        or os.getenv("HTTPS_PROXY", "").strip()
+        or os.getenv("HTTP_PROXY", "").strip()
+    )
+    return httpx.AsyncClient(timeout=timeout, proxy=proxy or None)
+
+
+
+def ozon_httpx_client(timeout: float = 60.0) -> httpx.AsyncClient:
+    """Клиент для api-seller.ozon.ru с поддержкой прокси через OZON_HTTPS_PROXY или HTTPS_PROXY."""
+    proxy = (
+        os.getenv("OZON_HTTPS_PROXY", "").strip()
+        or os.getenv("HTTPS_PROXY", "").strip()
+        or os.getenv("HTTP_PROXY", "").strip()
+    )
+    return httpx.AsyncClient(timeout=timeout, proxy=proxy or None)
+
+def megamarket_request_headers(token: str, *, for_post: bool = False) -> Dict[str, str]:
+    """Общие заголовки для вызовов MM (token = X-Merchant-Token)."""
+    ua = os.getenv("MEGAMARKET_USER_AGENT", "").strip() or _MM_DEFAULT_UA
+    h: Dict[str, str] = {
+        "X-Merchant-Token": token,
+        "Content-Type": "application/json",
+        "User-Agent": ua,
+        "Accept": "application/json, text/plain, */*",
+        "Accept-Language": "ru-RU,ru;q=0.9,en;q=0.8",
+    }
+    if for_post:
+        h["Origin"] = "https://partner.megamarket.ru"
+        h["Referer"] = "https://partner.megamarket.ru/"
+    return h
+
+
+def _mm_unwrap_pim_proxy_photo_url(p_str: str) -> str:
+    """В mapped_payload иногда лежит .../api/v1/media/proxy/<b64> с localhost — для MM нужен исходный https URL."""
+    marker = "/api/v1/media/proxy/"
+    if marker not in p_str:
+        return p_str
+    try:
+        tail = p_str.split(marker, 1)[1].split("?", 1)[0]
+        raw = base64.urlsafe_b64decode(tail.encode()).decode()
+        if raw.startswith("http"):
+            return raw
+    except Exception:
+        pass
+    return p_str
+
+
+def _mm_public_base_ok_for_proxy_in_json() -> bool:
+    """
+    В теле card/save нельзя отдавать URL с 127.0.0.1 / private IP — у Мегамаркета WAF часто даёт HTML 403 на такой POST.
+    Прокси PIM к Ozon подставляем только если PUBLIC_API_BASE_URL — публичный https-хост.
+    """
+    raw = os.getenv("PUBLIC_API_BASE_URL", "").strip().rstrip("/")
+    if not raw:
+        return False
+    p = urlparse(raw)
+    if (p.scheme or "").lower() != "https":
+        return False
+    host = (p.hostname or "").lower()
+    if host in ("localhost", "127.0.0.1", "::1"):
+        return False
+    try:
+        ip = ipaddress.ip_address(host)
+        if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved:
+            return False
+    except ValueError:
+        pass
+    return True
+
+
+def format_megamarket_error_message(status_code: int, body: str, max_plain: int = 320) -> str:
+    b = (body or "").strip()
+    if not b:
+        return f"пустой ответ (HTTP {status_code})"
+    low = b.lower()
+    if b.startswith("<") or "<html" in low:
+        if status_code == 403 or "forbidden" in low:
+            return "HTTP 403 HTML (WAF/edge); проверьте токен и merchantId в подключении."
+        return f"HTTP {status_code} HTML: {b[:80]}…"
+    return b[:max_plain]
+
+
+def _normalize_ozon_probe(value: Any) -> str:
+    text = str(value or "").strip().lower().replace("ё", "е")
+    return re.sub(r"\s+", " ", text)
+
+
+def _ozon_pick_dictionary_match(user_text: str, entries: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    probe = _normalize_ozon_probe(user_text)
+    if not probe:
+        return None
+    best_score = 0.0
+    best: Optional[Dict[str, Any]] = None
+    for e in entries:
+        if not isinstance(e, dict):
+            continue
+        val = str(e.get("value") or e.get("name") or "").strip()
+        if not val:
+            continue
+        cand = _normalize_ozon_probe(val)
+        if not cand:
+            continue
+        seq = SequenceMatcher(None, probe, cand).ratio()
+        if probe in cand or cand in probe:
+            seq = max(seq, 0.82)
+        probe_tokens = set(probe.replace("/", " ").split())
+        cand_tokens = set(cand.replace("/", " ").split())
+        token_score = (
+            len(probe_tokens & cand_tokens) / max(len(probe_tokens), len(cand_tokens))
+            if probe_tokens and cand_tokens
+            else 0.0
+        )
+        score = seq * 0.7 + token_score * 0.3
+        if score > best_score:
+            best_score = score
+            try:
+                eid = e.get("id")
+                if eid is None:
+                    continue
+                best = {"dictionary_value_id": int(eid), "value": val}
+            except (TypeError, ValueError):
+                continue
+    if best and best_score >= 0.48:
+        return best
+    return None
+
+
+def _ozon_product_info_items(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
+    if not isinstance(payload, dict):
+        return []
+    res = payload.get("result")
+    if isinstance(res, dict):
+        items = res.get("items")
+        if isinstance(items, list):
+            return [x for x in items if isinstance(x, dict)]
+    items = payload.get("items")
+    if isinstance(items, list):
+        return [x for x in items if isinstance(x, dict)]
+    return []

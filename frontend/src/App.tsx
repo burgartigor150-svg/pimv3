@@ -27,6 +27,45 @@ import AdminDialogConsolePage from './pages/AdminDialogConsolePage';
 import SettingsPage from './pages/SettingsPage';
 import UsersPage from './pages/UsersPage';
 
+
+// ─── Page Error Boundary ─────────────────────────────────────────────────────
+class PageErrorBoundary extends React.Component<
+  { children: React.ReactNode },
+  { error: Error | null }
+> {
+  constructor(props: any) {
+    super(props);
+    this.state = { error: null };
+  }
+  static getDerivedStateFromError(error: Error) {
+    return { error };
+  }
+  componentDidCatch(error: Error, info: React.ErrorInfo) {
+    console.error('[PageErrorBoundary]', error, info);
+  }
+  render() {
+    if (this.state.error) {
+      return (
+        <div style={{ padding: 40, color: 'rgba(255,255,255,0.5)', textAlign: 'center' }}>
+          <p style={{ fontSize: 18, marginBottom: 12 }}>Ошибка загрузки страницы</p>
+          <pre style={{ fontSize: 12, color: 'rgba(255,255,255,0.3)', whiteSpace: 'pre-wrap', textAlign: 'left', maxWidth: 600, margin: '0 auto 20px' }}>
+            {this.state.error.message}
+          </pre>
+          <button
+            type="button"
+            onClick={() => this.setState({ error: null })}
+            style={{ padding: '8px 20px', background: 'rgba(99,102,241,0.2)', border: '1px solid rgba(99,102,241,0.4)', borderRadius: 8, color: '#a5b4fc', cursor: 'pointer' }}
+          >
+            Попробовать снова
+          </button>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
+
+
 // ─── Nav groups ───────────────────────────────────────────────────────────────
 
 const NAV_GROUPS = [
@@ -265,25 +304,27 @@ const AppShell: React.FC = () => {
       <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden', minWidth: 0 }}>
         <TopHeader />
         <main style={{ flex: 1, overflowY: 'auto', padding: 28 }}>
+          <PageErrorBoundary>
           <Routes>
             <Route index element={<Navigate to="/dashboard" replace />} />
-            <Route path="/dashboard"       element={<DashboardPage />} />
-            <Route path="/products"        element={<ProductsPage />} />
-            <Route path="/products/:id"    element={<ProductDetailsPage />} />
-            <Route path="/attributes"      element={<AttributesPage />} />
-            <Route path="/syndication"     element={<SyndicationPage />} />
-            <Route path="/integrations"    element={<IntegrationsPage />} />
-            <Route path="/star-map"        element={<AttributeStarMapPage />} />
-            <Route path="/agent-dashboard" element={<AgentDashboard />} />
-            <Route path="/agent-console"   element={<AgentTaskConsolePage />} />
-            <Route path="/agent-assistant" element={<AgentAssistantPage />} />
-            <Route path="/self-improve"    element={<SelfImproveConsolePage />} />
+            <Route path="/dashboard"       element={<PageErrorBoundary><DashboardPage /></PageErrorBoundary>} />
+            <Route path="/products"        element={<PageErrorBoundary><ProductsPage /></PageErrorBoundary>} />
+            <Route path="/products/:id"    element={<PageErrorBoundary><ProductDetailsPage /></PageErrorBoundary>} />
+            <Route path="/attributes"      element={<PageErrorBoundary><AttributesPage /></PageErrorBoundary>} />
+            <Route path="/syndication"     element={<PageErrorBoundary><SyndicationPage /></PageErrorBoundary>} />
+            <Route path="/integrations"    element={<PageErrorBoundary><IntegrationsPage /></PageErrorBoundary>} />
+            <Route path="/star-map"        element={<PageErrorBoundary><AttributeStarMapPage /></PageErrorBoundary>} />
+            <Route path="/agent-dashboard" element={<PageErrorBoundary><AgentDashboard /></PageErrorBoundary>} />
+            <Route path="/agent-console"   element={<PageErrorBoundary><AgentTaskConsolePage /></PageErrorBoundary>} />
+            <Route path="/agent-assistant" element={<PageErrorBoundary><AgentAssistantPage /></PageErrorBoundary>} />
+            <Route path="/self-improve"    element={<PageErrorBoundary><SelfImproveConsolePage /></PageErrorBoundary>} />
             <Route path="/agent-cron"      element={<div style={{padding:40,color:'rgba(255,255,255,0.3)',textAlign:'center'}}>Cron — coming soon</div>} />
-            <Route path="/users"           element={<UsersPage />} />
-            <Route path="/settings"        element={<SettingsPage />} />
-            <Route path="/admin-console"   element={<AdminDialogConsolePage />} />
+            <Route path="/users"           element={<PageErrorBoundary><UsersPage /></PageErrorBoundary>} />
+            <Route path="/settings"        element={<PageErrorBoundary><SettingsPage /></PageErrorBoundary>} />
+            <Route path="/admin-console"   element={<PageErrorBoundary><AdminDialogConsolePage /></PageErrorBoundary>} />
             <Route path="*"               element={<Navigate to="/dashboard" replace />} />
           </Routes>
+          </PageErrorBoundary>
         </main>
       </div>
     </div>

@@ -127,6 +127,15 @@ def _build_tree_from_paths(items: List[Dict[str, str]], separator: str) -> List[
 
 
 async def _fetch_ozon_categories(api_key: str, client_id: str | None) -> List[Dict[str, str]]:
+    import json as _j
+    _cache_key = f"pim:ozon_cats:{client_id}"
+    try:
+        from backend.celery_worker import redis_client as _rc
+        _cached = _rc.get(_cache_key)
+        if _cached:
+            return _j.loads(_cached)
+    except Exception:
+        pass
     headers = {
         "Client-Id": client_id or "",
         "Api-Key": api_key or "",
@@ -170,10 +179,25 @@ async def _fetch_ozon_categories(api_key: str, client_id: str | None) -> List[Di
     uniq: Dict[str, Dict[str, str]] = {}
     for c in out:
         uniq[c["id"]] = c
-    return list(uniq.values())
+    result = list(uniq.values())
+    try:
+        from backend.celery_worker import redis_client as _rc
+        _rc.setex(_cache_key, 3600, _j.dumps(result, ensure_ascii=False))
+    except Exception:
+        pass
+    return result
 
 
 async def _fetch_mm_categories(api_key: str) -> List[Dict[str, str]]:
+    import json as _j
+    _mm_cache_key = f"pim:mm_cats:{api_key[:16]}"
+    try:
+        from backend.celery_worker import redis_client as _rc
+        _cached = _rc.get(_mm_cache_key)
+        if _cached:
+            return _j.loads(_cached)
+    except Exception:
+        pass
     headers = megamarket_request_headers(api_key, for_post=False)
     async with megamarket_httpx_client(120.0) as client:
         res = await client.get(
@@ -209,7 +233,132 @@ async def _fetch_mm_categories(api_key: str) -> List[Dict[str, str]]:
     uniq: Dict[str, Dict[str, str]] = {}
     for c in out:
         uniq[c["id"]] = c
-    return list(uniq.values())
+    mm_result = list(uniq.values())
+    try:
+        from backend.celery_worker import redis_client as _rc
+        import json as _j
+        _rc.setex(_mm_cache_key, 3600, _j.dumps(mm_result, ensure_ascii=False))
+    except Exception:
+        pass
+    return mm_result
+
+
+
+async def _fetch_yandex_categories(api_key: str, client_id: str | None = None) -> List[Dict[str, str]]:
+    """Плоский список листовых категорий Яндекс.Маркет из POST /v2/categories/tree."""
+    import json as _j
+    _cache_key = f"pim:yandex_cats:{(api_key or '')[:16]}"
+    try:
+        from backend.celery_worker import redis_client as _rc
+        _cached = _rc.get(_cache_key)
+        if _cached:
+            return _j.loads(_cached)
+    except Exception:
+        pass
+
+    headers: Dict[str, str] = {"Content-Type": "application/json"}
+    if client_id:
+        headers["Authorization"] = f"OAuth oauth_token={api_key}, oauth_client_id={client_id}"
+    else:
+        headers["Api-Key"] = api_key
+
+    async with httpx.AsyncClient(timeout=120.0) as client:
+        res = await client.post(
+            "https://api.partner.market.yandex.ru/v2/categories/tree",
+            headers=headers,
+            json={"language": "RU"},
+        )
+    if res.status_code != 200:
+        return []
+    js = res.json()
+    if js.get("status") != "OK":
+        return []
+    root = js.get("result")
+    if not isinstance(root, dict):
+        return []
+
+    out: List[Dict[str, str]] = []
+
+    def walk(node: Any, path: str) -> None:
+        if not isinstance(node, dict):
+            return
+        name = str(node.get("name") or "").strip()
+        cid = node.get("id")
+        cur = f"{path} / {name}".strip(" /") if path and name else (name or path)
+        children = node.get("children")
+        # leaf: children is None or empty list
+        if not children:
+            if cid is not None:
+                out.append({"id": str(int(cid)), "name": cur})
+            return
+        for ch in (children or []):
+            walk(ch, cur)
+
+    walk(root, "")
+    uniq: Dict[str, Dict[str, str]] = {c["id"]: c for c in out}
+    result = list(uniq.values())
+    try:
+        from backend.celery_worker import redis_client as _rc
+        _rc.setex(_cache_key, 3600, _j.dumps(result, ensure_ascii=False))
+    except Exception:
+        pass
+    return result
+
+
+
+async def _fetch_wb_categories(api_key: str) -> List[Dict[str, str]]:
+    """Плоский список предметов (листовых категорий) Wildberries.
+    Использует GET /content/v2/object/all с пагинацией по offset.
+    id = subjectID — используется в /content/v2/object/charcs/{subjectId}.
+    """
+    import json as _j
+    _cache_key = f"pim:wb_cats:{(api_key or '')[:16]}"
+    try:
+        from backend.celery_worker import redis_client as _rc
+        _cached = _rc.get(_cache_key)
+        if _cached:
+            return _j.loads(_cached)
+    except Exception:
+        pass
+
+    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+    result = []
+    seen: set = set()
+    offset = 0
+
+    async with httpx.AsyncClient(timeout=60.0) as client:
+        while True:
+            res = await client.get(
+                "https://content-api.wildberries.ru/content/v2/object/all",
+                headers=headers,
+                params={"limit": 1000, "offset": offset},
+            )
+            if res.status_code != 200:
+                break
+            data = res.json().get("data") or []
+            for item in data:
+                if not isinstance(item, dict):
+                    continue
+                sid = item.get("subjectID")
+                if sid is None or str(sid) in seen:
+                    continue
+                seen.add(str(sid))
+                parent = item.get("parentName", "")
+                name = item.get("subjectName", "")
+                full_name = f"{parent} / {name}".strip(" /") if parent else name
+                result.append({"id": str(sid), "name": full_name})
+            if len(data) < 1000:
+                break
+            offset += 1000
+
+    uniq = {c["id"]: c for c in result}
+    final = list(uniq.values())
+    try:
+        from backend.celery_worker import redis_client as _rc
+        _rc.setex(_cache_key, 3600, _j.dumps(final, ensure_ascii=False))
+    except Exception:
+        pass
+    return final
 
 
 def _extract_schema_attributes(platform: str, category: Dict[str, str], schema: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -628,6 +777,7 @@ def get_attribute_star_map_state(edge_limit: int = 300) -> Dict[str, Any]:
             "megamarket_attributes": snap.get("megamarket_attributes", 0),
             "edges_total": len(snap.get("edges") or []),
             "manual_overrides_total": len(overrides),
+            "categories_by_platform": {k: v for k, v in (snap.get("categories_by_platform") or {}).items()},
         },
         "edges_sample": edges,
         "manual_overrides": overrides[:500],
@@ -869,3 +1019,189 @@ def get_attribute_star_map_build_status(task_id: str) -> Dict[str, Any]:
         return {"ok": False, "error": "task not found"}
     return {"ok": True, **job}
 
+
+
+# ─── Product attribute resolver ──────────────────────────────────────────────
+
+def resolve_product_attributes(
+    product_attrs: dict,
+    mm_category_id: str,
+    *,
+    score_threshold: float = 0.45,
+) -> dict:
+    """
+    Для конкретного товара и целевой категории MM возвращает готовый маппинг:
+      { "MM-атрибут": <готовое значение или {"id": ..., "name": ...} для словарных полей> }
+
+    Алгоритм:
+    1. Берём все edges из снапшота где to_category_id == mm_category_id
+    2. Для каждого edge ищем значение в product_attrs по from_name (+ нормализация)
+    3. Если у edge есть value_mappings — ищем точное совпадение значения с oz_value
+    4. Если mm_dictionary есть но value_mappings нет — fuzzy-match по словарю
+    5. Если атрибут не словарный — берём значение как есть
+    """
+    snap = _read_json(_STAR_MAP_SNAPSHOT, {})
+    edges = [
+        e for e in (snap.get("edges") or [])
+        if str(e.get("to_category_id") or "") == str(mm_category_id)
+        and float(e.get("score") or 0) >= score_threshold
+    ]
+
+    if not edges:
+        return {}
+
+    # Нормализованный индекс атрибутов товара
+    norm_attrs: dict[str, tuple[str, any]] = {}
+    for k, v in (product_attrs or {}).items():
+        norm_attrs[_norm(str(k))] = (k, v)
+
+    def _find_source_value(from_name: str):
+        """Ищет значение в атрибутах товара по имени атрибута-источника."""
+        fn = _norm(from_name)
+        # Точное совпадение
+        if fn in norm_attrs:
+            return norm_attrs[fn][1]
+        # Частичное совпадение
+        best_score, best_val = 0.0, None
+        for nk, (ok, ov) in norm_attrs.items():
+            s = _sim(fn, nk)
+            if s > best_score:
+                best_score, best_val = s, ov
+        if best_score >= 0.72:
+            return best_val
+        return None
+
+    def _match_dict_value(raw_value: any, value_mappings: list, mm_dictionary: list):
+        """
+        Сопоставляет сырое значение с словарём MM.
+        MM API принимает строку (name), не id.
+        Порядок: value_mappings от AI -> точное совпадение -> fuzzy -> substring.
+        """
+        if raw_value is None:
+            return None
+        raw_str = str(raw_value).strip()
+        raw_n = _norm(raw_str)
+
+        # 1. Готовые value_mappings от AI
+        for vm in (value_mappings or []):
+            if _norm(str(vm.get("oz_value") or "")) == raw_n:
+                return str(vm.get("mm_name") or "")  # MM принимает строку
+
+        # 2. Точное совпадение по словарю (без нормализации)
+        for opt in (mm_dictionary or []):
+            opt_name = str(opt.get("name") or "")
+            if opt_name.lower() == raw_str.lower():
+                return opt_name
+
+        # 3. Fuzzy по именам словаря
+        if not mm_dictionary:
+            return None
+        best_s, best_opt = 0.0, None
+        for opt in mm_dictionary:
+            opt_name = str(opt.get("name") or "")
+            s = _sim(raw_n, _norm(opt_name))
+            if s > best_s:
+                best_s, best_opt = s, opt
+        if best_s >= 0.72:
+            return str(best_opt.get("name") or "")
+
+        # 4. Substring match
+        for opt in mm_dictionary:
+            opt_n = _norm(str(opt.get("name") or ""))
+            if raw_n in opt_n or opt_n in raw_n:
+                return str(opt.get("name") or "")
+
+        return None
+
+    result: dict = {}
+    seen_mm_attrs: set = set()
+
+    # Сортируем по score — берём лучший edge для каждого MM-атрибута
+    edges_sorted = sorted(edges, key=lambda e: float(e.get("score") or 0), reverse=True)
+
+    for edge in edges_sorted:
+        to_name = str(edge.get("to_name") or "").strip()
+        if not to_name or to_name in seen_mm_attrs:
+            continue
+
+        from_name = str(edge.get("from_name") or "").strip()
+        raw_val = _find_source_value(from_name)
+        if raw_val is None:
+            continue
+
+        mm_dict = edge.get("mm_dictionary") or []
+        value_maps = edge.get("value_mappings") or []
+
+        if mm_dict:
+            # Словарное поле — нужно точное значение из словаря
+            matched = _match_dict_value(raw_val, value_maps, mm_dict)
+            if matched:
+                result[to_name] = matched
+                seen_mm_attrs.add(to_name)
+        else:
+            # Свободное поле — берём значение напрямую
+            result[to_name] = raw_val
+            seen_mm_attrs.add(to_name)
+
+    return result
+
+
+def enrich_star_map_value_mappings(ai_key: str, *, limit_edges: int = 200) -> dict:
+    """
+    Пробегает по всем edges со словарями в снапшоте у которых нет value_mappings,
+    запускает AI для каждого и дописывает результат обратно в снапшот.
+    Вызывать однократно после автосборки.
+    """
+    import openai as _openai
+
+    snap = _read_json(_STAR_MAP_SNAPSHOT, {})
+    edges = snap.get("edges") or []
+    needs_vm = [
+        e for e in edges
+        if (e.get("mm_dictionary") or [])
+        and not (e.get("value_mappings") or [])
+        and e.get("from_attribute_id")
+    ]
+
+    if not needs_vm:
+        return {"ok": True, "enriched": 0, "message": "Все edges уже имеют value_mappings"}
+
+    to_process = needs_vm[:limit_edges]
+    client = _openai.OpenAI(api_key=ai_key, base_url="https://api.deepseek.com")
+    enriched = 0
+
+    for edge in to_process:
+        oz_name = str(edge.get("from_name") or "")
+        mm_name = str(edge.get("to_name") or "")
+        mm_dict = edge.get("mm_dictionary") or []
+        is_suggest = edge.get("mm_is_suggest")
+        restrict = "" if is_suggest else "ВАЖНО: isSuggest=false — только значения из словаря MM, никаких выдумок."
+
+        prompt = f"""Атрибут Ozon "{oz_name}" соответствует атрибуту Megamarket "{mm_name}".
+Словарь Megamarket: {[{"id": o.get("id"), "name": o.get("name")} for o in mm_dict[:80]]}
+{restrict}
+
+Сопоставь возможные значения Ozon с вариантами из словаря MM.
+Верни JSON массив: [{{"oz_value": "...", "mm_id": "...", "mm_name": "..."}}]
+Только реальные смысловые совпадения. Если совпадений нет — верни []."""
+
+        try:
+            resp = client.chat.completions.create(
+                model="deepseek-chat",
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.1,
+                max_tokens=1500,
+            )
+            raw = resp.choices[0].message.content.strip()
+            import re as _re, json as _json
+            m = _re.search(r"\[.*\]", raw, _re.DOTALL)
+            if m:
+                vms = _json.loads(m.group())
+                edge["value_mappings"] = vms
+                enriched += 1
+        except Exception:
+            pass
+
+    snap["edges"] = edges
+    _write_json(_STAR_MAP_SNAPSHOT, snap)
+    return {"ok": True, "enriched": enriched, "total_needed": len(needs_vm)}

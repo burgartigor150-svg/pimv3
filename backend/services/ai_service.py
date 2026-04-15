@@ -20,10 +20,11 @@ def get_client_and_model(config_str: str, role: str = "runtime"):
             base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
         ), model
     elif provider == "local":
+        cfg_model = config.get("model", "") if isinstance(config, dict) else ""
         if role == "code":
-            local_model = os.getenv("LOCAL_CODE_LLM_MODEL", os.getenv("LOCAL_LLM_MODEL", "qwen3:14b"))
+            local_model = cfg_model or os.getenv("LOCAL_CODE_LLM_MODEL", os.getenv("LOCAL_LLM_MODEL", "qwen3:32b"))
         else:
-            local_model = os.getenv("LOCAL_LLM_MODEL", "qwen3:14b")
+            local_model = cfg_model or os.getenv("LOCAL_LLM_MODEL", "qwen3:32b")
         return AsyncOpenAI(api_key="ollama", base_url="http://127.0.0.1:11434/v1"), local_model
     else:
         return AsyncOpenAI(api_key=api_key, base_url="https://api.deepseek.com"), "deepseek-chat"
@@ -136,7 +137,7 @@ async def categorize_and_extract(text: str, active_attributes: List[Attribute], 
             {"role": "user", "content": text}
         ],
         response_format={"type": "json_object"},
-        max_tokens=8192
+        max_tokens=4096
     )
 
     try:
