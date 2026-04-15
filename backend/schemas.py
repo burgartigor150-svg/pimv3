@@ -20,6 +20,7 @@ class MarketplaceConnectionBase(BaseModel):
     client_id: Optional[str] = None
     store_id: Optional[str] = None
     warehouse_id: Optional[str] = None
+    store_ids: Optional[list] = []
 
 class MarketplaceConnectionCreate(MarketplaceConnectionBase):
     pass

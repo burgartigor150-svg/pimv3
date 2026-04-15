@@ -23,6 +23,9 @@ interface Connection {
   type: 'ozon' | 'wb' | 'yandex' | 'mega' | string;
   status: 'connected' | 'error' | 'pending' | string;
   last_sync?: string;
+  store_id?: string;
+  client_id?: string;
+  store_ids?: string[];
 }
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -78,6 +81,7 @@ function AddModal({ onClose, onAdded }: AddModalProps) {
   const [type, setType] = useState<typeof MARKETPLACES[number]>('ozon');
   const [name, setName] = useState('');
   const [apiKey, setApiKey] = useState('');
+  const [storeIds, setStoreIds] = useState('');
   const [loading, setLoading] = useState(false);
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -86,8 +90,17 @@ function AddModal({ onClose, onAdded }: AddModalProps) {
     if (!apiKey.trim()) { toast('Введите API ключ', 'error'); return; }
     setLoading(true);
     try {
-      await api.post('/connections', { name: name.trim(), type, api_key: apiKey.trim() });
-      toast('Подключение добавлено', 'success');
+      if (type === 'mega' && storeIds.trim()) {
+        const ids = storeIds.split(',').map(s => s.trim()).filter(Boolean);
+        for (const sid of ids) {
+          const connName = ids.length > 1 ? `${name.trim()} (${sid})` : name.trim();
+          await api.post('/connections', { name: connName, type: 'megamarket', api_key: apiKey.trim(), client_id: sid, store_id: sid });
+        }
+        toast(`Добавлено ${ids.length} подключений`, 'success');
+      } else {
+        await api.post('/connections', { name: name.trim(), type, api_key: apiKey.trim() });
+        toast('Подключение добавлено', 'success');
+      }
       onAdded();
       onClose();
     } catch (e: any) {
@@ -216,6 +229,29 @@ function AddModal({ onClose, onAdded }: AddModalProps) {
             />
           </div>
 
+          {/* Store IDs for Megamarket */}
+          {type === 'mega' && (
+            <div style={{ marginBottom: 16 }}>
+              <label
+                htmlFor="conn-stores"
+                style={{ display: 'block', color: 'rgba(255,255,255,0.45)', fontSize: 12, marginBottom: 8 }}
+              >
+                ID магазинов <span style={{ color: 'rgba(255,255,255,0.25)' }}>(через запятую, если несколько)</span>
+              </label>
+              <input
+                id="conn-stores"
+                className="input-premium"
+                style={{ width: '100%', padding: '10px 14px', boxSizing: 'border-box' }}
+                placeholder="263219, 264095"
+                value={storeIds}
+                onChange={(e) => setStoreIds(e.target.value)}
+              />
+              <p style={{ margin: '6px 0 0', fontSize: 11, color: 'rgba(255,255,255,0.2)', lineHeight: 1.4 }}>
+                Один API-ключ на все магазины. Для каждого ID будет создано отдельное подключение.
+              </p>
+            </div>
+          )}
+
           {/* API key */}
           <div style={{ marginBottom: 28 }}>
             <label
@@ -286,10 +322,11 @@ interface ConnectionCardProps {
   connection: Connection;
   onDelete: (id: string) => void;
   onTest: (id: string) => void;
+  onUpdate: (id: string, data: any) => void;
   testing: boolean;
 }
 
-function ConnectionCard({ connection, onDelete, onTest, testing }: ConnectionCardProps) {
+function ConnectionCard({ connection, onDelete, onTest, onUpdate, testing }: ConnectionCardProps) {
   const meta = MARKETPLACE_META[connection.type] ?? { emoji: '🔌', label: connection.type, color: '#6366f1' };
   const sc = getStatusConfig(connection.status);
 
@@ -375,6 +412,11 @@ function ConnectionCard({ connection, onDelete, onTest, testing }: ConnectionCar
           </div>
           <div style={{ color: 'rgba(255,255,255,0.35)', fontSize: 12, marginTop: 3 }}>
             {meta.label}
+            {connection.store_id && (
+              <span style={{ marginLeft: 6, background: 'rgba(255,255,255,0.05)', padding: '1px 6px', borderRadius: 4, fontSize: 10 }}>
+                ID: {connection.store_id}
+              </span>
+            )}
           </div>
         </div>
 
@@ -412,6 +454,49 @@ function ConnectionCard({ connection, onDelete, onTest, testing }: ConnectionCar
         <Clock size={12} />
         <span>Синхронизация: {formatSync(connection.last_sync)}</span>
       </div>
+
+      {/* Store IDs management for Megamarket */}
+      {(connection.type === 'megamarket' || connection.type === 'mega') && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+          <div style={{ fontSize: 11, color: 'rgba(255,255,255,0.3)' }}>Магазины:</div>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+            {(connection.store_ids || []).map((store: any) => {
+              const sid = typeof store === 'string' ? store : store.id;
+              const sname = typeof store === 'string' ? store : (store.name || store.id);
+              return (
+              <span key={sid} style={{
+                background: 'rgba(0,176,101,0.1)', border: '1px solid rgba(0,176,101,0.25)',
+                borderRadius: 6, padding: '3px 8px', fontSize: 11, color: '#00b065',
+                display: 'flex', alignItems: 'center', gap: 4,
+              }}>
+                {sname}
+                <button onClick={() => {
+                  const newIds = (connection.store_ids || []).filter((s: any) => (typeof s === 'string' ? s : s.id) !== sid);
+                  onUpdate(connection.id, { store_ids: newIds });
+                }} style={{
+                  background: 'none', border: 'none', color: 'rgba(255,255,255,0.3)',
+                  cursor: 'pointer', fontSize: 12, padding: 0, lineHeight: 1,
+                }}>&times;</button>
+              </span>
+              );
+            })}
+            <button onClick={() => {
+              const newId = prompt('ID магазина:');
+              if (newId && newId.trim()) {
+                const newName = prompt('Название магазина:') || newId.trim();
+                const current = connection.store_ids || [];
+                if (!current.find((s: any) => (typeof s === 'string' ? s : s.id) === newId.trim())) {
+                  onUpdate(connection.id, { store_ids: [...current, {id: newId.trim(), name: newName.trim()}] });
+                }
+              }
+            }} style={{
+              background: 'rgba(255,255,255,0.03)', border: '1px dashed rgba(255,255,255,0.15)',
+              borderRadius: 6, padding: '3px 10px', fontSize: 11, color: 'rgba(255,255,255,0.35)',
+              cursor: 'pointer',
+            }}>+ добавить</button>
+          </div>
+        </div>
+      )}
 
       {/* Divider */}
       <div style={{ height: 1, background: 'rgba(255,255,255,0.05)' }} />
@@ -493,6 +578,16 @@ export default function IntegrationsPage() {
   }, [toast]);
 
   useEffect(() => { fetchConnections(); }, [fetchConnections]);
+
+  const handleUpdate = async (id: string, data: any) => {
+    try {
+      await api.patch(`/connections/${id}`, data);
+      toast('Подключение обновлено', 'success');
+      fetchConnections();
+    } catch (e: any) {
+      toast(e?.response?.data?.detail ?? 'Ошибка обновления', 'error');
+    }
+  };
 
   const handleDelete = async (id: string) => {
     try {
@@ -744,6 +839,7 @@ export default function IntegrationsPage() {
             {connections.map((conn) => (
               <div key={conn.id} className="animate-fade-up">
                 <ConnectionCard
+                  onUpdate={handleUpdate}
                   connection={conn}
                   onDelete={handleDelete}
                   onTest={handleTest}

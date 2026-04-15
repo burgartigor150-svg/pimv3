@@ -57,6 +57,43 @@ class MarketplaceAdapter(ABC):
         raise NotImplementedError
 
 class OzonAdapter(MarketplaceAdapter):
+    _category_name_cache: Dict[str, str] = {}
+
+    async def _resolve_ozon_category_name(self, category_id: str) -> str:
+        """Resolve Ozon category_id to human-readable name via description-category/tree."""
+        if not category_id or not category_id.strip():
+            return ""
+        cid = str(category_id).strip()
+        if cid in OzonAdapter._category_name_cache:
+            return OzonAdapter._category_name_cache[cid]
+        try:
+            headers = self._ozon_headers()
+            async with ozon_httpx_client(60.0) as client:
+                res = await client.post(
+                    "https://api-seller.ozon.ru/v1/description-category/tree",
+                    headers=headers,
+                )
+            if res.status_code == 200:
+                tree = res.json().get("result", [])
+                def _cache_tree(nodes, path):
+                    for node in nodes:
+                        nname = node.get("category_name", "")
+                        current = (path + " / " + nname) if path else nname
+                        nid = str(node.get("description_category_id", ""))
+                        if nid:
+                            OzonAdapter._category_name_cache[nid] = current
+                        type_name = node.get("type_name", "")
+                        if "type_id" in node and nid:
+                            combo = f"{nid}_{node['type_id']}"
+                            label = f"{current} -> {type_name}" if type_name else current
+                            OzonAdapter._category_name_cache[combo] = label
+                        if "children" in node:
+                            _cache_tree(node["children"], current)
+                _cache_tree(tree, "")
+        except Exception:
+            pass
+        return OzonAdapter._category_name_cache.get(cid, "")
+
     def _ozon_headers(self) -> Dict[str, str]:
         return {
             "Client-Id": self.client_id or "",
@@ -532,15 +569,27 @@ class OzonAdapter(MarketplaceAdapter):
                     if vals:
                         brand = str(vals[0].get("value") or "")
                         break
+            ozon_cat_id = str(info.get("category_id") or "")
+            ozon_cat_name = ""
+            if ozon_cat_id:
+                ozon_cat_name = await self._resolve_ozon_category_name(ozon_cat_id)
+            all_imgs = []
+            if isinstance(imgs, list):
+                all_imgs = [str(im) for im in imgs if im]
+            elif imgs:
+                all_imgs = [str(imgs)]
             items.append({
                 "sku": str(it.get("offer_id") or pid),
                 "name": str(info.get("name") or it.get("name") or ""),
                 "brand": brand,
-                "category": str(info.get("category_id") or ""),
-                "image_url": img,
+                "description": str(info.get("description") or ""),
+                "category": ozon_cat_id,
+                "category_name": ozon_cat_name,
+                "image_url": all_imgs[0] if all_imgs else "",
+                "images": all_imgs,
                 "status": "archived" if (info.get("is_archived") or info.get("archived")) else str(info.get("visibility") or "active").lower(),
                 "attributes": attrs,
-                "marketplace_product_id": pid,
+                "marketplace_product_id": str(c.get("nmID") or ""),
                 "_raw": info or it,
             })
         has_more = bool(next_last_id) and len(chunk) >= page_size
@@ -671,12 +720,88 @@ class WbAdapter(MarketplaceAdapter):
         return {"status": "error", "message": f"Ошибка подключения: HTTP {res.status_code}"}
 
     async def push_product(self, mapped_payload: Dict[str, Any]) -> Dict[str, Any]:
+        """Build WB card from flat mapped_payload and push via /content/v2/cards/upload."""
         headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json"
         }
+        flat = dict(mapped_payload or {})
+
+        # Resolve subjectID from categoryId
+        subject_id = flat.pop("categoryId", None) or flat.pop("category_id", None) or flat.pop("subjectID", None)
+        if not subject_id:
+            return {"status_code": 400, "response": "WB: categoryId (subjectID) не указан"}
+        try:
+            subject_id = int(subject_id)
+        except (ValueError, TypeError):
+            return {"status_code": 400, "response": f"WB: невалидный subjectID: {subject_id}"}
+
+        vendor_code = str(flat.pop("offer_id", "") or flat.pop("vendorCode", "") or flat.pop("sku", "")).replace("mp:", "").strip()
+        if not vendor_code:
+            return {"status_code": 400, "response": "WB: нет offer_id / vendorCode"}
+
+        title = str(flat.pop("name", "") or flat.pop("Наименование", "") or vendor_code)
+
+        # Get category schema to map attributes
+        schema = await self.get_category_schema(str(subject_id))
+        schema_attrs = schema.get("attributes") or []
+        schema_by_name: Dict[str, Dict[str, Any]] = {}
+        for sa in schema_attrs:
+            nm = str(sa.get("name") or "").strip()
+            if nm:
+                schema_by_name[nm.lower()] = sa
+
+        # Build characteristics array
+        characteristics = []
+        used_keys = {"offer_id", "vendorCode", "sku", "name", "description", "images", "categoryId", "category_id",
+                      "subjectID", "Фото", "Описание", "Наименование", "_platforms", "_vendor_code", "brand"}
+
+        # Brand
+        brand = str(flat.get("brand", "") or flat.get("Бренд", "") or flat.get("Торговая марка", "") or "")
+        if not brand:
+            brand = str(flat.get("Brand", "") or "")
+
+        # Photos
+        photos = flat.get("Фото") or flat.get("images") or flat.get("Изображения") or []
+        if isinstance(photos, str):
+            photos = [p.strip() for p in photos.split(",") if p.strip()]
+
+        # Description
+        desc = str(flat.get("Описание") or flat.get("description") or "")
+
+        # Map flat attrs to WB characteristics
+        for key, value in flat.items():
+            if key in used_keys or key.startswith("_"):
+                continue
+            if value is None or (isinstance(value, str) and not value.strip()):
+                continue
+            # Find matching schema attribute
+            sa = schema_by_name.get(key.lower())
+            if sa:
+                charc_id = sa.get("id")
+                if charc_id is not None:
+                    # WB expects: int values as [int], string as [str]
+                    if isinstance(value, (int, float)):
+                        characteristics.append({"id": int(charc_id), "value": [int(value)]})
+                    else:
+                        characteristics.append({"id": int(charc_id), "value": [str(value)]})
+
+        # Build WB card
+        card = {
+            "subjectID": subject_id,
+            "variants": [{
+                "vendorCode": vendor_code,
+                "title": title[:100],
+                "description": desc[:5000] if desc else "",
+                "brand": brand,
+                "characteristics": characteristics,
+                "sizes": [{"techSize": "0", "wbSize": "", "price": int(float(str(flat.get("price", "0") or flat.get("Цена", "0") or "0").replace(",","."))) or 0}],
+                "mediaFiles": photos[:30] if photos else [],
+            }],
+        }
+
         async with httpx.AsyncClient(timeout=60.0) as client:
-            res = await client.post("https://content-api.wildberries.ru/content/v2/cards/upload", headers=headers, json=[mapped_payload])
+            res = await client.post("https://content-api.wildberries.ru/content/v2/cards/upload", headers=headers, json=[card])
             return {"status_code": res.status_code, "response": res.text}
             
     async def pull_product(self, sku: str) -> Optional[Dict[str, Any]]:
@@ -794,15 +919,18 @@ class WbAdapter(MarketplaceAdapter):
                 nm_id = c.get("nmID")
                 img = f"https://basket-01.wbbasket.ru/vol{nm_id // 100000}/part{nm_id // 1000}/{nm_id}/images/big/1.webp" if nm_id else ""
             attrs = c.get("characteristics") or []
+            wb_cat = str(c.get("subjectName") or "")
             items.append({
                 "sku": str(c.get("vendorCode") or ""),
                 "name": str(c.get("title") or ""),
                 "brand": str(c.get("brand") or ""),
-                "category": str(c.get("subjectName") or ""),
+                "category": wb_cat,
+                "category_name": wb_cat,
                 "image_url": img,
+                "images": [ph.get("big") or ph.get("c516x688") or "" for ph in (photos or []) if isinstance(ph, dict)] if photos and isinstance(photos[0], dict) else ([img] if img else []),
                 "status": "active",
                 "attributes": attrs,
-                "marketplace_product_id": pid,
+                "marketplace_product_id": str(c.get("nmID") or ""),
                 "_raw": c,
             })
         total = resp_cursor.get("total", len(items))
@@ -859,15 +987,101 @@ class YandexAdapter(MarketplaceAdapter):
         return {"status": "error", "message": f"Ошибка подключения: HTTP {res.status_code}"}
 
     async def push_product(self, mapped_payload: Dict[str, Any]) -> Dict[str, Any]:
+        """Build Yandex Market offer from flat mapped_payload and push via offer-mappings/update."""
         bid = self._business_id()
         if bid is None:
             return {
                 "status_code": 400,
                 "response": "Яндекс Маркет: укажите store_id подключения = businessId кабинета (целое число).",
             }
+
+        flat = dict(mapped_payload or {})
+
+        # If already in correct format, pass through
+        if "offerMappingEntries" in flat or "offerMappings" in flat:
+            url = f"{YANDEX_PARTNER_API_BASE}/businesses/{bid}/offer-mappings/update"
+            async with httpx.AsyncClient(timeout=120.0) as client:
+                res = await client.post(url, headers=self._headers(), json=flat)
+                return {"status_code": res.status_code, "response": res.text}
+
+        offer_id = str(flat.get("offer_id", "") or flat.get("offerId", "") or flat.get("sku", "")).replace("mp:", "").strip()
+        name = str(flat.get("name", "") or flat.get("Название", "") or offer_id)
+        desc = str(flat.get("description", "") or flat.get("Описание", "") or "")
+        brand = str(flat.get("brand", "") or flat.get("Бренд", "") or flat.get("Торговая марка", "") or "")
+        vendor_code = str(flat.get("vendorCode", "") or flat.get("Артикул вендора", "") or offer_id)
+
+        category_id = flat.get("categoryId") or flat.get("category_id")
+        try:
+            category_id = int(category_id) if category_id else None
+        except (ValueError, TypeError):
+            category_id = None
+
+        # Photos
+        photos = flat.get("Фото") or flat.get("images") or flat.get("Изображения") or []
+        if isinstance(photos, str):
+            photos = [p.strip() for p in photos.split(",") if p.strip()]
+        pictures = [str(u) for u in photos if u]
+
+        # Barcode
+        barcode = str(flat.get("Штрихкод", "") or flat.get("barcode", "") or flat.get("Штрих-код", "") or "").strip()
+        barcodes = [barcode] if barcode else []
+
+        # Map attributes to Yandex parameterValues
+        # Get schema if category available
+        params = []
+        used_keys = {"offer_id", "offerId", "sku", "name", "description", "brand", "vendorCode",
+                      "categoryId", "category_id", "images", "Фото", "Изображения", "Описание",
+                      "Название", "Бренд", "Торговая марка", "Штрихкод", "barcode", "price",
+                      "Цена", "_platforms", "_vendor_code", "Артикул вендора"}
+
+        if category_id:
+            schema = await self.get_category_schema(str(category_id))
+            schema_attrs = schema.get("attributes") or []
+            schema_by_name: Dict[str, Dict[str, Any]] = {}
+            for sa in schema_attrs:
+                nm = str(sa.get("name") or "").strip()
+                if nm:
+                    schema_by_name[nm.lower()] = sa
+
+            for key, value in flat.items():
+                if key in used_keys or key.startswith("_"):
+                    continue
+                if value is None or (isinstance(value, str) and not value.strip()):
+                    continue
+                sa = schema_by_name.get(key.lower())
+                if sa:
+                    param_id = sa.get("id")
+                    if param_id is not None:
+                        params.append({"parameterId": int(param_id), "value": str(value)})
+
+        offer: Dict[str, Any] = {
+            "offerId": offer_id,
+            "name": name[:150],
+            "description": desc[:3000] if desc else None,
+            "vendor": brand or None,
+            "vendorCode": vendor_code,
+        }
+        if category_id:
+            offer["category"] = category_id
+        if pictures:
+            offer["pictures"] = pictures[:10]
+        if barcodes:
+            offer["barcodes"] = barcodes
+        if params:
+            offer["parameterValues"] = params
+
+        # Remove None values
+        offer = {k: v for k, v in offer.items() if v is not None}
+
+        body = {
+            "offerMappingEntries": [{
+                "offer": offer,
+            }]
+        }
+
         url = f"{YANDEX_PARTNER_API_BASE}/businesses/{bid}/offer-mappings/update"
         async with httpx.AsyncClient(timeout=120.0) as client:
-            res = await client.post(url, headers=self._headers(), json=mapped_payload)
+            res = await client.post(url, headers=self._headers(), json=body)
             return {"status_code": res.status_code, "response": res.text}
 
     async def pull_product(self, sku: str) -> Optional[Dict[str, Any]]:
@@ -1073,12 +1287,15 @@ class YandexAdapter(MarketplaceAdapter):
             offer = row.get("offer") or {}
             pics = offer.get("pictures") or []
             mapping_info = row.get("mapping") or {}
+            ya_cat = str(mapping_info.get("marketCategoryName") or offer.get("category") or "")
             items.append({
                 "sku": str(offer.get("offerId") or ""),
                 "name": str(offer.get("name") or ""),
                 "brand": str(offer.get("vendor") or ""),
-                "category": str(mapping_info.get("marketCategoryName") or offer.get("category") or ""),
+                "category": ya_cat,
+                "category_name": ya_cat,
                 "image_url": pics[0] if pics else "",
+                "images": pics if pics else [],
                 "status": str(offer.get("cardStatus") or "active").lower(),
                 "attributes": offer,
                 "_raw": offer,
@@ -1086,6 +1303,38 @@ class YandexAdapter(MarketplaceAdapter):
         return {"items": items, "total": len(items), "has_more": bool(next_token), "next_page_token": next_token}
 
 class MegamarketAdapter(MarketplaceAdapter):
+    _category_name_cache: Dict[str, str] = {}
+
+    async def _resolve_mm_category_name(self, category_id: str) -> str:
+        """Resolve Megamarket categoryId to human-readable name via categoryTree."""
+        if not category_id or not category_id.strip():
+            return ""
+        cid = str(category_id).strip()
+        if cid in MegamarketAdapter._category_name_cache:
+            return MegamarketAdapter._category_name_cache[cid]
+        try:
+            headers = megamarket_request_headers(self.api_key, for_post=False)
+            async with megamarket_httpx_client(60.0) as client:
+                res = await client.get(
+                    "https://api.megamarket.tech/api/merchantIntegration/assortment/v1/categoryTree/get",
+                    headers=headers,
+                )
+            if res.status_code == 200:
+                tree = res.json().get("data", [])
+                def _cache_tree(nodes, parent_path):
+                    for node in nodes:
+                        nname = node.get("name", "")
+                        path = (parent_path + " -> " + nname) if parent_path else nname
+                        nid = str(node.get("id", ""))
+                        if nid:
+                            MegamarketAdapter._category_name_cache[nid] = path
+                        if "children" in node:
+                            _cache_tree(node["children"], path)
+                _cache_tree(tree, "")
+        except Exception:
+            pass
+        return MegamarketAdapter._category_name_cache.get(cid, "")
+
     @staticmethod
     def _norm_attr_name(name: str) -> str:
         text = str(name or "").strip().lower().replace("ё", "е")
@@ -1096,7 +1345,7 @@ class MegamarketAdapter(MarketplaceAdapter):
         headers = megamarket_request_headers(self.api_key, for_post=False)
         async with megamarket_httpx_client(60.0) as client:
             try:
-                res = await client.get("https://partner.megamarket.ru/api/merchantIntegration/assortment/v1/categoryTree/get", headers=headers)
+                res = await client.get("https://api.megamarket.tech/api/merchantIntegration/assortment/v1/categoryTree/get", headers=headers)
                 _log.debug("MM CAT SEARCH: %s", res.status_code)
                 if res.status_code == 200:
                     tree = res.json().get("data", [])
@@ -1135,7 +1384,7 @@ class MegamarketAdapter(MarketplaceAdapter):
         headers = megamarket_request_headers(self.api_key, for_post=True)
         async with megamarket_httpx_client(60.0) as client:
             try:
-                res = await client.post("https://partner.megamarket.ru/api/merchantIntegration/assortment/v1/infomodel/get", headers=headers, json={"data": {"categoryId": int(category_id)}})
+                res = await client.post("https://api.megamarket.tech/api/merchantIntegration/assortment/v1/infomodel/get", headers=headers, json={"data": {"categoryId": int(category_id)}})
                 if res.status_code == 200:
                     data = res.json().get("data", {})
                     attrs = data.get("masterAttributes", []) + data.get("contentAttributes", [])
@@ -1269,6 +1518,29 @@ class MegamarketAdapter(MarketplaceAdapter):
                     if rv_c and on_c and rv_c == on_c:
                         matched = oname
                         break
+            # Fuzzy fallback: substring match or prefix match
+            if matched is None and rv_c:
+                best_sim = 0
+                best_opt = None
+                for o in opts:
+                    oname = str(o.get("name", "") if isinstance(o, dict) else o).strip()
+                    if not oname:
+                        continue
+                    on_c = _canonical(oname)
+                    if not on_c:
+                        continue
+                    # Substring containment
+                    if rv_c in on_c or on_c in rv_c:
+                        if len(on_c) > best_sim:
+                            best_sim = len(on_c)
+                            best_opt = oname
+                    # Prefix match (first 4+ chars)
+                    elif len(rv_c) >= 4 and len(on_c) >= 4 and (rv_c[:4] == on_c[:4]):
+                        if len(on_c) > best_sim:
+                            best_sim = len(on_c)
+                            best_opt = oname
+                if best_opt:
+                    matched = best_opt
             if matched is not None:
                 out.append(matched)
         return out
@@ -1280,7 +1552,7 @@ class MegamarketAdapter(MarketplaceAdapter):
         payload = {"data": {"locationId": str(location_id), "items": [{"offerId": str(offer_id)[:35], "price": kop}]}}
         async with megamarket_httpx_client(60.0) as client:
             res = await client.post(
-                "https://partner.megamarket.ru/api/merchantIntegration/assortment/v1/price/updateByOfferId",
+                "https://api.megamarket.tech/api/merchantIntegration/assortment/v1/price/updateByOfferId",
                 headers=headers,
                 json=payload,
             )
@@ -1297,7 +1569,7 @@ class MegamarketAdapter(MarketplaceAdapter):
         }
         async with megamarket_httpx_client(60.0) as client:
             res = await client.post(
-                "https://partner.megamarket.ru/api/merchantIntegration/assortment/v1/stock/updateByOfferId",
+                "https://api.megamarket.tech/api/merchantIntegration/assortment/v1/stock/updateByOfferId",
                 headers=headers,
                 json=payload,
             )
@@ -1318,7 +1590,7 @@ class MegamarketAdapter(MarketplaceAdapter):
         try:
             async with megamarket_httpx_client(30.0) as client:
                 res = await client.post(
-                    "https://partner.megamarket.ru/api/merchantIntegration/assortment/v1/card/getAttributes",
+                    "https://api.megamarket.tech/api/merchantIntegration/assortment/v1/card/getAttributes",
                     headers=headers,
                     json=payload,
                 )
@@ -1361,7 +1633,35 @@ class MegamarketAdapter(MarketplaceAdapter):
 
     async def push_product(self, mapped_payload: Dict[str, Any]) -> Dict[str, Any]:
         headers = megamarket_request_headers(self.api_key, for_post=True)
-        
+
+        # Sanitize garbage values from AI mapper before processing
+        sku_raw = str(mapped_payload.get("offer_id") or mapped_payload.get("offerId") or mapped_payload.get("Код товара продавца") or "")
+        sku_digits = set(re.findall(r"\d{4,}", sku_raw))
+        garbage_keys = []
+        for k, v in mapped_payload.items():
+            if k.startswith("_") or k in ("categoryId", "offer_id", "offerId", "name", "Наименование карточки",
+                                           "Фото", "images", "Описание", "Описание товара", "Бренд",
+                                           "Код товара продавца", "Штрихкод", "Артикул (SKU)"):
+                continue
+            sv = str(v).strip()
+            # Negative numbers are never valid for product attributes
+            if sv.lstrip("-").isdigit() and float(sv) < 0:
+                garbage_keys.append(k)
+            # SKU digits stuffed into wrong fields  
+            elif sv.lstrip("-") in sku_digits and len(sv) >= 4:
+                garbage_keys.append(k)
+            # Model number stuffed into non-model fields
+            elif k not in ("Модель", "Наименование модели", "Артикул производителя") and sv == str(mapped_payload.get("Модель") or mapped_payload.get("Наименование модели") or ""):
+                if sv and len(sv) > 3:
+                    garbage_keys.append(k)
+        for gk in garbage_keys:
+            _log.info("MM sanitize: removing garbage %s=%s", gk, mapped_payload[gk])
+            del mapped_payload[gk]
+        # Fix offer_id prefix
+        for oid_key in ("offer_id", "offerId", "Код товара продавца"):
+            if oid_key in mapped_payload:
+                mapped_payload[oid_key] = str(mapped_payload[oid_key]).replace("mp:", "")
+
         cat_id = 0
         if "categoryId" in mapped_payload:
             val = mapped_payload.pop("categoryId")
@@ -2073,7 +2373,7 @@ class MegamarketAdapter(MarketplaceAdapter):
             }
                 
         # Документация MM: от 1 до 16 фотографий
-        short_photos = local_photos[:16]
+        short_photos = local_photos[:15]
         
         # Mutate the payload so the user's frontend UI shows the proxied URLs instead of raw Ozon
         if isinstance(raw_photos, list):
@@ -2249,7 +2549,7 @@ class MegamarketAdapter(MarketplaceAdapter):
             
         _log.debug("MM PAYLOAD categoryId=%s cards=%s", cat_id, len(payload.get("cards", [])))
         async with megamarket_httpx_client(60.0) as client:
-            res = await client.post("https://partner.megamarket.ru/api/merchantIntegration/assortment/v1/card/save", headers=headers, json=payload)
+            res = await client.post("https://api.megamarket.tech/api/merchantIntegration/assortment/v1/card/save", headers=headers, json=payload)
             
             try:
                 data = res.json()
@@ -2266,7 +2566,7 @@ class MegamarketAdapter(MarketplaceAdapter):
         payload = {"filter": {}, "limit": limit, "offset": offset}
         async with megamarket_httpx_client(60.0) as client:
             res = await client.post(
-                "https://partner.megamarket.ru/api/merchantIntegration/assortment/v1/card/get",
+                "https://api.megamarket.tech/api/merchantIntegration/assortment/v1/card/get",
                 headers=headers,
                 json=payload,
             )
@@ -2287,7 +2587,7 @@ class MegamarketAdapter(MarketplaceAdapter):
             }
             async with megamarket_httpx_client(60.0) as client2:
                 res2 = await client2.post(
-                    "https://partner.megamarket.ru/api/merchantIntegration/assortment/v1/card/getAttributes",
+                    "https://api.megamarket.tech/api/merchantIntegration/assortment/v1/card/getAttributes",
                     headers=headers,
                     json=attrs_payload,
                 )
@@ -2305,12 +2605,24 @@ class MegamarketAdapter(MarketplaceAdapter):
                 status_str = str(st).lower()
             attrs = attrs_by_id.get(sku) or {}
             photos = attrs.get("photos") or []
+            mm_cat_id = str(attrs.get("categoryId") or "")
+            mm_cat_name = ""
+            if mm_cat_id:
+                mm_cat_name = await self._resolve_mm_category_name(mm_cat_id)
+            all_photos = []
+            for ph in (photos or []):
+                url = ph.get("url", ph) if isinstance(ph, dict) else ph
+                if url:
+                    all_photos.append(str(url))
             items.append({
                 "sku": sku,
                 "name": str(attrs.get("name") or sku),
                 "brand": str(attrs.get("brand") or ""),
-                "category": str(attrs.get("categoryId") or ""),
-                "image_url": photos[0].get("url", photos[0]) if photos and isinstance(photos[0], dict) else (photos[0] if photos else ""),
+                "description": str(attrs.get("description") or ""),
+                "category": mm_cat_id,
+                "category_name": mm_cat_name,
+                "image_url": all_photos[0] if all_photos else "",
+                "images": all_photos,
                 "status": status_str,
                 "attributes": attrs.get("contentAttributes") or [],
                 "marketplace_product_id": str(c.get("goodsId") or ""),
@@ -2324,7 +2636,7 @@ class MegamarketAdapter(MarketplaceAdapter):
             # Assortment API: card/get returns card status/meta, card/getAttributes returns full attributes.
             card_payload = {"filter": {"offerId": [str(sku)]}, "limit": 1}
             res_card = await client.post(
-                "https://partner.megamarket.ru/api/merchantIntegration/assortment/v1/card/get",
+                "https://api.megamarket.tech/api/merchantIntegration/assortment/v1/card/get",
                 headers=headers,
                 json=card_payload,
             )
@@ -2341,7 +2653,7 @@ class MegamarketAdapter(MarketplaceAdapter):
                 "targetFields": "all",
             }
             res_attrs = await client.post(
-                "https://partner.megamarket.ru/api/merchantIntegration/assortment/v1/card/getAttributes",
+                "https://api.megamarket.tech/api/merchantIntegration/assortment/v1/card/getAttributes",
                 headers=headers,
                 json=attrs_payload,
             )
@@ -2365,7 +2677,7 @@ class MegamarketAdapter(MarketplaceAdapter):
         }
         try:
             async with megamarket_httpx_client(60.0) as client:
-                res = await client.post("https://partner.megamarket.ru/api/merchantIntegration/assortment/v1/card/getError", headers=headers, json=payload)
+                res = await client.post("https://api.megamarket.tech/api/merchantIntegration/assortment/v1/card/getError", headers=headers, json=payload)
                 if res.status_code == 200:
                     data = res.json()
                     errors = self._mm_extract_error_cards(data)
@@ -2423,7 +2735,7 @@ class MegamarketAdapter(MarketplaceAdapter):
         try:
             async with megamarket_httpx_client(60.0) as client:
                 res = await client.post(
-                    "https://partner.megamarket.ru/api/merchantIntegration/assortment/v1/card/getError",
+                    "https://api.megamarket.tech/api/merchantIntegration/assortment/v1/card/getError",
                     headers=headers,
                     json=payload,
                 )
@@ -2451,7 +2763,7 @@ class MegamarketAdapter(MarketplaceAdapter):
         try:
             async with megamarket_httpx_client(15.0) as client:
                 res = await client.get(
-                    "https://partner.megamarket.ru/api/merchantIntegration/assortment/v1/categoryTree/get",
+                    "https://api.megamarket.tech/api/merchantIntegration/assortment/v1/categoryTree/get",
                     headers=headers,
                 )
             if res.status_code == 200:

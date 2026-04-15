@@ -31,7 +31,8 @@ test.describe("Settings Page", () => {
   });
 
   test("save button exists", async ({ page }) => {
-    const saveBtn = page.locator("button").filter({ hasText: /Сохранить|Save/i });
+    // Use .first() since there may be multiple save buttons
+    const saveBtn = page.locator("button").filter({ hasText: /Сохранить|Save/i }).first();
     await expect(saveBtn).toBeVisible({ timeout: 5000 });
   });
 

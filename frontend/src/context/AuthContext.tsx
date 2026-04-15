@@ -10,7 +10,7 @@ interface User {
 interface AuthContextType {
   user: User | null;
   token: string | null;
-  login: (token: string, role: string, email: string) => void;
+  login: (token: string, role: string, email: string, refreshToken?: string) => void;
   logout: () => void;
   isAuthenticated: boolean;
 }
@@ -47,8 +47,11 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }
   }, [user]);
 
-  const login = (newToken: string, role: string, email: string) => {
+  const login = (newToken: string, role: string, email: string, refreshToken?: string) => {
     localStorage.setItem('token', newToken);
+    if (refreshToken) {
+      localStorage.setItem('refresh_token', refreshToken);
+    }
     api.defaults.headers.common['Authorization'] = `Bearer ${newToken}`;
     setToken(newToken);
     setUser({ email, role });
@@ -57,6 +60,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const logout = () => {
     setToken(null);
     setUser(null);
+    localStorage.removeItem('refresh_token');
     window.location.href = '/login';
   };
 

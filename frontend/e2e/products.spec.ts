@@ -11,15 +11,15 @@ test.describe('Product List', () => {
     // Page heading "Товары" should be visible
     await expect(page.locator('h1')).toContainText('Товары');
 
-    // Should have total count badge (badge-purple with number)
+    // Should have total count badge
     const badge = page.locator('span').filter({ hasText: /\d+/ }).first();
     await expect(badge).toBeVisible({ timeout: 15000 });
 
-    // Wait for loading to finish — there should be no Loader spinner
-    // Products should appear in some list/table
-    // Each product row is clickable — just wait for at least one product name or SKU
-    await page.waitForTimeout(3000); // Give API time to respond
-    // At minimum, the filter bar with search input should exist
+    // Wait for table to render
+    await page.waitForSelector('tbody tr', { timeout: 15000 }).catch(() => {});
+    await page.waitForTimeout(1000);
+
+    // Search input should exist
     const searchInput = page.locator('input[placeholder*="Поиск"]');
     await expect(searchInput).toBeVisible();
   });
@@ -38,27 +38,33 @@ test.describe('Product List', () => {
   });
 
   test('Click product navigates to product details', async ({ page }) => {
-    // Wait for products to load
-    await page.waitForTimeout(3000);
+    // Wait for products table to load
+    await page.waitForSelector('tbody tr', { timeout: 15000 });
+    await page.waitForTimeout(1000);
 
-    // Find the first clickable product row — they use cursor:pointer
-    // Products are rendered as table rows or divs that navigate on click
-    const productRows = page.locator('[style*="cursor: pointer"], [style*="cursor:pointer"]').first();
-    const hasProducts = await productRows.count() > 0;
+    const firstRow = page.locator('tbody tr').first();
+    const hasProducts = await firstRow.count() > 0;
     if (!hasProducts) {
       test.skip(true, 'No products available to click');
       return;
     }
-    await productRows.click();
+
+    const beforeUrl = page.url();
+    await firstRow.click();
+
+    // Wait for SPA navigation
+    await page.waitForFunction(
+      (oldUrl) => window.location.href !== oldUrl,
+      beforeUrl,
+      { timeout: 15000 }
+    );
 
     // Should navigate to /products/:id
-    await page.waitForURL('**/products/**', { timeout: 10000 });
     expect(page.url()).toMatch(/\/products\/.+/);
   });
 
   test('MP product tab shows marketplace products', async ({ page }) => {
     // Look for source/platform tabs (PIM, Ozon, Megamarket etc.)
-    // These are buttons with platform names
     const platformButtons = page.locator('button').filter({ hasText: /Ozon|Megamarket|Wildberries|PIM/ });
     const count = await platformButtons.count();
     if (count <= 1) {
@@ -81,7 +87,6 @@ test.describe('Product List', () => {
     await page.waitForTimeout(3000);
 
     // Pagination uses ChevronLeft / ChevronRight buttons
-    // Look for a next-page button or page number
     const nextBtn = page.locator('button').filter({ hasText: /›|Далее|→/ });
     const paginationExists = await nextBtn.count() > 0;
     if (!paginationExists) {

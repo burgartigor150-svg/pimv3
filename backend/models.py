@@ -54,6 +54,7 @@ class MarketplaceConnection(Base):
     store_id = Column(String, nullable=True)
     # Мегамаркет Assortment API: locationId склада для price/* и stock/*
     warehouse_id = Column(String, nullable=True)
+    store_ids = Column(JSONB, nullable=True, default=[])  # List of store/merchant IDs for multi-store platforms
     status = Column(String, nullable=True, default="pending")  # connected, error, pending
 
 class SystemSettings(Base):

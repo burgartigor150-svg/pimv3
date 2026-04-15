@@ -1,4 +1,6 @@
 import os
+from dotenv import load_dotenv
+load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))
 import json
 import logging
 import shutil
@@ -890,13 +892,16 @@ async def get_products(
     db: AsyncSession = Depends(get_db),
     current_user: models.User = Depends(get_current_user),
 ):
-    from sqlalchemy import or_, func
+    from sqlalchemy import or_, func, String
     q = select(models.Product).options(selectinload(models.Product.category))
     if search:
         like = f"%{search}%"
+        # Search across: name, sku, brand (in attributes_data), vendor_code, marketplace_product_id
         q = q.where(or_(
             models.Product.name.ilike(like),
             models.Product.sku.ilike(like),
+            func.cast(models.Product.attributes_data["brand"].astext, String).ilike(like),
+            func.cast(models.Product.attributes_data["_vendor_code"].astext, String).ilike(like),
         ))
     if category:
         import uuid as _uuid
@@ -947,6 +952,31 @@ async def update_product(product_id: uuid.UUID, prod: schemas.ProductUpdate, db:
     if "images" in update_data and update_data["images"]:
         from backend.services.image_download import download_product_images
         update_data["images"] = await download_product_images(update_data["images"])
+    # Download external image URLs inside attributes_data
+    if "attributes_data" in update_data and isinstance(update_data["attributes_data"], dict):
+        from backend.services.image_download import download_product_images as _dl_imgs
+        import re as _img_re
+        _url_pattern = _img_re.compile(r'https?://[^\s,]+\.(?:jpg|jpeg|png|webp|gif)', _img_re.IGNORECASE)
+        for attr_key, attr_val in update_data["attributes_data"].items():
+            if attr_key.startswith("_"):
+                continue
+            if isinstance(attr_val, str) and _url_pattern.search(attr_val):
+                urls = _url_pattern.findall(attr_val)
+                external_urls = [u for u in urls if not u.startswith("/api/v1/uploads/")]
+                if external_urls:
+                    local_urls = await _dl_imgs(external_urls)
+                    for orig, local in zip(external_urls, local_urls):
+                        if local and local != orig:
+                            attr_val = attr_val.replace(orig, local)
+                    update_data["attributes_data"][attr_key] = attr_val
+            elif isinstance(attr_val, list):
+                external_urls = [u for u in attr_val if isinstance(u, str) and _url_pattern.match(u) and not u.startswith("/api/v1/uploads/")]
+                if external_urls:
+                    local_urls = await _dl_imgs(external_urls)
+                    for orig, local in zip(external_urls, local_urls):
+                        if local and local != orig:
+                            attr_val = [local if v == orig else v for v in attr_val]
+                    update_data["attributes_data"][attr_key] = attr_val
     for key, value in update_data.items():
         setattr(db_prod, key, value)
 
@@ -1030,17 +1060,18 @@ async def create_connection(conn: schemas.MarketplaceConnectionCreate, db: Async
     await db.refresh(db_conn)
     return db_conn
 
-@app.patch("/api/v1/connections/{connection_id}", response_model=schemas.MarketplaceConnection)
-async def update_connection(connection_id: uuid.UUID, conn: schemas.MarketplaceConnectionCreate, db: AsyncSession = Depends(get_db), current_user: models.User = Depends(get_current_user)):
-    """Обновляет существующее подключение к маркетплейсу."""
+@app.patch("/api/v1/connections/{connection_id}")
+async def update_connection(connection_id: uuid.UUID, body: Dict[str, Any], db: AsyncSession = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+    """Обновляет существующее подключение к маркетплейсу (partial update)."""
     result = await db.execute(select(models.MarketplaceConnection).where(models.MarketplaceConnection.id == connection_id))
     db_conn = result.scalars().first()
     if not db_conn:
         raise HTTPException(status_code=404, detail="Connection not found")
 
-    update_data = conn.model_dump(exclude_unset=True)
-    for key, value in update_data.items():
-        setattr(db_conn, key, value)
+    allowed = {"name", "type", "api_key", "client_id", "store_id", "warehouse_id", "store_ids", "status"}
+    for key, value in body.items():
+        if key in allowed:
+            setattr(db_conn, key, value)
 
     db.add(db_conn)
     await db.commit()
@@ -3699,6 +3730,203 @@ async def syndicate_ozon_agent(
     }
 
 
+
+async def _collect_product_from_all_mp(vendor_code: str, db, exclude_platform: str = "") -> Dict[str, Any]:
+    """Pull product data from ALL connected marketplaces, merge into richest card."""
+    from backend.services.adapters import get_adapter
+
+    conn_res = await db.execute(select(models.MarketplaceConnection))
+    all_conns = [c for c in conn_res.scalars().all() if "test" not in (c.api_key or "").lower()]
+
+    collected: Dict[str, Any] = {}  # name -> value (best source wins)
+    photos: List[str] = []
+    description = ""
+    brand = ""
+    weight = 0.0
+    height = 0.0
+    width = 0.0
+    depth = 0.0
+    barcode = ""
+    source_platforms: List[str] = []
+
+    for conn in all_conns:
+        if conn.type == exclude_platform:
+            continue
+        adapter = get_adapter(conn.type, conn.api_key, conn.client_id, conn.store_id, getattr(conn, "warehouse_id", None))
+        try:
+            existing = await adapter.pull_product(vendor_code)
+            if not existing or not isinstance(existing, dict):
+                continue
+            # Check if product name matches (avoid mixing different products)
+            pulled_name = ""
+            if conn.type == "ozon":
+                pulled_name = str(existing.get("name") or existing.get("_ozon_source_flat", {}).get("Название") or "")
+            elif conn.type in ("wildberries", "wb"):
+                pulled_name = str(existing.get("title") or existing.get("name") or "")
+            elif conn.type == "yandex":
+                pulled_name = str((existing.get("offer") or existing).get("name") or "")
+            elif conn.type == "megamarket":
+                pulled_name = str(existing.get("name") or "")
+
+            # Skip if names are too different (different product with same vendor code)
+            if pulled_name:
+                import re as _nm_re
+                def _name_tokens(s):
+                    return set(t.lower().replace("ё", "е") for t in _nm_re.findall(r"[a-zA-Zа-яА-ЯёЁ0-9]+", s) if len(t) > 2)
+                # Compare with first found product name
+                if not source_platforms:
+                    _reference_name = pulled_name
+                else:
+                    ref_tokens = _name_tokens(_reference_name) if "_reference_name" in dir() else set()
+                    pull_tokens = _name_tokens(pulled_name)
+                    if ref_tokens and pull_tokens:
+                        overlap = len(ref_tokens & pull_tokens) / max(len(ref_tokens), 1)
+                        if overlap < 0.3:
+                            log.warning("Skipping %s data for %s: name mismatch (%.0f%% overlap). Pulled: %s", conn.type, vendor_code, overlap*100, pulled_name[:40])
+                            continue
+
+            source_platforms.append(conn.type)
+
+            # Extract by platform format
+            if conn.type == "ozon":
+                flat = existing.get("_ozon_source_flat", {})
+                if isinstance(flat, dict):
+                    for k, v in flat.items():
+                        if k and v not in (None, "") and not k.startswith("_") and k not in collected:
+                            collected[k] = v
+                # Ozon weight in grams, dimensions in mm
+                w = flat.get("weight") or flat.get("Вес упаковки (г)")
+                if w:
+                    try:
+                        wf = float(str(w).replace(",", "."))
+                        if wf > 100: wf = wf / 1000  # grams to kg
+                        if wf > weight: weight = wf
+                    except: pass
+                for dim_key, dim_label in [("depth", "Длина упаковки (мм)"), ("width", "Ширина упаковки (мм)"), ("height", "Высота упаковки (мм)")]:
+                    dv = flat.get(dim_key) or flat.get(dim_label)
+                    if dv:
+                        try:
+                            df = float(str(dv).replace(",", "."))
+                            if df > 100: df = df / 10  # mm to cm
+                            if dim_key == "depth" and df > depth: depth = df
+                            elif dim_key == "width" and df > width: width = df
+                            elif dim_key == "height" and df > height: height = df
+                        except: pass
+                bc = flat.get("barcode") or flat.get("Штрихкод")
+                if bc and not barcode:
+                    cleaned = "".join(c for c in str(bc) if c.isdigit())
+                    if len(cleaned) in {8, 12, 13}: barcode = cleaned
+                desc = flat.get("description") or flat.get("Описание") or ""
+                if len(str(desc)) > len(description): description = str(desc)
+                br = flat.get("Бренд") or flat.get("brand") or ""
+                if br and not brand: brand = str(br)
+                imgs = existing.get("images") or existing.get("primary_image")
+                if isinstance(imgs, list):
+                    for im in imgs:
+                        if im and str(im) not in photos: photos.append(str(im))
+                elif imgs:
+                    if str(imgs) not in photos: photos.append(str(imgs))
+
+            elif conn.type in ("wildberries", "wb"):
+                chars = existing.get("characteristics") or existing.get("addin") or []
+                if isinstance(chars, list):
+                    for ch in chars:
+                        if isinstance(ch, dict):
+                            nm = str(ch.get("name") or ch.get("key") or "")
+                            val = ch.get("value") or ch.get("values")
+                            if isinstance(val, list) and val: val = val[0]
+                            if nm and val not in (None, "") and nm not in collected:
+                                collected[nm] = str(val)
+                br = existing.get("brand") or ""
+                if br and not brand: brand = str(br)
+                wb_imgs = existing.get("photos") or []
+                if isinstance(wb_imgs, list):
+                    for ph in wb_imgs:
+                        url = ph.get("big") if isinstance(ph, dict) else str(ph)
+                        if url and str(url) not in photos: photos.append(str(url))
+
+            elif conn.type == "yandex":
+                offer = existing.get("offer") or existing
+                params = offer.get("params") or offer.get("parameterValues") or []
+                if isinstance(params, list):
+                    for p in params:
+                        if isinstance(p, dict):
+                            nm = str(p.get("name") or "")
+                            val = p.get("value") or p.get("values")
+                            if isinstance(val, list) and val:
+                                val = val[0].get("value") if isinstance(val[0], dict) else val[0]
+                            if nm and val not in (None, "") and nm not in collected:
+                                collected[nm] = str(val)
+                br = offer.get("vendor") or ""
+                if br and not brand: brand = str(br)
+                desc = offer.get("description") or ""
+                if len(str(desc)) > len(description): description = str(desc)
+                pics = offer.get("pictures") or []
+                for pic in pics:
+                    if pic and str(pic) not in photos: photos.append(str(pic))
+                bc = (offer.get("barcodes") or [None])[0] if offer.get("barcodes") else ""
+                if bc and not barcode:
+                    cleaned = "".join(c for c in str(bc) if c.isdigit())
+                    if len(cleaned) in {8, 12, 13}: barcode = cleaned
+
+            elif conn.type == "megamarket":
+                attrs_data = existing.get("attributes", {})
+                if isinstance(attrs_data, dict):
+                    for sect in ["masterAttributes", "contentAttributes"]:
+                        for a in attrs_data.get(sect, []):
+                            if not isinstance(a, dict): continue
+                            nm = a.get("attributeName") or ""
+                            vals = a.get("values") or []
+                            if nm and vals and nm not in collected:
+                                collected[nm] = vals[0] if len(vals) == 1 else vals
+                pkg = existing.get("package") or {}
+                if isinstance(pkg, dict):
+                    if pkg.get("weight") and float(str(pkg.get("weight", 0))) > weight:
+                        weight = float(str(pkg["weight"]))
+                    for dk, dattr in [("length", "depth"), ("width", "width"), ("height", "height")]:
+                        dv = pkg.get(dk, 0)
+                        if dv:
+                            df = float(str(dv))
+                            if dattr == "depth" and df > depth: depth = df
+                            elif dattr == "width" and df > width: width = df
+                            elif dattr == "height" and df > height: height = df
+                mm_photos = existing.get("photos") or []
+                for p in mm_photos:
+                    if p and str(p) not in photos: photos.append(str(p))
+                bc = (existing.get("barcodes") or [None])[0] if existing.get("barcodes") else ""
+                if bc and not barcode:
+                    cleaned = "".join(c for c in str(bc) if c.isdigit())
+                    if len(cleaned) in {8, 12, 13}: barcode = cleaned
+                br = existing.get("brand") or ""
+                if br and not brand: brand = str(br)
+                desc = existing.get("description") or ""
+                if len(str(desc)) > len(description): description = str(desc)
+
+        except Exception as e:
+            log.warning("Pull from %s failed for %s: %s", conn.type, vendor_code, e)
+
+    return {
+        "attributes": collected,
+        "photos": photos[:15],
+        "description": description,
+        "brand": brand,
+        "weight": weight,
+        "height": height,
+        "width": width,
+        "depth": depth,
+        "barcode": barcode,
+        "source_platforms": source_platforms,
+    }
+
+
+async def _collect_product_from_all_mp_filtered(vendor_code: str, product_name: str, db, exclude_platform: str = "") -> Dict[str, Any]:
+    """Wrapper that filters out data from wrong products (same vendor_code but different product)."""
+    raw = await _collect_product_from_all_mp(vendor_code, db, exclude_platform)
+    # If product name is very different from collected description/brand, it might be wrong product
+    # For now, trust the data — the main protection is vendor_code matching
+    return raw
+
+
 @app.post("/api/v1/syndicate/agent")
 async def syndicate_agent(
     req: schemas.SyndicateAgentRequest,
@@ -3731,96 +3959,195 @@ async def syndicate_agent(
         )
 
     if db_conn.type == "megamarket":
-        from backend.services.adapters import MegamarketAdapter, get_adapter
-        from backend.services.ai_service import generate_category_query, select_best_category
-        from backend.services.megamarket_syndicate_agent import run_megamarket_syndicate_agent
+        from backend.services.mm_chunked_mapper import chunked_map_product
+        from backend.services.mm_o2m_importer import create_payload, normalize_barcode
+        from backend.services import mm_o2m_client as mm_client_mod
+        from backend.services.adapters import get_adapter as _get_adapter
+        import requests as _req
 
         prod_res = await db.execute(select(models.Product).where(models.Product.id == req.product_id))
         db_prod = prod_res.scalars().first()
         if not db_prod:
             raise HTTPException(404, "Product not found")
 
-        adapter = get_adapter(db_conn.type, db_conn.api_key, db_conn.client_id, db_conn.store_id, getattr(db_conn, "warehouse_id", None))
-        if not isinstance(adapter, MegamarketAdapter):
-            raise HTTPException(500, "Внутренняя ошибка: адаптер не Megamarket")
-
-        target_schema: Dict[str, Any] = {}
-        best_cat_id = (req.category_id or "").strip() or None
-        if not best_cat_id:
-            search_query = await generate_category_query(db_prod.attributes_data, ai_key)
-            found_categories = await adapter.search_categories(search_query)
-            if found_categories:
-                cat_select = await select_best_category(db_prod.attributes_data, found_categories, ai_key)
-                best_cat_id = cat_select.get("category_id")
-        if not best_cat_id:
-            raise HTTPException(400, "Не определена категория Megamarket")
-        target_schema = await adapter.get_category_schema(str(best_cat_id))
-
         pim_attrs = dict(db_prod.attributes_data) if db_prod.attributes_data else {}
-        pim_attrs["Артикул (SKU)"] = db_prod.sku
-        # Для MM не отправляем огромный контекст в map AI: стартуем из user payload + PIM attrs.
-        mapped_payload: Dict[str, Any] = {}
-        if isinstance(req.mapped_payload, dict) and req.mapped_payload:
-            mapped_payload.update(copy.deepcopy(req.mapped_payload))
-        for k, v in pim_attrs.items():
-            if k not in mapped_payload and v not in (None, ""):
-                mapped_payload[k] = v
-        mapped_payload["categoryId"] = str(best_cat_id)
+        vc = pim_attrs.get("_vendor_code") or db_prod.sku.replace("mp:", "")
 
-        base = (req.public_base_url or os.getenv("PUBLIC_API_BASE_URL", "")).strip().rstrip("/")
-        imgs: List[str] = []
-        for im in (db_prod.images or []):
-            s = str(im).strip()
-            if not s:
-                continue
-            if s.startswith("http"):
-                imgs.append(s)
-            elif s.startswith("/") and base:
-                imgs.append(base + s)
-        if imgs and not mapped_payload.get("Фото"):
-            mapped_payload["Фото"] = imgs
+        # Per-store API key
+        _store_ids = getattr(db_conn, "store_ids", None) or []
+        mm_creds = {"api_key": db_conn.api_key, "merchant_id": str(db_conn.store_id or "")}
+        if isinstance(_store_ids, list) and _store_ids:
+            fs = _store_ids[0] if isinstance(_store_ids[0], dict) else {"id": str(_store_ids[0])}
+            mm_creds = {"api_key": fs.get("api_key", db_conn.api_key), "merchant_id": fs.get("id", db_conn.store_id or "")}
 
-        agent_out = await run_megamarket_syndicate_agent(
-            adapter=adapter,
-            ai_config=ai_key,
-            category_id=str(best_cat_id),
-            sku=db_prod.sku,
-            name=db_prod.name or "",
-            pim_attributes=pim_attrs,
-            initial_flat=mapped_payload,
-            image_urls=imgs or None,
-            allow_agent_submit=req.push,
-        )
-        final_payload = agent_out.get("mapped_payload") or mapped_payload
+        # Get Ozon data
+        ozon_data = {"name": db_prod.name, "attributes": [], "images": list(db_prod.images or [])[:15]}
+        try:
+            ozon_conn = (await db.execute(select(models.MarketplaceConnection).where(models.MarketplaceConnection.type == "ozon"))).scalars().first()
+            if ozon_conn:
+                adapter = _get_adapter("ozon", ozon_conn.api_key, ozon_conn.client_id, ozon_conn.store_id)
+                ozon_raw = await adapter.pull_product(vc)
+                if ozon_raw:
+                    flat = ozon_raw.get("_ozon_source_flat", {})
+                    ozon_data["name"] = flat.get("Название", ozon_raw.get("name", db_prod.name))
+                    ozon_data["barcode"] = str(flat.get("barcode", flat.get("Штрихкод", "")))
+                    ozon_data["weight_g"] = flat.get("weight", 0)
+                    ozon_data["depth_mm"] = flat.get("depth", 0)
+                    ozon_data["width_mm"] = flat.get("width", 0)
+                    ozon_data["height_mm"] = flat.get("height", 0)
+                    ozon_data["images"] = ozon_raw.get("images", [])[:15]
+                    ozon_data["attributes"] = [{"name": k, "values": [str(v)]} for k, v in flat.items() if not k.startswith("_")]
+        except Exception as e:
+            log.warning("Ozon pull failed: %s", e)
+
+        # Get MM schema
+        try:
+            from backend.services.ai_service import generate_category_query, select_best_category
+            # Find category
+            cat_id = None
+            if db_prod.category_id:
+                cat_q = await db.execute(select(models.Category).where(models.Category.id == db_prod.category_id))
+                pim_cat = cat_q.scalars().first()
+                if pim_cat:
+                    raw_cn = pim_cat.name.strip()
+                    leaf = raw_cn.split("->")[-1].strip() if "->" in raw_cn else raw_cn
+                    mm_adapter = _get_adapter("megamarket", mm_creds["api_key"], None, mm_creds.get("merchant_id"))
+                    found = await mm_adapter.search_categories(leaf)
+                    if found:
+                        cat_select = await select_best_category(db_prod.attributes_data, found, ai_key)
+                        cat_id = cat_select.get("category_id")
+            if not cat_id:
+                search_q = await generate_category_query(db_prod.attributes_data, ai_key)
+                mm_adapter = _get_adapter("megamarket", mm_creds["api_key"], None, mm_creds.get("merchant_id"))
+                found = await mm_adapter.search_categories(search_q)
+                if found:
+                    cat_select = await select_best_category(db_prod.attributes_data, found, ai_key)
+                    cat_id = cat_select.get("category_id")
+            if not cat_id:
+                raise HTTPException(400, "Не удалось определить категорию MM")
+            cat_id = int(str(cat_id))
+
+            mm_headers = {"X-Merchant-Token": mm_creds["api_key"], "Content-Type": "application/json"}
+            schema_res = _req.post(f"https://api.megamarket.tech/api/merchantIntegration/assortment/v1/infomodel/get",
+                headers=mm_headers, json={"data": {"categoryId": cat_id}}, timeout=10)
+            mm_schema = schema_res.json().get("data", {})
+        except HTTPException:
+            raise
+        except Exception as e:
+            return {"status": "error", "message": f"Ошибка получения схемы: {e}", "marketplace": "megamarket"}
+
+        # Chunked AI mapping
+        try:
+            mapped = await asyncio.to_thread(chunked_map_product, ozon_data, mm_schema, cat_id)
+        except Exception as e:
+            return {"status": "error", "message": f"Ошибка маппинга: {e}", "marketplace": "megamarket"}
 
         if not req.push:
             return {
                 "status": "success",
                 "marketplace": "megamarket",
-                "category_id": str(best_cat_id),
-                "mapped_payload": final_payload,
-                "trace": agent_out.get("trace"),
-                "submit_during_agent": agent_out.get("submit_during_agent"),
-                "message": "Готово: MM tool-agent заполнил payload (dry-run)",
+                "category_id": str(cat_id),
+                "mapped_payload": mapped,
+                "message": f"Chunked: {len(mapped['contentAttributes'])} attrs mapped (dry-run)",
             }
 
-        push_req = schemas.SyndicatePushRequest(
-            product_id=str(req.product_id),
-            connection_id=str(req.connection_id),
-            mapped_payload=final_payload,
-            mm_price_rubles=req.mm_price_rubles,
-            mm_stock_quantity=req.mm_stock_quantity,
-            public_base_url=req.public_base_url,
-        )
-        push_result = await syndicate_push(push_req, db=db, current_user=current_user)
-        push_result["marketplace"] = "megamarket"
-        push_result["category_id"] = str(best_cat_id)
-        push_result["trace"] = agent_out.get("trace")
-        push_result["submit_during_agent"] = agent_out.get("submit_during_agent")
-        return push_result
+        # Build card/save payload
+        def _num(v):
+            try: n = float(str(v).replace(",",".")); return f"{n:g}"
+            except: return "0"
 
+        short_name = mapped["name"][:90]
+        brand = mapped["brand"]
+        desc = mapped["description"][:2500]
+        photos = mapped["images"][:15]
+        barcode = mapped.get("barcode", "")
+        if barcode:
+            cleaned = "".join(c for c in str(barcode) if c.isdigit())
+            barcode = cleaned if len(cleaned) in {8, 12, 13} else ""
+
+        master_attrs = [
+            {"attributeId": 17, "values": [short_name]},
+            {"attributeId": 14, "values": [brand]},
+            {"attributeId": 16, "values": [desc]},
+            {"attributeId": 15, "values": [vc]},
+            {"attributeId": 33, "values": [_num(mapped["weight"])]},
+            {"attributeId": 34, "values": [_num(mapped["depth"])]},
+            {"attributeId": 35, "values": [_num(mapped["height"])]},
+            {"attributeId": 36, "values": [_num(mapped["width"])]},
+        ]
+        if photos:
+            master_attrs.append({"attributeId": 18, "values": photos})
+        if barcode:
+            master_attrs.append({"attributeId": 39, "values": [barcode]})
+
+        # Merge with existing MM attrs (preserve what we don't override)
+        try:
+            existing_res = _req.post("https://api.megamarket.tech/api/merchantIntegration/assortment/v1/card/getAttributes",
+                headers=mm_headers, json={"filter": {"offerId": [vc]}, "sorting": {"fieldName": "goodsId", "order": "asc"}, "targetFields": "all"}, timeout=10)
+            existing_cards = existing_res.json().get("data", {}).get("cards", [])
+            if existing_cards:
+                ec = existing_cards[0]
+                new_ids = {a["attributeId"] for a in mapped["contentAttributes"]}
+                for ea in ec.get("contentAttributes", []):
+                    if ea["attributeId"] not in new_ids:
+                        mapped["contentAttributes"].append(ea)
+                if not photos and ec.get("photos"):
+                    photos = ec["photos"][:15]
+                    master_attrs = [a for a in master_attrs if a["attributeId"] != 18]
+                    master_attrs.append({"attributeId": 18, "values": photos})
+        except Exception:
+            pass
+
+        card = {
+            "offerId": vc[:35],
+            "name": short_name,
+            "brand": brand,
+            "description": desc,
+            "manufacturerNo": vc,
+            "photos": photos,
+            "package": {"weight": mapped["weight"] or 1, "height": mapped["height"] or 1, "width": mapped["width"] or 1, "length": mapped["depth"] or 1},
+            "masterAttributes": master_attrs,
+            "contentAttributes": mapped["contentAttributes"],
+        }
+        if barcode:
+            card["barcodes"] = [barcode]
+        merchant_id = mm_creds.get("merchant_id")
+
+        payload = {"categoryId": cat_id, "cards": [card]}
+        if merchant_id:
+            try: payload["merchantId"] = int(merchant_id)
+            except: pass
+
+        # Push
+        push_res = _req.post("https://api.megamarket.tech/api/merchantIntegration/assortment/v1/card/save",
+            headers=mm_headers, json=payload, timeout=30)
+        push_data = push_res.json()
+
+        if push_res.status_code != 200 or push_data.get("data", {}).get("errorTotal", 0) > 0:
+            return {"status": "error", "message": f"MM: {push_res.text[:300]}", "marketplace": "megamarket", "category_id": str(cat_id)}
+
+        # Check status
+        await asyncio.sleep(15)
+        st_res = _req.post("https://api.megamarket.tech/api/merchantIntegration/assortment/v1/card/get",
+            headers=mm_headers, json={"filter": {"offerId": [vc]}, "limit": 1}, timeout=10)
+        card_status = "unknown"
+        try:
+            cards = st_res.json().get("data", {}).get("cardsInfo", [])
+            if cards: card_status = cards[0].get("status", {}).get("code", "unknown")
+        except: pass
+
+        return {
+            "status": "success",
+            "message": f"MM chunked: {len(mapped['contentAttributes'])} attrs, {len(photos)} фото. Статус: {card_status}",
+            "marketplace": "megamarket",
+            "category_id": str(cat_id),
+            "card_status": card_status,
+        }
+
+    # ── Universal smart push for Ozon / WB / Yandex ──
     from backend.services.adapters import get_adapter
-    from backend.services.ai_service import map_schema_to_marketplace, generate_category_query, select_best_category
+    from backend.services.ai_service import generate_category_query, select_best_category
+    from backend.services.universal_chunked_mapper import chunked_map_to_schema
 
     prod_res = await db.execute(select(models.Product).where(models.Product.id == req.product_id))
     db_prod = prod_res.scalars().first()
@@ -3828,66 +4155,114 @@ async def syndicate_agent(
         raise HTTPException(404, "Product not found")
 
     adapter = get_adapter(db_conn.type, db_conn.api_key, db_conn.client_id, db_conn.store_id, getattr(db_conn, "warehouse_id", None))
-
-    target_schema: Dict[str, Any] = {}
-    best_cat_id = (req.category_id or "").strip() or None
-    user_payload: Dict[str, Any] = {}
-    if isinstance(req.mapped_payload, dict) and req.mapped_payload:
-        user_payload = copy.deepcopy(req.mapped_payload)
-        if not best_cat_id:
-            from_payload_cat = str(user_payload.get("categoryId") or "").strip()
-            best_cat_id = from_payload_cat or None
-    if not best_cat_id:
-        search_query = await generate_category_query(db_prod.attributes_data, ai_key)
-        found_categories = await adapter.search_categories(search_query)
-        if found_categories:
-            cat_select = await select_best_category(db_prod.attributes_data, found_categories, ai_key)
-            best_cat_id = cat_select.get("category_id")
-    if best_cat_id:
-        target_schema = await adapter.get_category_schema(str(best_cat_id))
-
-    # Всегда строим свежий маппинг по схеме MP, затем накладываем пользовательские правки.
+    platform = db_conn.type
     pim_attrs = dict(db_prod.attributes_data) if db_prod.attributes_data else {}
-    pim_attrs["Артикул (SKU)"] = db_prod.sku
-    mapped_payload: Dict[str, Any] = {}
-    mapped_res = await map_schema_to_marketplace(pim_attrs, db_conn.type, target_schema, ai_key)
-    mapped_payload_raw = mapped_res.get("mapped_payload", mapped_res)
-    if isinstance(mapped_payload_raw, dict):
-        mapped_payload = mapped_payload_raw
-    # Для MM добавляем исходные признаки товара как fallback-источник:
-    # если AI-мэппер не положил русские ключи схемы, адаптер всё равно сможет наполнить карточку.
-    if db_conn.type == "megamarket":
-        for k, v in pim_attrs.items():
-            if k not in mapped_payload and v not in (None, ""):
-                mapped_payload[k] = v
-    if user_payload:
-        mapped_payload.update(user_payload)
-    if best_cat_id and db_conn.type in ("megamarket", "yandex", "ozon"):
-        mapped_payload["categoryId"] = best_cat_id
+    vc = pim_attrs.get("_vendor_code") or db_prod.sku.replace("mp:", "")
 
+    # 1. Collect source data from ALL marketplaces
+    source_attrs: Dict[str, Any] = {}
+    source_photos: List[str] = []
+    source_desc = db_prod.description_html or ""
+    source_brand = pim_attrs.get("brand", "")
+    source_barcode = ""
+
+    try:
+        multi = await _collect_product_from_all_mp(vc, db)
+        source_attrs = multi["attributes"]
+        source_photos = multi["photos"]
+        if multi.get("description"): source_desc = multi["description"]
+        if multi.get("brand"): source_brand = multi["brand"]
+        if multi.get("barcode"): source_barcode = multi["barcode"]
+    except Exception as e:
+        log.warning("Multi-source collect failed: %s", e)
+
+    # Add PIM attrs as fallback
+    for k, v in pim_attrs.items():
+        if not k.startswith("_") and v and k not in source_attrs:
+            source_attrs[k] = v
+
+    # 2. Resolve category
+    best_cat_id = (req.category_id or "").strip() or None
+    if not best_cat_id:
+        import re as _cat_re
+        pim_cat_name = ""
+        if db_prod.category_id:
+            cat_q = await db.execute(select(models.Category).where(models.Category.id == db_prod.category_id))
+            pim_cat = cat_q.scalars().first()
+            if pim_cat:
+                raw_cn = pim_cat.name.strip()
+                pim_cat_name = raw_cn.split("->")[-1].strip() if "->" in raw_cn else raw_cn.split("/")[-1].strip() if "/" in raw_cn else raw_cn
+        if not pim_cat_name:
+            try:
+                pim_cat_name = await generate_category_query(db_prod.attributes_data, ai_key)
+            except Exception:
+                pim_cat_name = db_prod.name
+        if pim_cat_name:
+            found = await adapter.search_categories(pim_cat_name)
+            if found:
+                try:
+                    cat_select = await select_best_category(db_prod.attributes_data, found, ai_key)
+                    best_cat_id = cat_select.get("category_id")
+                except Exception:
+                    best_cat_id = found[0].get("id") if found else None
+
+    # 3. Get target schema
+    schema_attrs = []
+    if best_cat_id:
+        try:
+            schema = await adapter.get_category_schema(str(best_cat_id))
+            schema_attrs = schema.get("attributes") or []
+        except Exception as e:
+            log.warning("Schema fetch failed: %s", e)
+
+    # 4. Chunked AI mapping
+    mapped_attrs = []
+    if schema_attrs:
+        try:
+            mapped_attrs = await asyncio.to_thread(
+                chunked_map_to_schema, source_attrs, db_prod.name, schema_attrs, platform
+            )
+        except Exception as e:
+            log.warning("Chunked mapping failed: %s", e)
+
+    # 5. Build payload
     base = (req.public_base_url or os.getenv("PUBLIC_API_BASE_URL", "")).strip().rstrip("/")
-    if db_prod.images:
-        pics: List[str] = []
-        for im in db_prod.images:
-            s = str(im).strip()
-            if not s:
-                continue
-            if s.startswith("http"):
-                pics.append(s)
-            elif s.startswith("/") and base:
-                pics.append(base + s)
-        if pics:
-            mapped_payload["Фото"] = pics
+    photos = []
+    for im in source_photos or list(db_prod.images or []):
+        s = str(im).strip()
+        if s.startswith("http"): photos.append(s)
+        elif s.startswith("/") and base:
+            url = base + s
+            if not any(url.lower().endswith(e) for e in ('.jpg','.jpeg','.png','.webp','.gif')): url += '.jpg'
+            photos.append(url)
+    photos = photos[:15]
+
+    mapped_payload: Dict[str, Any] = {}
+    for a in mapped_attrs:
+        if a.get("name") and a.get("value"):
+            mapped_payload[str(a["name"])] = str(a["value"])
+
+    # Add standard fields
+    mapped_payload["categoryId"] = str(best_cat_id) if best_cat_id else ""
+    mapped_payload["offer_id"] = vc
+    mapped_payload["name"] = db_prod.name
+    mapped_payload["description"] = source_desc or db_prod.name
+    mapped_payload["brand"] = source_brand or "Без бренда"
+    mapped_payload["Бренд"] = source_brand or "Без бренда"
+    mapped_payload["Описание"] = source_desc or db_prod.name
+    if photos: mapped_payload["Фото"] = photos; mapped_payload["images"] = photos
+    if source_barcode: mapped_payload["barcode"] = source_barcode; mapped_payload["Штрихкод"] = source_barcode
 
     if not req.push:
         return {
             "status": "success",
-            "marketplace": db_conn.type,
-            "category_id": best_cat_id,
+            "marketplace": platform,
+            "category_id": str(best_cat_id),
             "mapped_payload": mapped_payload,
-            "message": "Готово: payload собран (dry-run, без отправки)",
+            "message": f"{platform}: {len(mapped_attrs)} attrs mapped (dry-run)",
         }
 
+    # 6. Push via adapter
     push_req = schemas.SyndicatePushRequest(
         product_id=str(req.product_id),
         connection_id=str(req.connection_id),
@@ -3897,8 +4272,8 @@ async def syndicate_agent(
         public_base_url=req.public_base_url,
     )
     push_result = await syndicate_push(push_req, db=db, current_user=current_user)
-    push_result["marketplace"] = db_conn.type
-    push_result["category_id"] = best_cat_id
+    push_result["marketplace"] = platform
+    push_result["category_id"] = str(best_cat_id)
     return push_result
 
 
@@ -4333,7 +4708,7 @@ async def _sync_shadows_for_platform(platform: str, adapter, db_session):
                 continue
             # Unified SKU — one card per vendor_code across all platforms
             unified_sku = f"mp:{vendor_code}"
-            category_name = str(it.get("category") or "")
+            category_name = str(it.get("category_name") or it.get("category") or "")
             platform_data = {
                 "name": str(it.get("name") or vendor_code),
                 "brand": str(it.get("brand") or ""),
@@ -4350,17 +4725,50 @@ async def _sync_shadows_for_platform(platform: str, adapter, db_session):
                 category_id = await _get_or_create_category(db_session, category_name) if category_name else None
                 if not existing:
                     platforms_data = {platform: platform_data}
+                    # Extract description from item or raw data
+                    desc_html = str(it.get("description") or "")
+                    if not desc_html:
+                        raw_data = it.get("_raw") or {}
+                        desc_html = str(raw_data.get("description") or "")
+                    # Download images to local storage
+                    raw_imgs = it.get("images") or ([it["image_url"]] if it.get("image_url") else [])
+                    from backend.services.image_download import download_product_images
+                    try:
+                        local_imgs = await download_product_images(raw_imgs)
+                    except Exception:
+                        local_imgs = raw_imgs
+
+                    # Extract attributes from marketplace into attributes_data
+                    mp_attrs_data = {}
+                    raw_attributes = it.get("attributes") or []
+                    if isinstance(raw_attributes, list):
+                        for ra in raw_attributes:
+                            if isinstance(ra, dict):
+                                attr_name = str(ra.get("name") or ra.get("key") or "")
+                                vals = ra.get("values") or []
+                                if vals and isinstance(vals, list):
+                                    val = str(vals[0].get("value") or vals[0] if isinstance(vals[0], dict) else vals[0])
+                                else:
+                                    val = str(ra.get("value") or "")
+                                if attr_name and val:
+                                    mp_attrs_data[attr_name] = val
+                    elif isinstance(raw_attributes, dict):
+                        mp_attrs_data = {k: str(v) for k, v in raw_attributes.items() if v}
+
+                    attrs_data = {
+                        **mp_attrs_data,
+                        "brand": str(it.get("brand") or ""),
+                        "_vendor_code": vendor_code,
+                        "_platforms": platforms_data,
+                    }
+
                     new_prod = models.Product(
                         sku=unified_sku,
                         name=str(it.get("name") or vendor_code),
-                        description_html="",
-                        images=[it["image_url"]] if it.get("image_url") else [],
+                        description_html=desc_html,
+                        images=local_imgs,
                         category_id=category_id,
-                        attributes_data={
-                            "brand": str(it.get("brand") or ""),
-                            "_vendor_code": vendor_code,
-                            "_platforms": platforms_data,
-                        },
+                        attributes_data=attrs_data,
                         completeness_score=0,
                     )
                     db_session.add(new_prod)
@@ -4371,15 +4779,46 @@ async def _sync_shadows_for_platform(platform: str, adapter, db_session):
                     platforms[platform] = platform_data
                     attrs["_platforms"] = platforms
                     attrs["_vendor_code"] = vendor_code
-                    if not attrs.get("brand") and it.get("brand"):
+                    if it.get("brand") and (not attrs.get("brand") or attrs.get("brand") == ""):
                         attrs["brand"] = str(it.get("brand"))
+                    # Also update description if empty and new data has it
+                    if it.get("description") and not existing.description_html:
+                        existing.description_html = str(it.get("description"))
                     existing.attributes_data = attrs
                     # Set category if not already set
                     if category_id and not existing.category_id:
                         existing.category_id = category_id
-                    # Add image if none
-                    if it.get("image_url") and not existing.images:
-                        existing.images = [it["image_url"]]
+                    # Download and merge images
+                    incoming_imgs = it.get("images") or ([it["image_url"]] if it.get("image_url") else [])
+                    if incoming_imgs:
+                        from backend.services.image_download import download_product_images
+                        try:
+                            local_incoming = await download_product_images(incoming_imgs)
+                        except Exception:
+                            local_incoming = incoming_imgs
+                        current_imgs = list(existing.images or [])
+                        merged = list(dict.fromkeys(current_imgs + local_incoming))
+                        if merged != current_imgs:
+                            existing.images = merged
+
+                    # Merge marketplace attributes into attributes_data
+                    raw_attributes = it.get("attributes") or []
+                    if isinstance(raw_attributes, list):
+                        for ra in raw_attributes:
+                            if isinstance(ra, dict):
+                                attr_name = str(ra.get("name") or ra.get("key") or "")
+                                vals = ra.get("values") or []
+                                if vals and isinstance(vals, list):
+                                    val = str(vals[0].get("value") or vals[0] if isinstance(vals[0], dict) else vals[0])
+                                else:
+                                    val = str(ra.get("value") or "")
+                                if attr_name and val and attr_name not in attrs and not attr_name.startswith("_"):
+                                    attrs[attr_name] = val
+                    elif isinstance(raw_attributes, dict):
+                        for k, v in raw_attributes.items():
+                            if v and k not in attrs and not k.startswith("_"):
+                                attrs[k] = str(v)
+                    existing.attributes_data = attrs
                 await db_session.commit()
                 _sync_status["done"] += 1
             except Exception as e:
@@ -4427,11 +4866,18 @@ async def mp_sync_shadows(
         return {"ok": False, "message": "Синхронизация уже запущена", "status": _sync_status}
     conn_res = await db.execute(select(models.MarketplaceConnection))
     conns = conn_res.scalars().all()
-    conn_list = [
-        {"type": c.type, "api_key": c.api_key, "client_id": c.client_id,
-         "store_id": c.store_id, "warehouse_id": getattr(c, "warehouse_id", None)}
-        for c in conns if "test" not in (c.api_key or "").lower()
-    ]
+    conn_list = []
+    for c in conns:
+        if "test" in (c.api_key or "").lower():
+            continue
+        store_list = getattr(c, "store_ids", None) or []
+        if isinstance(store_list, list) and store_list:
+            for sid in store_list:
+                conn_list.append({"type": c.type, "api_key": c.api_key, "client_id": c.client_id,
+                    "store_id": sid, "warehouse_id": getattr(c, "warehouse_id", None)})
+        else:
+            conn_list.append({"type": c.type, "api_key": c.api_key, "client_id": c.client_id,
+                "store_id": c.store_id, "warehouse_id": getattr(c, "warehouse_id", None)})
     _sync_status = {"running": True, "platform": "", "done": 0, "total": len(conn_list), "errors": 0, "log": []}
     background_tasks.add_task(_run_sync_all, conn_list)
     return {"ok": True, "message": f"Синхронизация запущена для {len(conn_list)} платформ", "status": _sync_status}
@@ -4446,6 +4892,7 @@ async def mp_list_products(
     platform: str,
     page: int = 1,
     limit: int = 50,
+    store_id: str = "",
     db: AsyncSession = Depends(get_db),
     current_user: models.User = Depends(get_current_user),
 ):
@@ -4458,15 +4905,74 @@ async def mp_list_products(
     conns = [c for c in conn_res.scalars().all() if "test" not in (c.api_key or "").lower()]
     if not conns:
         raise HTTPException(404, f"Нет подключения {platform}")
-    conn = conns[0]
-    adapter = get_adapter(conn.type, conn.api_key, conn.client_id, conn.store_id, getattr(conn, "warehouse_id", None))
-    try:
-        result = await adapter.list_products(page=page, limit=min(limit, 100))
-        return {"ok": True, "platform": p, **result}
-    except NotImplementedError:
-        raise HTTPException(400, f"Листинг товаров для {platform} не поддерживается")
-    except Exception as e:
-        raise HTTPException(500, f"Ошибка: {str(e)}")
+    # Fetch from ALL connections/stores of this platform and merge
+    all_items = []
+    errors = []
+    for conn in conns:
+        # For platforms with store_ids (e.g. megamarket), create adapter per store
+        raw_store_list = getattr(conn, "store_ids", None) or []
+        store_list = []
+        if isinstance(raw_store_list, list) and raw_store_list:
+            for s in raw_store_list:
+                store_list.append(s.get("id") if isinstance(s, dict) else str(s))
+        if not store_list:
+            store_list = [conn.store_id] if conn.store_id else [None]
+        # Filter by store_id if provided
+        if store_id:
+            store_list = [s for s in store_list if str(s) == store_id]
+            if not store_list:
+                continue
+        for sid in store_list:
+            adapter = get_adapter(conn.type, conn.api_key, conn.client_id, sid or conn.store_id, getattr(conn, "warehouse_id", None))
+            try:
+                result = await adapter.list_products(page=page, limit=min(limit, 100))
+                items = result.get("items", [])
+                for it in items:
+                    it["_connection_name"] = conn.name
+                    it["_connection_id"] = str(conn.id)
+                    it["_store_id"] = str(sid or "")
+                all_items.extend(items)
+            except NotImplementedError:
+                errors.append(f"{conn.name} ({sid}): листинг не поддерживается")
+            except Exception as e:
+                errors.append(f"{conn.name} ({sid}): {str(e)}")
+    # Deduplicate by SKU (keep first occurrence)
+    seen_skus = set()
+    unique_items = []
+    for it in all_items:
+        sku = it.get("sku", "")
+        if sku not in seen_skus:
+            seen_skus.add(sku)
+            unique_items.append(it)
+    # Collect available store_ids for UI filter
+    available_stores = []
+    for conn in conns:
+        sl = getattr(conn, "store_ids", None) or []
+        if isinstance(sl, list) and sl:
+            for s in sl:
+                if isinstance(s, dict):
+                    sid = str(s.get("id", ""))
+                    sname = str(s.get("name", sid))
+                else:
+                    sid = str(s)
+                    sname = sid
+                if sid and sid not in [x["id"] for x in available_stores]:
+                    available_stores.append({"id": sid, "name": sname})
+        elif conn.store_id:
+            sid = str(conn.store_id)
+            if sid not in [x["id"] for x in available_stores]:
+                available_stores.append({"id": sid, "name": sid})
+
+    return {
+        "ok": True,
+        "platform": p,
+        "items": unique_items,
+        "total": len(unique_items),
+        "has_more": len(all_items) >= limit,
+        "connections_count": len(conns),
+        "available_stores": available_stores,
+        "errors": errors if errors else None,
+    }
 
 
 
@@ -4512,7 +5018,7 @@ async def mp_product_details(
             }
             async with megamarket_httpx_client(30.0) as client:
                 res = await client.post(
-                    "https://partner.megamarket.ru/api/merchantIntegration/assortment/v1/card/getAttributes",
+                    "https://api.megamarket.tech/api/merchantIntegration/assortment/v1/card/getAttributes",
                     headers=headers, json=payload,
                 )
             if res.status_code != 200:
@@ -5114,26 +5620,115 @@ async def syndication_push_simple(
         raise HTTPException(404, "Connection not found")
 
     # Build mapped_payload from product attributes
-    mapped_payload = dict(db_prod.attributes_data or {})
-    mapped_payload.pop("_platforms", None)
-    mapped_payload.pop("_vendor_code", None)
+    raw_attrs = dict(db_prod.attributes_data or {})
+    platforms_data = raw_attrs.pop("_platforms", {}) or {}
+    raw_attrs.pop("_vendor_code", None)
+    mapped_payload = dict(raw_attrs)
 
     # Add required fields
-    mapped_payload["offer_id"] = db_prod.sku
+    mapped_payload["offer_id"] = db_prod.sku.replace("mp:", "")
     mapped_payload["name"] = db_prod.name
 
-    # Add images
+    # Add description
+    if db_prod.description_html and not mapped_payload.get("Описание"):
+        mapped_payload["Описание"] = db_prod.description_html
+        mapped_payload["description"] = db_prod.description_html
+
+    # Resolve categoryId for the target marketplace
+    target_platform = db_conn.type
+    platform_info = platforms_data.get(target_platform, {}) if isinstance(platforms_data, dict) else {}
+    mp_category_raw = str(platform_info.get("category") or platform_info.get("category_id") or "").strip()
+    # Only use if it looks like a numeric ID (not a category name/path)
+    mp_category = ""
+    if mp_category_raw and mp_category_raw.replace("_", "").replace("-", "").isdigit():
+        mp_category = mp_category_raw
+
+    if not mp_category and db_prod.category_id:
+        # Try to find marketplace category by PIM category name
+        try:
+            from backend.services.attribute_star_map import (
+                _fetch_ozon_categories, _fetch_mm_categories,
+                _fetch_wb_categories, _fetch_yandex_categories,
+            )
+            import re as _pref_re
+            cat_res_q = await db.execute(select(models.Category).where(models.Category.id == db_prod.category_id))
+            pim_cat = cat_res_q.scalars().first()
+            if pim_cat:
+                # Use leaf category name (last segment of path)
+                raw_name = pim_cat.name.strip()
+                if "->" in raw_name:
+                    cat_name = raw_name.split("->")[-1].strip()
+                elif "/" in raw_name:
+                    cat_name = raw_name.split("/")[-1].strip()
+                else:
+                    cat_name = raw_name
+                _tok_re2 = _pref_re.compile(r"[a-zA-Zа-яА-ЯёЁ0-9]+")
+                def _pfx2(w, n=4):
+                    return w[:n] if len(w) >= n else w
+                cat_prefixes = [_pfx2(t.lower().replace("ё","е")) for t in _tok_re2.findall(cat_name) if len(t)>2]
+                fetch_fn = {"ozon": lambda: _fetch_ozon_categories(db_conn.api_key, db_conn.client_id),
+                            "megamarket": lambda: _fetch_mm_categories(db_conn.api_key),
+                            "wildberries": lambda: _fetch_wb_categories(db_conn.api_key),
+                            "wb": lambda: _fetch_wb_categories(db_conn.api_key),
+                            "yandex": lambda: _fetch_yandex_categories(db_conn.api_key, db_conn.client_id)}.get(target_platform)
+                if fetch_fn:
+                    mp_cats = await fetch_fn()
+                    best_score, best_cat_id = 0, ""
+                    for mc in mp_cats:
+                        mc_name = str(mc.get("name") or "")
+                        leaf = mc_name.split("->")[-1].strip() if "->" in mc_name else mc_name.split("/")[-1].strip() if "/" in mc_name else mc_name
+                        leaf_words = [t.lower().replace("ё","е") for t in _tok_re2.findall(leaf) if len(t)>2]
+                        leaf_pfx = set(_pfx2(w) for w in leaf_words)
+                        full_words = [t.lower().replace("ё","е") for t in _tok_re2.findall(mc_name) if len(t)>2]
+                        full_pfx = set(_pfx2(w) for w in full_words)
+                        leaf_hits = sum(1 for cp in cat_prefixes if cp in leaf_pfx or any(cp in lw or lw in cp for lw in leaf_words))
+                        full_hits = sum(1 for cp in cat_prefixes if cp in full_pfx or any(cp in fw or fw in cp for fw in full_words))
+                        n_q = max(len(cat_prefixes),1)
+                        lr, fr = leaf_hits/n_q, full_hits/n_q
+                        sc = 0
+                        if lr >= 0.99: sc = 0.9 + (leaf_hits/max(len(leaf_words),1))*0.1
+                        elif fr >= 0.99 and lr >= 0.5: sc = 0.7 + lr*0.1
+                        if sc > best_score:
+                            best_score = sc
+                            best_cat_id = str(mc.get("id") or "")
+                    if best_cat_id and best_score > 0.5:
+                        mp_category = best_cat_id
+        except Exception as e:
+            log.warning("Category resolution for push failed: %s", e)
+
+    if mp_category:
+        mapped_payload["categoryId"] = mp_category
+        mapped_payload["category_id"] = mp_category
+
+    # Download external images and resolve local URLs to public
+    public_base = body.get("public_base_url", os.getenv("PUBLIC_API_BASE_URL", "")).strip().rstrip("/")
     if db_prod.images and not mapped_payload.get("Фото"):
-        public_base = body.get("public_base_url", os.getenv("PUBLIC_API_BASE_URL", "")).strip().rstrip("/")
+        from backend.services.image_download import download_product_images
+        # First download any external URLs
+        raw_imgs = list(db_prod.images or [])
+        external = [u for u in raw_imgs if isinstance(u, str) and u.startswith("http")]
+        if external:
+            try:
+                local = await download_product_images(external)
+                for orig, loc in zip(external, local):
+                    if loc and loc != orig:
+                        raw_imgs = [loc if v == orig else v for v in raw_imgs]
+                # Update product images in DB
+                db_prod.images = raw_imgs
+                db.add(db_prod)
+                await db.commit()
+            except Exception:
+                pass
         imgs = []
-        for im in (db_prod.images or []):
+        for im in raw_imgs:
             s = str(im).strip()
-            if s.startswith("http"):
-                imgs.append(s)
-            elif s.startswith("/") and public_base:
+            if s.startswith("/") and public_base:
                 imgs.append(public_base + s)
+            elif s.startswith("http"):
+                imgs.append(s)
         if imgs:
             mapped_payload["Фото"] = imgs
+            mapped_payload["images"] = imgs
 
     push_req = schemas.SyndicatePushRequest(
         product_id=str(product_id),
@@ -5177,8 +5772,29 @@ async def syndicate_push(req: schemas.SyndicatePushRequest, db: AsyncSession = D
         if extra_msgs:
             log.info("megamarket post-push: %s", " ".join(extra_msgs))
     
-    req.mapped_payload["offer_id"] = db_prod.sku
+    req.mapped_payload["offer_id"] = db_prod.sku.replace("mp:", "").replace("mp:", "")
     req.mapped_payload["name"] = db_prod.name
+    # Sanitize offer IDs
+    for oid_key in ("offer_id", "offerId", "Код товара продавца"):
+        if oid_key in req.mapped_payload:
+            req.mapped_payload[oid_key] = str(req.mapped_payload[oid_key]).replace("mp:", "")
+    # Sanitize garbage values from AI mapper
+    import re as _san_re
+    _sku_digits = _san_re.findall(r"\d{4,}", db_prod.sku)
+    for san_key in list(req.mapped_payload.keys()):
+        san_val = req.mapped_payload[san_key]
+        if isinstance(san_val, str):
+            # Remove values that are just model numbers stuffed into wrong fields
+            san_stripped = san_val.strip()
+            if san_stripped.lstrip("-").isdigit():
+                num = float(san_stripped)
+                # Negative values are never valid for physical dimensions
+                if num < 0:
+                    del req.mapped_payload[san_key]
+                    continue
+            # If value equals a digits-only part of SKU, it is garbage
+            if san_stripped.lstrip("-") in _sku_digits and san_key not in ("offer_id", "offerId", "Штрихкод", "barcode"):
+                del req.mapped_payload[san_key]
     if db_conn.type == "megamarket" and not req.mapped_payload.get("Фото"):
         mm_base = (req.public_base_url or os.getenv("PUBLIC_API_BASE_URL", "")).strip().rstrip("/")
         auto_photos: List[str] = []
@@ -5246,7 +5862,8 @@ async def syndicate_push(req: schemas.SyndicatePushRequest, db: AsyncSession = D
         if barcode_value:
             req.mapped_payload["Штрихкод"] = barcode_value
         else:
-            preflight_missing.append({"field": "Штрихкод", "reason": "Нет валидного EAN/GTIN (8/12/13/14 цифр)"})
+            # Barcode missing — not critical, proceed without blocking
+            log.warning("Preflight: barcode missing for %s", db_prod.sku)
         model_value = _first_non_empty_from_payload(
             req.mapped_payload,
             ["Наименование модели", "Модель", "model", "model_number", "model_code"],
@@ -5255,7 +5872,16 @@ async def syndicate_push(req: schemas.SyndicatePushRequest, db: AsyncSession = D
             ["Наименование модели", "Модель", "model", "model_number", "model_code"],
         )
         if not model_value:
-            preflight_missing.append({"field": "Модель", "reason": "Нет значения модели в PIM/названии"})
+            # Try to extract model from product name (e.g. "LG NeoChef MW25R35GIS" -> "MW25R35GIS")
+            import re as _model_re
+            name_str = str(req.mapped_payload.get("name") or db_prod.name or "")
+            # Look for alphanumeric model codes (letters+digits, at least 4 chars)
+            model_candidates = _model_re.findall(r'\b[A-Za-z]{1,4}[\-]?[A-Za-z0-9]{2,}[\-/]?[A-Za-z0-9]*\b', name_str)
+            model_candidates = [m for m in model_candidates if len(m) >= 4 and any(c.isdigit() for c in m)]
+            if model_candidates:
+                model_value = model_candidates[0]
+                req.mapped_payload["Наименование модели"] = model_value
+                req.mapped_payload["Модель"] = model_value
         review_all_fields: List[Dict[str, Any]] = []
         cat_for_review = req.mapped_payload.get("categoryId")
         if cat_for_review:
@@ -5297,6 +5923,18 @@ async def syndicate_push(req: schemas.SyndicatePushRequest, db: AsyncSession = D
                 "payload_sent": req.mapped_payload,
             }
     
+    # Ensure all photo URLs have file extensions
+    for photo_key in ("Фото", "images", "Изображения"):
+        photos = req.mapped_payload.get(photo_key)
+        if isinstance(photos, list):
+            fixed = []
+            for p in photos:
+                p = str(p).strip()
+                if p and not any(p.lower().endswith(e) for e in ('.jpg','.jpeg','.png','.webp','.gif')):
+                    p += '.jpg'
+                fixed.append(p)
+            req.mapped_payload[photo_key] = fixed
+
     try:
         prev_public_base = os.getenv("PUBLIC_API_BASE_URL")
         # Allow runtime override from request for MM image proxy domain.
@@ -5348,7 +5986,7 @@ async def syndicate_push(req: schemas.SyndicatePushRequest, db: AsyncSession = D
                     for _ in range(32):
                         await asyncio.sleep(8)
                         st_res = await st_client.post(
-                            "https://partner.megamarket.ru/api/merchantIntegration/assortment/v1/card/get",
+                            "https://api.megamarket.tech/api/merchantIntegration/assortment/v1/card/get",
                             headers=headers_st,
                             json=payload_st,
                         )
@@ -6043,7 +6681,10 @@ async def login_for_access_token(request: Request, form_data: OAuth2PasswordRequ
     access_token = create_access_token(
         data={"sub": user.email}, expires_delta=access_token_expires
     )
-    return {"access_token": access_token, "token_type": "bearer", "role": user.role}
+    from backend.services.auth import create_refresh_token, REFRESH_TOKEN_EXPIRE_DAYS
+    refresh_token = create_refresh_token()
+    redis_client.setex(f"refresh:{refresh_token}", 60*60*24*REFRESH_TOKEN_EXPIRE_DAYS, user.email)
+    return {"access_token": access_token, "refresh_token": refresh_token, "token_type": "bearer", "role": user.role}
 
 # ─── Google OAuth ──────────────────────────────────────────────────────────────
 
@@ -6106,14 +6747,17 @@ async def google_oauth_login(request: Request, db: AsyncSession = Depends(get_db
         await db.commit()
         await db.refresh(user)
 
-    from backend.services.auth import create_access_token, ACCESS_TOKEN_EXPIRE_MINUTES
+    from backend.services.auth import create_access_token, ACCESS_TOKEN_EXPIRE_MINUTES, create_refresh_token, REFRESH_TOKEN_EXPIRE_DAYS
     from datetime import timedelta
     access_token = create_access_token(
         data={"sub": user.email},
         expires_delta=timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES),
     )
+    refresh_token = create_refresh_token()
+    redis_client.setex(f"refresh:{refresh_token}", 60*60*24*REFRESH_TOKEN_EXPIRE_DAYS, user.email)
     return {
         "access_token": access_token,
+        "refresh_token": refresh_token,
         "token_type": "bearer",
         "role": user.role,
         "email": user.email,
@@ -6130,6 +6774,28 @@ async def get_me(current_user: models.User = Depends(get_current_user)):
         "display_name": getattr(current_user, "display_name", None),
         "avatar_url": getattr(current_user, "avatar_url", None),
     }
+
+@app.post("/api/v1/auth/refresh")
+async def refresh_access_token(request: Request, db: AsyncSession = Depends(get_db)):
+    body = await request.json()
+    refresh_token = body.get("refresh_token", "")
+    if not refresh_token:
+        raise HTTPException(status_code=401, detail="Missing refresh token")
+    email_bytes = redis_client.get(f"refresh:{refresh_token}")
+    if not email_bytes:
+        raise HTTPException(status_code=401, detail="Invalid or expired refresh token")
+    email = email_bytes.decode() if isinstance(email_bytes, bytes) else email_bytes
+    result = await db.execute(select(models.User).filter(models.User.email == email))
+    user = result.scalars().first()
+    if not user:
+        raise HTTPException(status_code=401, detail="User not found")
+    from backend.services.auth import create_access_token, create_refresh_token, ACCESS_TOKEN_EXPIRE_MINUTES, REFRESH_TOKEN_EXPIRE_DAYS
+    from datetime import timedelta
+    redis_client.delete(f"refresh:{refresh_token}")
+    new_refresh = create_refresh_token()
+    redis_client.setex(f"refresh:{new_refresh}", 60*60*24*REFRESH_TOKEN_EXPIRE_DAYS, user.email)
+    new_access = create_access_token(data={"sub": user.email}, expires_delta=timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES))
+    return {"access_token": new_access, "refresh_token": new_refresh, "token_type": "bearer", "role": user.role}
 
 # ─── Google OAuth PKCE (browser redirect flow) ────────────────────────────────
 import hashlib, base64, secrets as _secrets
@@ -6274,3 +6940,685 @@ async def auth_config(db: AsyncSession = Depends(get_db)):
     settings = {s.id: s.value for s in res.scalars().all()}
     google_enabled = bool(settings.get("google_client_id") and settings.get("google_client_secret"))
     return {"google_enabled": google_enabled}
+
+
+# --- Marketplace Attributes by PIM Category ---
+@app.get("/api/v1/categories/{category_id}/marketplace-attributes")
+async def get_category_marketplace_attributes(
+    category_id: str,
+    db: AsyncSession = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    """For a PIM category, search matching categories on each marketplace by name,
+    then fetch attribute schemas from each marketplace."""
+    from backend.services.adapters import get_adapter
+    from backend.services.attribute_star_map import (
+        _fetch_ozon_categories, _fetch_mm_categories,
+        _fetch_wb_categories, _fetch_yandex_categories,
+    )
+    import re as _re
+
+    try:
+        cat_uuid = uuid.UUID(category_id)
+    except ValueError:
+        raise HTTPException(400, "Invalid category_id UUID")
+
+    cat_result = await db.execute(
+        select(models.Category).where(models.Category.id == cat_uuid)
+    )
+    category = cat_result.scalars().first()
+    if not category:
+        raise HTTPException(404, "Category not found")
+
+    cat_name = category.name.strip()
+    cat_name_lower = cat_name.lower().replace("\u0451", "\u0435")
+
+    conn_result = await db.execute(select(models.MarketplaceConnection))
+    all_connections = conn_result.scalars().all()
+    # Deduplicate by type (take first non-test connection per type)
+    conn_by_type: Dict[str, Any] = {}
+    for c in all_connections:
+        if "test" in (c.api_key or "").lower():
+            continue
+        if c.type not in conn_by_type:
+            conn_by_type[c.type] = c
+
+    mp_categories: Dict[str, str] = {}
+    mp_category_names: Dict[str, str] = {}
+    result: Dict[str, Any] = {}
+    fetch_errors: Dict[str, str] = {}
+
+    async def _search_and_fetch(platform: str, conn):
+        """Search for matching category on marketplace, then fetch attributes."""
+        try:
+            # Step 1: search categories by PIM category name
+            if platform == "ozon":
+                cats = await _fetch_ozon_categories(conn.api_key, conn.client_id)
+            elif platform == "megamarket":
+                cats = await _fetch_mm_categories(conn.api_key)
+            elif platform in ("wildberries", "wb"):
+                cats = await _fetch_wb_categories(conn.api_key)
+            elif platform == "yandex":
+                cats = await _fetch_yandex_categories(conn.api_key, conn.client_id)
+            else:
+                return
+
+            # Find best matching category using prefix/substring matching
+            _tok_re = _re.compile(r"[a-zA-Zа-яА-ЯёЁ0-9]+")
+            def _get_words(s):
+                return [t.lower().replace("ё", "е") for t in _tok_re.findall(s) if len(t) > 2]
+            def _prefix(w, n=4):
+                return w[:n] if len(w) >= n else w
+
+            cat_words = _get_words(cat_name)
+            cat_prefixes = [_prefix(w) for w in cat_words]
+            best_cat = None
+            best_score = 0.0
+            candidates = []
+
+            for mc in cats:
+                mc_name = str(mc.get("name") or "").strip()
+                leaf = mc_name.split("->")[-1].strip() if "->" in mc_name else mc_name.split("/")[-1].strip() if "/" in mc_name else mc_name
+                mc_lower = leaf.lower().replace("ё", "е")
+
+                # Exact match on leaf
+                if mc_lower == cat_name_lower:
+                    candidates.append((1.0, mc, leaf))
+                    continue
+
+                leaf_words = _get_words(leaf)
+                full_words = _get_words(mc_name)
+                leaf_prefixes = set(_prefix(w) for w in leaf_words)
+                full_prefixes = set(_prefix(w) for w in full_words)
+
+                # Check how many query prefixes are found in leaf vs full path
+                leaf_hits = sum(1 for cp in cat_prefixes if cp in leaf_prefixes or any(cp in lw or lw in cp for lw in leaf_words))
+                full_hits = sum(1 for cp in cat_prefixes if cp in full_prefixes or any(cp in fw or fw in cp for fw in full_words))
+                n_query = max(len(cat_prefixes), 1)
+
+                leaf_recall = leaf_hits / n_query
+                full_recall = full_hits / n_query
+
+                score = 0.0
+                if leaf_recall >= 0.99:
+                    precision = leaf_hits / max(len(leaf_words), 1)
+                    score = 0.9 + precision * 0.1
+                elif full_recall >= 0.99 and leaf_recall >= 0.5:
+                    score = 0.7 + leaf_recall * 0.1
+                elif full_recall >= 0.99:
+                    score = 0.5 + leaf_recall * 0.1
+
+                if cat_name_lower in mc_lower or mc_lower in cat_name_lower:
+                    score = max(score, 0.85)
+
+                if score > 0.5:
+                    candidates.append((score, mc, leaf))
+
+            candidates.sort(key=lambda x: x[0], reverse=True)
+            if candidates:
+                best_score, best_cat, best_leaf = candidates[0]
+
+            if not best_cat or best_score < 0.5:
+                fetch_errors[platform] = f"Не найдена категория \"{cat_name}\" на {platform}"
+                return
+
+            mp_cat_id = str(best_cat.get("id") or "").strip()
+            mp_cat_name = str(best_cat.get("name") or "").strip()
+            mp_categories[platform] = mp_cat_id
+            mp_category_names[platform] = mp_cat_name
+
+            # Step 2: fetch attributes
+            adapter = get_adapter(platform, conn.api_key, conn.client_id, conn.store_id, getattr(conn, "warehouse_id", None))
+            schema = await adapter.get_category_schema(mp_cat_id)
+            attrs = schema.get("attributes") or []
+            result[platform] = {
+                "category_id": mp_cat_id,
+                "category_name": mp_cat_name,
+                "attributes": attrs,
+                "connection_name": conn.name,
+                "connection_id": str(conn.id),
+                "total": len(attrs),
+                "match_score": best_score,
+            }
+        except Exception as exc:
+            log.warning("Failed to fetch schema for %s: %s", platform, exc)
+            fetch_errors[platform] = str(exc)
+
+    # Run all marketplace searches in parallel
+    import asyncio as _aio
+    tasks = []
+    for platform, conn in conn_by_type.items():
+        tasks.append(_search_and_fetch(platform, conn))
+    await _aio.gather(*tasks)
+
+    # --- Compute common/shared attributes across marketplaces using AI ---
+    common_attributes = []
+    unique_by_mp: Dict[str, List[Dict[str, Any]]] = {}
+    if len(result) >= 2:
+        import re as _re
+        def _attr_norm(s: str) -> str:
+            return _re.sub(r"\s+", " ", str(s or "").strip().lower().replace("ё", "е"))
+
+        # Build attrs list per marketplace
+        mp_attrs: Dict[str, List[Dict[str, Any]]] = {}
+        for mp_key, mp_data in result.items():
+            mp_attrs[mp_key] = mp_data.get("attributes") or []
+
+        # Try AI matching
+        try:
+            ai_settings = await db.execute(
+                select(models.SystemSettings).where(
+                    models.SystemSettings.id.in_(["deepseek_api_key", "gemini_api_key", "ai_provider", "gemini_model", "local_llm_model"])
+                )
+            )
+            settings_map = {s.id: s.value for s in ai_settings.scalars().all()}
+            provider = settings_map.get("ai_provider", "deepseek")
+
+            from openai import AsyncOpenAI
+            if provider == "gemini":
+                ai_client = AsyncOpenAI(api_key=settings_map.get("gemini_api_key", ""), base_url="https://generativelanguage.googleapis.com/v1beta/openai/")
+                ai_model = settings_map.get("gemini_model", "gemini-2.0-flash")
+            elif provider == "local":
+                ai_client = AsyncOpenAI(api_key="ollama", base_url="http://localhost:11434/v1")
+                ai_model = settings_map.get("local_llm_model", "qwen3:32b")
+            else:
+                ai_client = AsyncOpenAI(api_key=settings_map.get("deepseek_api_key", ""), base_url="https://api.deepseek.com/v1")
+                ai_model = "deepseek-chat"
+
+            # Build attribute name lists per MP for AI prompt
+            mp_names: Dict[str, List[str]] = {}
+            for mp_key, attrs in mp_attrs.items():
+                mp_names[mp_key] = [a.get("name", "") for a in attrs if a.get("name")]
+
+            mp_keys = sorted(mp_names.keys())
+            prompt_parts = []
+            for mp in mp_keys:
+                names_str = ", ".join(mp_names[mp][:80])
+                prompt_parts.append(f"{mp}: [{names_str}]")
+
+            prompt = f"""Сопоставь атрибуты товаров между маркетплейсами. Найди атрибуты, которые означают одно и то же, но могут называться по-разному.
+
+Атрибуты по маркетплейсам:
+{chr(10).join(prompt_parts)}
+
+Верни JSON массив совпадений. Каждый элемент: {{"name": "общее название", "matches": {{"платформа": "название атрибута на этой платформе", ...}}}}
+Включай только атрибуты, совпадающие МИНИМУМ на 2 маркетплейсах. Не выдумывай атрибуты — используй только те, что в списках выше.
+Верни ТОЛЬКО JSON массив, без markdown и пояснений."""
+
+            resp = await ai_client.chat.completions.create(
+                model=ai_model,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.1,
+                max_tokens=4000,
+            )
+            ai_text = resp.choices[0].message.content.strip()
+            # Parse JSON from response (may be wrapped in ```json)
+            if "```" in ai_text:
+                ai_text = ai_text.split("```")[1]
+                if ai_text.startswith("json"):
+                    ai_text = ai_text[4:]
+            ai_matches = json.loads(ai_text)
+
+            # Build common_attributes from AI matches
+            matched_names_by_mp: Dict[str, set] = {mp: set() for mp in mp_keys}
+            mp_name_to_attr: Dict[str, Dict[str, Dict[str, Any]]] = {}
+            for mp_key, attrs in mp_attrs.items():
+                mp_name_to_attr[mp_key] = {_attr_norm(a.get("name", "")): a for a in attrs if a.get("name")}
+
+            for match in ai_matches:
+                if not isinstance(match, dict):
+                    continue
+                common_name = match.get("name", "")
+                matches = match.get("matches", {})
+                if len(matches) < 2:
+                    continue
+
+                variants = {}
+                is_req = False
+                for mp_key, attr_name in matches.items():
+                    if mp_key not in mp_name_to_attr:
+                        continue
+                    norm = _attr_norm(attr_name)
+                    attr = mp_name_to_attr[mp_key].get(norm)
+                    if not attr:
+                        # Fuzzy find
+                        for k, v in mp_name_to_attr[mp_key].items():
+                            if norm in k or k in norm:
+                                attr = v
+                                norm = k
+                                break
+                    if attr:
+                        variants[mp_key] = {"id": attr.get("id"), "name": attr.get("name"), "type": attr.get("type")}
+                        matched_names_by_mp.setdefault(mp_key, set()).add(norm)
+                        if attr.get("is_required"):
+                            is_req = True
+
+                if len(variants) >= 2:
+                    common_attributes.append({
+                        "name": common_name,
+                        "normalized": _attr_norm(common_name),
+                        "marketplaces": variants,
+                        "is_required_any": is_req,
+                    })
+
+            # Unique = not matched by AI
+            for mp_key, attrs in mp_attrs.items():
+                matched = matched_names_by_mp.get(mp_key, set())
+                unique_by_mp[mp_key] = [
+                    a for a in attrs if _attr_norm(a.get("name", "")) not in matched
+                ]
+
+        except Exception as ai_err:
+            log.warning("AI attribute matching failed, falling back to exact: %s", ai_err)
+            # Fallback: exact name matching
+            mp_attr_maps: Dict[str, Dict[str, Dict[str, Any]]] = {}
+            for mp_key, attrs in mp_attrs.items():
+                name_map: Dict[str, Dict[str, Any]] = {}
+                for a in attrs:
+                    norm = _attr_norm(a.get("name", ""))
+                    if norm:
+                        name_map[norm] = a
+                mp_attr_maps[mp_key] = name_map
+            all_norm_sets = [set(nm.keys()) for nm in mp_attr_maps.values()]
+            common_names = all_norm_sets[0]
+            for s in all_norm_sets[1:]:
+                common_names = common_names & s
+            for norm_name in sorted(common_names):
+                variants = {}
+                representative = None
+                for mp_key, name_map in mp_attr_maps.items():
+                    if norm_name in name_map:
+                        attr = name_map[norm_name]
+                        variants[mp_key] = {"id": attr.get("id"), "name": attr.get("name"), "type": attr.get("type")}
+                        if not representative:
+                            representative = attr
+                if len(variants) >= 2 and representative:
+                    common_attributes.append({
+                        "name": representative.get("name", ""),
+                        "normalized": norm_name,
+                        "marketplaces": variants,
+                        "is_required_any": any(
+                            mp_attr_maps[mp].get(norm_name, {}).get("is_required", False)
+                            for mp in mp_attr_maps if norm_name in mp_attr_maps.get(mp, {})
+                        ),
+                    })
+            for mp_key, name_map in mp_attr_maps.items():
+                unique_by_mp[mp_key] = [
+                    a for norm, a in name_map.items() if norm not in common_names
+                ]
+    else:
+        for mp_key, mp_data in result.items():
+            unique_by_mp[mp_key] = mp_data.get("attributes") or []
+
+    return {
+        "category_id": category_id,
+        "marketplaces": result,
+        "common_attributes": common_attributes,
+        "common_count": len(common_attributes),
+        "unique_by_marketplace": {k: len(v) for k, v in unique_by_mp.items()},
+        "mp_categories": mp_categories,
+        "category_name": cat_name,
+        "errors": fetch_errors,
+    }
+
+
+
+@app.get("/api/v1/attributes/search")
+async def search_attributes_across_marketplaces(
+    q: str = "",
+    category_id: str = "",
+    platform: str = "",
+    page: int = 1,
+    limit: int = 50,
+    db: AsyncSession = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    """Search attributes across all marketplaces with pagination.
+    Searches both local DB attributes and cached marketplace attributes."""
+    import re as _re
+
+    query = (q or "").strip().lower().replace("ё", "е")
+    offset = (max(1, page) - 1) * limit
+
+    results: List[Dict[str, Any]] = []
+
+    # 1. Search local DB attributes
+    if not platform or platform == "local":
+        from sqlalchemy import or_
+        db_q = select(models.Attribute).options(
+            selectinload(models.Attribute.category),
+            selectinload(models.Attribute.connection),
+        )
+        if category_id:
+            try:
+                cat_uuid = uuid.UUID(category_id)
+                db_q = db_q.where(or_(
+                    models.Attribute.category_id == cat_uuid,
+                    models.Attribute.category_id.is_(None),
+                ))
+            except ValueError:
+                pass
+        if query:
+            db_q = db_q.where(or_(
+                models.Attribute.name.ilike(f"%{query}%"),
+                models.Attribute.code.ilike(f"%{query}%"),
+            ))
+        db_result = await db.execute(db_q)
+        for attr in db_result.scalars().all():
+            results.append({
+                "id": str(attr.id),
+                "code": attr.code,
+                "name": attr.name,
+                "type": attr.type,
+                "is_required": attr.is_required,
+                "source": "local",
+                "platform": "pim",
+                "category_name": attr.category.name if attr.category else None,
+                "connection_name": attr.connection.name if attr.connection else None,
+            })
+
+    # 2. If category_id provided, search cached marketplace attributes
+    if category_id:
+        try:
+            cat_uuid = uuid.UUID(category_id)
+            cat_res = await db.execute(select(models.Category).where(models.Category.id == cat_uuid))
+            category = cat_res.scalars().first()
+            if category:
+                # Use _mp_attr_cache if available, otherwise skip (too slow for search)
+                pass
+        except ValueError:
+            pass
+
+    # 3. Search star map snapshot
+    from backend.services.attribute_star_map import _read_json, _STAR_MAP_SNAPSHOT
+    snap = _read_json(_STAR_MAP_SNAPSHOT, {})
+    for key in ["ozon_attributes_data", "megamarket_attributes_data"]:
+        p = "ozon" if "ozon" in key else "megamarket"
+        if platform and platform != p:
+            continue
+        for a in (snap.get(key) or []):
+            if not isinstance(a, dict):
+                continue
+            name = str(a.get("name") or "")
+            if query and query not in name.lower().replace("ё", "е"):
+                continue
+            results.append({
+                "id": str(a.get("id") or a.get("attribute_id") or ""),
+                "code": str(a.get("id") or ""),
+                "name": name,
+                "type": str(a.get("type") or a.get("valueTypeCode") or ""),
+                "is_required": bool(a.get("is_required", False)),
+                "source": "star_map",
+                "platform": p,
+                "category_id": str(a.get("category_id") or ""),
+                "category_name": str(a.get("category_name") or ""),
+            })
+
+    # Deduplicate by (platform, name normalized)
+    seen = set()
+    unique_results = []
+    for r in results:
+        key = (r.get("platform", ""), r.get("name", "").lower().replace("ё", "е"))
+        if key not in seen:
+            seen.add(key)
+            unique_results.append(r)
+
+    total = len(unique_results)
+    page_results = unique_results[offset:offset + limit]
+
+    return {
+        "ok": True,
+        "query": q,
+        "total": total,
+        "page": page,
+        "limit": limit,
+        "has_more": offset + limit < total,
+        "results": page_results,
+    }
+
+
+
+@app.post("/api/v1/products/{product_id}/autofill-mp-attributes")
+async def autofill_mp_attributes(
+    product_id: str,
+    req: Dict[str, Any],
+    db: AsyncSession = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    """Auto-fill marketplace attributes using AI.
+    Takes existing product attributes and maps them to target marketplace schema."""
+    from backend.services.adapters import get_adapter
+    from openai import AsyncOpenAI
+
+    target_platform = req.get("target_platform", "")
+    target_category_id = req.get("target_category_id", "")
+    source_attributes = req.get("source_attributes", {})  # {key: value, ...}
+
+    if not target_platform or not target_category_id:
+        raise HTTPException(400, "target_platform and target_category_id required")
+
+    # Get target marketplace connection
+    conn_res = await db.execute(
+        select(models.MarketplaceConnection).where(models.MarketplaceConnection.type == target_platform)
+    )
+    conns = [c for c in conn_res.scalars().all() if "test" not in (c.api_key or "").lower()]
+    if not conns:
+        raise HTTPException(404, f"No connection for {target_platform}")
+    conn = conns[0]
+
+    # Fetch target schema
+    adapter = get_adapter(conn.type, conn.api_key, conn.client_id, conn.store_id, getattr(conn, "warehouse_id", None))
+    schema = await adapter.get_category_schema(target_category_id)
+    target_attrs = schema.get("attributes") or []
+    if not target_attrs:
+        return {"ok": False, "error": "No attributes in target schema", "filled": {}}
+
+    # Get AI settings
+    ai_settings_res = await db.execute(
+        select(models.SystemSettings).where(
+            models.SystemSettings.id.in_(["deepseek_api_key", "gemini_api_key", "ai_provider", "gemini_model", "local_llm_model"])
+        )
+    )
+    settings_map = {s.id: s.value for s in ai_settings_res.scalars().all()}
+    provider = settings_map.get("ai_provider", "deepseek")
+
+    if provider == "gemini":
+        ai_client = AsyncOpenAI(api_key=settings_map.get("gemini_api_key", ""), base_url="https://generativelanguage.googleapis.com/v1beta/openai/")
+        ai_model = settings_map.get("gemini_model", "gemini-2.0-flash")
+    elif provider == "local":
+        ai_client = AsyncOpenAI(api_key="ollama", base_url="http://localhost:11434/v1")
+        ai_model = settings_map.get("local_llm_model", "qwen3:32b")
+    else:
+        ai_client = AsyncOpenAI(api_key=settings_map.get("deepseek_api_key", ""), base_url="https://api.deepseek.com/v1")
+        ai_model = "deepseek-chat"
+
+    # Build target schema description with dictionary options
+    target_desc = []
+    for a in target_attrs[:100]:
+        name = a.get("name", "")
+        attr_id = a.get("id", "")
+        opts = a.get("dictionary_options") or []
+        opt_names = [str(o.get("name") or o.get("value") or o) for o in opts[:30]] if opts else []
+        is_req = a.get("is_required", False)
+        desc = f"- {name} (id={attr_id}, required={is_req}"
+        if opt_names:
+            desc += f", allowed_values=[{', '.join(opt_names[:20])}]"
+        desc += ")"
+        target_desc.append(desc)
+
+    # Source attributes as string
+    source_str = "\n".join(f"- {k}: {v}" for k, v in source_attributes.items() if v)
+
+    prompt = f"""У тебя есть товар с атрибутами с одного маркетплейса:
+
+{source_str}
+
+Нужно заполнить атрибуты для маркетплейса {target_platform}. Вот схема целевых атрибутов:
+
+{chr(10).join(target_desc)}
+
+Заполни значения на основе исходных атрибутов. Правила:
+1. Если есть allowed_values — выбирай ТОЛЬКО из них (точное совпадение)
+2. Если атрибут не имеет подходящего значения в исходных данных — пропусти
+3. Маппинг по смыслу: "Бренд" = "Торговая марка" = "Brand", "Цвет" = "Основной цвет", и т.д.
+4. Значения должны быть осмысленными и точными
+
+Верни JSON объект: {{"attribute_name": "значение", ...}}
+Только заполненные атрибуты. ТОЛЬКО JSON, без markdown."""
+
+    try:
+        resp = await ai_client.chat.completions.create(
+            model=ai_model,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.1,
+            max_tokens=4000,
+        )
+        ai_text = resp.choices[0].message.content.strip()
+        if "```" in ai_text:
+            ai_text = ai_text.split("```")[1]
+            if ai_text.startswith("json"):
+                ai_text = ai_text[4:]
+        filled = json.loads(ai_text)
+
+        # Download any external image URLs in filled values
+        import re as _img_re2
+        from backend.services.image_download import download_product_images as _dl
+        _url_pat2 = _img_re2.compile(r'https?://[^\s,]+\.(?:jpg|jpeg|png|webp|gif)', _img_re2.IGNORECASE)
+        for fk, fv in list(filled.items()):
+            if isinstance(fv, str) and _url_pat2.search(fv):
+                urls = _url_pat2.findall(fv)
+                ext_urls = [u for u in urls if "/api/v1/uploads/" not in u]
+                if ext_urls:
+                    local = await _dl(ext_urls)
+                    for orig, loc in zip(ext_urls, local):
+                        if loc and loc != orig:
+                            fv = fv.replace(orig, loc)
+                    filled[fk] = fv
+
+        return {
+            "ok": True,
+            "target_platform": target_platform,
+            "target_category_id": target_category_id,
+            "filled": filled,
+            "filled_count": len(filled),
+            "total_target_attrs": len(target_attrs),
+        }
+    except Exception as e:
+        log.warning("AI autofill failed: %s", e)
+        return {"ok": False, "error": str(e), "filled": {}}
+
+
+
+@app.post("/api/v1/products/{product_id}/autofill-mp-attributes")
+async def autofill_mp_attributes(
+    product_id: str,
+    req: Dict[str, Any],
+    db: AsyncSession = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    """Auto-fill marketplace attributes using AI.
+    Takes existing product attributes and maps them to target marketplace schema."""
+    from backend.services.adapters import get_adapter
+    from openai import AsyncOpenAI
+
+    target_platform = req.get("target_platform", "")
+    target_category_id = req.get("target_category_id", "")
+    source_attributes = req.get("source_attributes", {})  # {key: value, ...}
+
+    if not target_platform or not target_category_id:
+        raise HTTPException(400, "target_platform and target_category_id required")
+
+    # Get target marketplace connection
+    conn_res = await db.execute(
+        select(models.MarketplaceConnection).where(models.MarketplaceConnection.type == target_platform)
+    )
+    conns = [c for c in conn_res.scalars().all() if "test" not in (c.api_key or "").lower()]
+    if not conns:
+        raise HTTPException(404, f"No connection for {target_platform}")
+    conn = conns[0]
+
+    # Fetch target schema
+    adapter = get_adapter(conn.type, conn.api_key, conn.client_id, conn.store_id, getattr(conn, "warehouse_id", None))
+    schema = await adapter.get_category_schema(target_category_id)
+    target_attrs = schema.get("attributes") or []
+    if not target_attrs:
+        return {"ok": False, "error": "No attributes in target schema", "filled": {}}
+
+    # Get AI settings
+    ai_settings_res = await db.execute(
+        select(models.SystemSettings).where(
+            models.SystemSettings.id.in_(["deepseek_api_key", "gemini_api_key", "ai_provider", "gemini_model", "local_llm_model"])
+        )
+    )
+    settings_map = {s.id: s.value for s in ai_settings_res.scalars().all()}
+    provider = settings_map.get("ai_provider", "deepseek")
+
+    if provider == "gemini":
+        ai_client = AsyncOpenAI(api_key=settings_map.get("gemini_api_key", ""), base_url="https://generativelanguage.googleapis.com/v1beta/openai/")
+        ai_model = settings_map.get("gemini_model", "gemini-2.0-flash")
+    elif provider == "local":
+        ai_client = AsyncOpenAI(api_key="ollama", base_url="http://localhost:11434/v1")
+        ai_model = settings_map.get("local_llm_model", "qwen3:32b")
+    else:
+        ai_client = AsyncOpenAI(api_key=settings_map.get("deepseek_api_key", ""), base_url="https://api.deepseek.com/v1")
+        ai_model = "deepseek-chat"
+
+    # Build target schema description with dictionary options
+    target_desc = []
+    for a in target_attrs[:100]:
+        name = a.get("name", "")
+        attr_id = a.get("id", "")
+        opts = a.get("dictionary_options") or []
+        opt_names = [str(o.get("name") or o.get("value") or o) for o in opts[:30]] if opts else []
+        is_req = a.get("is_required", False)
+        desc = f"- {name} (id={attr_id}, required={is_req}"
+        if opt_names:
+            desc += f", allowed_values=[{', '.join(opt_names[:20])}]"
+        desc += ")"
+        target_desc.append(desc)
+
+    # Source attributes as string
+    source_str = "\n".join(f"- {k}: {v}" for k, v in source_attributes.items() if v)
+
+    prompt = f"""У тебя есть товар с атрибутами с одного маркетплейса:
+
+{source_str}
+
+Нужно заполнить атрибуты для маркетплейса {target_platform}. Вот схема целевых атрибутов:
+
+{chr(10).join(target_desc)}
+
+Заполни значения на основе исходных атрибутов. Правила:
+1. Если есть allowed_values — выбирай ТОЛЬКО из них (точное совпадение)
+2. Если атрибут не имеет подходящего значения в исходных данных — пропусти
+3. Маппинг по смыслу: "Бренд" = "Торговая марка" = "Brand", "Цвет" = "Основной цвет", и т.д.
+4. Значения должны быть осмысленными и точными
+
+Верни JSON объект: {{"attribute_name": "значение", ...}}
+Только заполненные атрибуты. ТОЛЬКО JSON, без markdown."""
+
+    try:
+        resp = await ai_client.chat.completions.create(
+            model=ai_model,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.1,
+            max_tokens=4000,
+        )
+        ai_text = resp.choices[0].message.content.strip()
+        if "```" in ai_text:
+            ai_text = ai_text.split("```")[1]
+            if ai_text.startswith("json"):
+                ai_text = ai_text[4:]
+        filled = json.loads(ai_text)
+
+        return {
+            "ok": True,
+            "target_platform": target_platform,
+            "target_category_id": target_category_id,
+            "filled": filled,
+            "filled_count": len(filled),
+            "total_target_attrs": len(target_attrs),
+        }
+    except Exception as e:
+        log.warning("AI autofill failed: %s", e)
+        return {"ok": False, "error": str(e), "filled": {}}

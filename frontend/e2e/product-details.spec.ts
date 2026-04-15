@@ -1,15 +1,38 @@
 import { test, expect, Page } from '@playwright/test';
 import { login } from './helpers';
 
+/**
+ * Navigate to the first available product detail page.
+ * Uses table row click (SPA navigation via react-router).
+ */
 async function goToFirstProduct(page: Page): Promise<string | null> {
   await login(page);
   await page.goto('/products', { waitUntil: 'networkidle' });
-  await page.waitForTimeout(3000);
-  const productRows = page.locator('[style*="cursor: pointer"], [style*="cursor:pointer"]').first();
-  const hasProducts = await productRows.count() > 0;
+  // Wait for the table to render with products
+  await page.waitForSelector('tbody tr', { timeout: 15000 });
+  await page.waitForTimeout(1000); // let all rows render
+
+  const firstRow = page.locator('tbody tr').first();
+  const hasProducts = await firstRow.count() > 0;
   if (!hasProducts) return null;
-  await productRows.click();
-  await page.waitForURL('**/products/**', { timeout: 15000 });
+
+  // Get the current URL before click
+  const beforeUrl = page.url();
+
+  await firstRow.click();
+
+  // Wait for URL to change (SPA navigation - no page load event)
+  await page.waitForFunction(
+    (oldUrl) => window.location.href !== oldUrl,
+    beforeUrl,
+    { timeout: 15000 }
+  );
+
+  // Wait for product details content to appear (loading spinner to disappear)
+  // The product details page shows a Loader2 spinner while loading, then renders the top bar with "Назад" button
+  await page.waitForSelector('button:has-text("Назад")', { timeout: 30000 });
+  await page.waitForTimeout(1000);
+
   const url = page.url();
   const match = url.match(/\/products\/(.+)/);
   return match ? match[1] : null;
@@ -20,8 +43,11 @@ test.describe('Product Details', () => {
   test('Product details page loads with correct structure', async ({ page }) => {
     const productId = await goToFirstProduct(page);
     if (!productId) { test.skip(true, 'No products to test'); return; }
+    // Product name should be visible in the top bar
     await expect(page.locator('h1').first()).toBeVisible({ timeout: 15000 });
+    // SKU label should be visible
     await expect(page.locator('text=SKU:')).toBeVisible();
+    // Back button should exist
     await expect(page.locator('button').filter({ hasText: 'Назад' })).toBeVisible();
   });
 
@@ -33,6 +59,7 @@ test.describe('Product Details', () => {
       const tab = page.locator('button').filter({ hasText: tabName }).first();
       await expect(tab).toBeVisible({ timeout: 5000 });
     }
+    // Click each tab and verify no crash
     for (const tabName of tabNames) {
       const tab = page.locator('button').filter({ hasText: tabName }).first();
       await tab.click();
@@ -50,9 +77,11 @@ test.describe('Product Details', () => {
     await expect(page.locator('text=Бренд')).toBeVisible();
     await expect(page.locator('text=Категория')).toBeVisible();
     await expect(page.locator('text=Описание')).toBeVisible();
-    const inputs = page.locator('input');
+    // Check input fields for the form
+    const mainContent = page.locator('main');
+    const inputs = mainContent.locator('input');
     expect(await inputs.count()).toBeGreaterThanOrEqual(4);
-    await expect(page.locator('textarea')).toBeVisible();
+    await expect(mainContent.locator('textarea')).toBeVisible();
   });
 
   test('Атрибуты tab: attributes section renders', async ({ page }) => {
@@ -73,14 +102,23 @@ test.describe('Product Details', () => {
     const mpTab = page.locator('button').filter({ hasText: /Megamarket|Ozon/ }).first();
     if (await mpTab.count() === 0) { test.skip(true, 'No marketplace tabs available'); return; }
     await mpTab.click();
-    await page.waitForTimeout(3000);
-    const productRows = page.locator('[style*="cursor: pointer"], [style*="cursor:pointer"]').first();
-    if (await productRows.count() === 0) { test.skip(true, 'No MP products to test'); return; }
-    await productRows.click();
-    await page.waitForURL('**/products/**', { timeout: 15000 });
-    await page.waitForTimeout(2000);
+    // Wait for MP products to load (loading spinner disappears and new rows render)
+    await page.waitForTimeout(5000);
+    const firstRow = page.locator('tbody tr').first();
+    if (await firstRow.count() === 0) { test.skip(true, 'No MP products to test'); return; }
+    // Click the name cell (4th td) to avoid the checkbox
+    const nameCell = firstRow.locator('td').nth(3);
+    const beforeUrl = page.url();
+    await nameCell.click();
+    await page.waitForFunction(
+      (oldUrl) => window.location.href !== oldUrl,
+      beforeUrl,
+      { timeout: 15000 }
+    );
+    await page.waitForSelector('button:has-text("Назад")', { timeout: 30000 });
     await page.locator('button').filter({ hasText: 'Атрибуты' }).first().click();
     await page.waitForTimeout(1000);
+    // Check for error banner — it may or may not be present depending on data
     const errorBanner = page.locator('text=ошибк').first();
     const hasErrors = await errorBanner.count() > 0;
     if (hasErrors) { await expect(errorBanner).toBeVisible(); }
@@ -93,24 +131,31 @@ test.describe('Product Details', () => {
     await page.waitForTimeout(2000);
     const mpTab = page.locator('button').filter({ hasText: /Megamarket|Ozon/ }).first();
     if (await mpTab.count() === 0) {
-      const productRows = page.locator('[style*="cursor: pointer"], [style*="cursor:pointer"]').first();
-      if (await productRows.count() === 0) { test.skip(true, 'No products available'); return; }
-      await productRows.click();
-      await page.waitForURL('**/products/**', { timeout: 15000 });
+      // Fall back to PIM product
+      await page.waitForSelector('tbody tr', { timeout: 15000 }).catch(() => {});
+      const firstRow = page.locator('tbody tr').first();
+      if (await firstRow.count() === 0) { test.skip(true, 'No products available'); return; }
+      const beforeUrl = page.url();
+      await firstRow.click();
+      await page.waitForFunction((oldUrl) => window.location.href !== oldUrl, beforeUrl, { timeout: 15000 });
     } else {
       await mpTab.click();
-      await page.waitForTimeout(3000);
-      const productRows = page.locator('[style*="cursor: pointer"], [style*="cursor:pointer"]').first();
-      if (await productRows.count() === 0) { test.skip(true, 'No MP products available'); return; }
-      await productRows.click();
-      await page.waitForURL('**/products/**', { timeout: 15000 });
+      await page.waitForTimeout(5000);
+      const firstRow = page.locator('tbody tr').first();
+      if (await firstRow.count() === 0) { test.skip(true, 'No MP products available'); return; }
+      const nameCell = firstRow.locator('td').nth(3);
+      const beforeUrl = page.url();
+      await nameCell.click();
+      await page.waitForFunction((oldUrl) => window.location.href !== oldUrl, beforeUrl, { timeout: 15000 });
     }
-    await page.waitForTimeout(2000);
+    await page.waitForSelector('button:has-text("Назад")', { timeout: 30000 });
     await page.locator('button').filter({ hasText: 'Атрибуты' }).first().click();
     await page.waitForTimeout(1000);
-    const selectElements = page.locator('select');
-    const inputElements = page.locator('input');
-    const datalistElements = page.locator('datalist');
+    // Check for various input types
+    const mainContent = page.locator('main');
+    const selectElements = mainContent.locator('select');
+    const inputElements = mainContent.locator('input');
+    const datalistElements = mainContent.locator('datalist');
     const selectCount = await selectElements.count();
     const inputCount = await inputElements.count();
     const datalistCount = await datalistElements.count();
@@ -132,7 +177,8 @@ test.describe('Product Details', () => {
     if (!productId) { test.skip(true, 'No products to test'); return; }
     await page.locator('button').filter({ hasText: 'Атрибуты' }).first().click();
     await page.waitForTimeout(1000);
-    const attrInputs = page.locator('input[placeholder]');
+    const mainContent = page.locator('main');
+    const attrInputs = mainContent.locator('input[placeholder]');
     const count = await attrInputs.count();
     if (count === 0) { test.skip(true, 'No attribute inputs found'); return; }
     const firstInput = attrInputs.first();
@@ -140,6 +186,7 @@ test.describe('Product Details', () => {
     const originalValue = await firstInput.inputValue();
     await firstInput.fill('test-value-12345');
     await expect(firstInput).toHaveValue('test-value-12345');
+    // Restore original value
     await firstInput.fill(originalValue);
   });
 
@@ -178,7 +225,9 @@ test.describe('Product Details', () => {
     const pushBtn = page.locator('button').filter({ hasText: /Отправить|Обновить/ }).first();
     if (await pushBtn.count() === 0) { test.skip(true, 'No push buttons available'); return; }
     await pushBtn.click();
+    // Wait for response
     await page.waitForTimeout(5000);
+    // Page should not crash
     await expect(page.locator('button').filter({ hasText: 'Синдикация' }).first()).toBeVisible();
   });
 
@@ -198,11 +247,15 @@ test.describe('Product Details', () => {
     await page.waitForTimeout(2000);
     const hasDialog = await page.locator('text=Выберите подключение').count() > 0;
     if (hasDialog) {
-      const connectionButtons = page.locator('div[style*="position: relative"] button').filter({ hasText: /\w+/ });
-      expect(await connectionButtons.count()).toBeGreaterThan(0);
+      // Dialog should list connections
+      const dialogButtons = page.locator('h3').filter({ hasText: 'Выберите подключение' })
+        .locator('..').locator('button');
+      expect(await dialogButtons.count()).toBeGreaterThan(0);
+      // Close dialog
       const cancelBtn = page.locator('button').filter({ hasText: 'Отмена' }).last();
       await cancelBtn.click();
     }
+    // Page should not crash
     await expect(page.locator('h1').first()).toBeVisible();
   });
 
@@ -213,6 +266,7 @@ test.describe('Product Details', () => {
     await expect(saveBtn).toBeVisible({ timeout: 5000 });
     await saveBtn.click();
     await page.waitForTimeout(3000);
+    // Page should not crash
     await expect(page.locator('h1').first()).toBeVisible();
   });
 
@@ -223,12 +277,21 @@ test.describe('Product Details', () => {
     const mpTab = page.locator('button').filter({ hasText: /Megamarket|Ozon/ }).first();
     if (await mpTab.count() === 0) { test.skip(true, 'No marketplace tabs available'); return; }
     await mpTab.click();
-    await page.waitForTimeout(3000);
-    const productRows = page.locator('[style*="cursor: pointer"], [style*="cursor:pointer"]').first();
-    if (await productRows.count() === 0) { test.skip(true, 'No MP products available'); return; }
-    await productRows.click();
-    await page.waitForURL('**/products/**', { timeout: 15000 });
-    await page.waitForTimeout(2000);
+    // Wait for MP products to load
+    await page.waitForTimeout(5000);
+    const firstRow = page.locator('tbody tr').first();
+    if (await firstRow.count() === 0) { test.skip(true, 'No MP products available'); return; }
+    // Click the name cell to avoid checkbox
+    const nameCell = firstRow.locator('td').nth(3);
+    const beforeUrl = page.url();
+    await nameCell.click();
+    await page.waitForFunction(
+      (oldUrl) => window.location.href !== oldUrl,
+      beforeUrl,
+      { timeout: 15000 }
+    );
+    await page.waitForSelector('button:has-text("Назад")', { timeout: 30000 });
+    // MP product should show a platform badge (e.g. MEGAMARKET or OZON)
     const platformBadge = page.locator('span').filter({ hasText: /MEGAMARKET|OZON|WILDBERRIES/ }).first();
     if (await platformBadge.count() > 0) {
       await expect(platformBadge).toBeVisible();

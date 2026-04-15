@@ -244,6 +244,14 @@ export default function ProductDetailsPage() {
     category: "",
   });
   const [attributes, setAttributes] = useState<ProductAttribute[]>([]);
+  const [attrFilter, setAttrFilter] = useState('');
+  const [attrSubTab, setAttrSubTab] = useState<'current' | 'schema'>('current');
+  const [catSchemaData, setCatSchemaData] = useState<any>(null);
+  const [catSchemaLoading, setCatSchemaLoading] = useState(false);
+  const [catSchemaTab, setCatSchemaTab] = useState('common');
+  const [catSchemaSearch, setCatSchemaSearch] = useState('');
+  const [autofillLoading, setAutofillLoading] = useState<Record<string, boolean>>({});
+  const [autofillResults, setAutofillResults] = useState<Record<string, any>>({});
 
   const loadData = useCallback(async () => {
     if (!id) return;
@@ -261,13 +269,13 @@ export default function ProductDetailsPage() {
         const raw = res.data;
         const p: Product = {
           id,
-          sku: raw.sku ?? sku,
+          sku: (raw.sku ?? sku ?? '').replace(/^mp:/, ''),
           name: raw.name ?? '',
-          brand: raw.brand ?? '',
+          brand: raw.brand || raw.attributes_data?.brand || (() => { const plats = (raw.attributes_data || {})._platforms || {}; for (const k in plats) { if (plats[k].brand) return plats[k].brand; } return ''; })(),
           category: raw.category ?? '',
           completeness_score: 0,
           status: 'active',
-          description: raw.description ?? '',
+          description: raw.description || raw.description_html || '',
           description_html: raw.description ?? '',
           media: (raw.photos ?? []).map((url: string, i: number) => ({ id: String(i), url, type: 'image' as const })),
           attributes: (raw.attributes ?? []).map((a: any) => ({ key: a.name || a.id, value: a.value, type: a.type || 'string', dictionary_options: a.dictionary_options || [], isSuggest: a.isSuggest, is_multiple: a.is_multiple, is_required: a.is_required, error: a.error })),
@@ -275,7 +283,7 @@ export default function ProductDetailsPage() {
           history: [],
         };
         setProduct(p);
-        setFields({ name: p.name ?? '', sku: p.sku ?? '', description: raw.description ?? '', brand: p.brand ?? '', category: String(p.category ?? '') });
+        setFields({ name: p.name ?? '', sku: (p.sku ?? '').replace(/^mp:/, ''), description: raw.description ?? '', brand: p.brand || (() => { const plats = (p.attributes_data || {})._platforms || {}; for (const k in plats) { if (plats[k].brand) return plats[k].brand; } return ''; })(), category: String(p.category ?? '') });
         setAttributes(p.attributes as any);
         setMpErrors(res.data.errors ?? []);
 
@@ -324,9 +332,9 @@ export default function ProductDetailsPage() {
       setProduct(p);
       setFields({
         name: p.name ?? "",
-        sku: p.sku ?? "",
+        sku: (p.sku ?? "").replace(/^mp:/, ""),
         description: p.description_html ?? p.description ?? "",
-        brand: p.brand ?? "",
+        brand: p.brand || p.attributes_data?.brand || (() => { const plats = (p.attributes_data || {})._platforms || {}; for (const k in plats) { if (plats[k].brand) return plats[k].brand; } return ""; })(),
         category: getCatName(p.category),
       });
       const attrs = Array.isArray(p.attributes) && p.attributes.length > 0
@@ -405,6 +413,7 @@ export default function ProductDetailsPage() {
     }
 
     setActivePlatform(platform);
+    setAttrFilter("");
     setMpBindingPlatform(platform);
     // Use cached attrs if available
     if (mpAttrsByPlatform[platform]) {
@@ -532,19 +541,30 @@ export default function ProductDetailsPage() {
           brand: mp["Бренд"] || mp.brand || f.brand,
           category: f.category,
         }));
-        // Reload live attributes
-        const platform = activePlatform || mpBindingPlatform || mpPlatform;
-        const vc = vendorCode || mpSku;
-        if (vc && platform) {
-          const liveRes = await api.get(`/mp/product-details?platform=${encodeURIComponent(platform)}&sku=${encodeURIComponent(vc)}`);
-          const liveAttrs = (liveRes.data?.attributes || []).map((a: any) => ({
-            key: a.name || a.id, value: a.value ?? '', type: a.type || 'string',
-            is_required: a.is_required, error: a.error,
-            dictionary_options: Array.isArray(a.dictionary_options) ? a.dictionary_options : [],
-            isSuggest: a.isSuggest, is_multiple: a.is_multiple,
-          }));
-          setAttributes(liveAttrs);
-          setMpErrors(liveRes.data?.errors || []);
+        // Update attributes from mapped_payload
+        const skipKeys = new Set(["categoryId", "offer_id", "name", "Бренд", "brand", "Описание", "description", "Фото", "images", "Наименование карточки"]);
+        const newAttrs: any[] = [];
+        for (const [key, val] of Object.entries(mp)) {
+          if (skipKeys.has(key) || key.startsWith("_")) continue;
+          if (val === null || val === undefined || val === "") continue;
+          newAttrs.push({
+            key,
+            value: Array.isArray(val) ? val.join(", ") : String(val),
+            type: "string",
+          });
+        }
+        if (newAttrs.length > 0) {
+          // Merge with existing: update values for existing keys, add new ones
+          const existing = [...attributes];
+          for (const na of newAttrs) {
+            const idx = existing.findIndex((a: any) => a.key === na.key);
+            if (idx >= 0) {
+              existing[idx] = { ...existing[idx], value: na.value };
+            } else {
+              existing.push(na);
+            }
+          }
+          setAttributes(existing);
         }
       }
       toast(d.status === 'success' ? 'AI обогащение выполнено' : (d.message || 'Завершено с замечаниями'), d.status === 'success' ? 'success' : 'warning');
@@ -616,16 +636,50 @@ export default function ProductDetailsPage() {
     if (!id) return;
     setPushingId(connectionId);
     try {
-      const effectiveId = (isMpProduct && pimId) ? pimId : id;
-      const res = await api.post(`/syndication/push/${effectiveId}`, {
+      let effectiveId = (isMpProduct && pimId) ? pimId : id;
+
+      // Auto-create shadow PIM record for MP products without PIM ID
+      if (isMpProduct && !pimId) {
+        try {
+          const shadowRes = await api.post('/mp/shadow-product', {
+            platform: mpPlatform,
+            sku: mpSku,
+            vendor_code: vendorCode || mpSku,
+            name: fields.name,
+            brand: fields.brand,
+            description: fields.description,
+            images: product?.media?.map((m: any) => m.url) || [],
+          });
+          const newPimId = shadowRes.data?.id;
+          if (newPimId) {
+            setPimId(newPimId);
+            effectiveId = newPimId;
+          } else {
+            toast("Не удалось создать PIM-запись для отправки", "error");
+            setPushingId(null);
+            return;
+          }
+        } catch {
+          toast("Не удалось создать PIM-запись", "error");
+          setPushingId(null);
+          return;
+        }
+      }
+
+      const res = await api.post('/syndicate/agent', {
+        product_id: effectiveId,
         connection_id: connectionId,
+        push: true,
         public_base_url: window.location.origin,
       });
       const d = res.data;
-      if (d.ok === false || d.error) {
+      if (d.status === "preflight_blocked") {
+        const missing = (d.preflight_missing || []).map((m: any) => m.field).join(", ");
+        toast(`Не хватает полей: ${missing}`, "warning");
+      } else if (d.status === "error" || d.ok === false || d.error) {
         toast(d.message || d.error || "Ошибка при отправке", "error");
       } else {
-        toast("Продукт отправлен на маркетплейс", "success");
+        toast(d.message || "Продукт отправлен на маркетплейс", "success");
       }
       // Reload product to update syndication status
       const prodRes = await api.get(`/products/${effectiveId}`);
@@ -937,7 +991,7 @@ export default function ProductDetailsPage() {
                 />
               </div>
               <div>
-                <label style={labelStyle}>Артикул (SKU)</label>
+                <label style={labelStyle}>Артикул продавца</label>
                 <input
                   style={inputStyle}
                   value={fields.sku}
@@ -946,12 +1000,26 @@ export default function ProductDetailsPage() {
                 />
               </div>
               <div>
+                <label style={labelStyle}>SKU маркетплейса</label>
+                <input
+                  style={{...inputStyle, opacity: 0.6}}
+                  value={(() => {
+                    const attrs = product?.attributes_data || {};
+                    const plats = attrs._platforms || {};
+                    const p = plats[activePlatform || mpPlatform || Object.keys(plats)[0] || ''] || {};
+                    return p.marketplace_product_id || '';
+                  })()}
+                  readOnly
+                  placeholder="Не привязан"
+                />
+              </div>
+              <div>
                 <label style={labelStyle}>Бренд</label>
                 <input
                   style={inputStyle}
                   value={fields.brand}
                   onChange={(e) => setFields((f) => ({ ...f, brand: e.target.value }))}
-                  placeholder="Название бренда"
+                  placeholder="Не указан"
                 />
               </div>
               <div>
@@ -960,7 +1028,7 @@ export default function ProductDetailsPage() {
                   style={inputStyle}
                   value={fields.category}
                   onChange={(e) => setFields((f) => ({ ...f, category: e.target.value }))}
-                  placeholder="Электроника / Телефоны"
+                  placeholder="Категория не указана"
                 />
               </div>
             </div>
@@ -971,7 +1039,7 @@ export default function ProductDetailsPage() {
                 style={textareaStyle}
                 value={fields.description}
                 onChange={(e) => setFields((f) => ({ ...f, description: e.target.value }))}
-                placeholder="Подробное описание товара…"
+                placeholder="Нажмите «AI обогатить» для генерации описания"
                 rows={6}
               />
             </div>
@@ -981,6 +1049,213 @@ export default function ProductDetailsPage() {
         {/* ──────────── Атрибуты ──────────── */}
         {activeTab === "attributes" && (
           <div style={{ ...card, overflow: "hidden" }}>
+            {/* Sub-tab switcher: Current attrs vs Category Schema */}
+            <div style={{ display: "flex", borderBottom: "1px solid rgba(255,255,255,0.06)" }}>
+              {(["current", "schema"] as const).map(st => (
+                <button key={st} onClick={() => {
+                  setAttrSubTab(st);
+                  if (st === 'schema' && !catSchemaData && !catSchemaLoading) {
+                    const catId = product?.category && typeof product.category === 'object' ? (product.category as any).id : null;
+                    if (catId) {
+                      setCatSchemaLoading(true);
+                      api.get(`/categories/${catId}/marketplace-attributes`).then(r => {
+                        setCatSchemaData(r.data);
+                        const mps = Object.keys(r.data.marketplaces || {});
+                        if ((r.data.common_count || 0) > 0) setCatSchemaTab('common');
+                        else if (mps.length > 0) setCatSchemaTab(mps[0]);
+                      }).catch(console.error).finally(() => setCatSchemaLoading(false));
+                    }
+                  }
+                }} style={{
+                  flex: 1, padding: "12px 20px", border: "none", cursor: "pointer",
+                  background: attrSubTab === st ? "rgba(99,102,241,0.08)" : "transparent",
+                  borderBottom: attrSubTab === st ? "2px solid #6366f1" : "2px solid transparent",
+                  color: attrSubTab === st ? "rgba(255,255,255,0.9)" : "rgba(255,255,255,0.35)",
+                  fontSize: 13, fontWeight: attrSubTab === st ? 600 : 400, transition: "all 0.15s",
+                }}>
+                  {st === 'current' ? 'Атрибуты товара' : 'Схема категории'}
+                </button>
+              ))}
+            </div>
+
+            {/* ── Category Schema sub-tab ── */}
+            {attrSubTab === 'schema' && (
+              <div style={{ padding: 0 }}>
+                {catSchemaLoading && (
+                  <div style={{ textAlign: "center", padding: "48px 0" }}>
+                    <div style={{ display: "inline-block", width: 24, height: 24, border: "2px solid rgba(99,102,241,0.3)", borderTopColor: "#6366f1", borderRadius: "50%", animation: "spin 0.8s linear infinite" }} />
+                    <p style={{ fontSize: 12, color: "rgba(255,255,255,0.3)", marginTop: 10 }}>Загружаем атрибуты со всех маркетплейсов...</p>
+                    <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
+                  </div>
+                )}
+                {!catSchemaLoading && !catSchemaData && (
+                  <div style={{ textAlign: "center", padding: "48px 24px", color: "rgba(255,255,255,0.25)" }}>
+                    <p>Нет данных о категории товара</p>
+                  </div>
+                )}
+                {!catSchemaLoading && catSchemaData && (() => {
+                  const MP_COLORS: Record<string, string> = { ozon: '#005bff', megamarket: '#00b33c', wildberries: '#cb11ab', yandex: '#fc0', wb: '#cb11ab' };
+                  const mpC = (t: string) => MP_COLORS[t] || '#6366f1';
+                  const mpL = (t: string) => ({ ozon: 'Ozon', megamarket: 'Мегамаркет', wildberries: 'Wildberries', yandex: 'Яндекс Маркет', wb: 'Wildberries' }[t] || t);
+                  const tabs: { key: string; label: string; count: number; color: string }[] = [];
+                  if ((catSchemaData.common_count || 0) > 0) tabs.push({ key: 'common', label: 'Общие (ИИ)', count: catSchemaData.common_count, color: '#6366f1' });
+                  for (const [mp, d] of Object.entries(catSchemaData.marketplaces || {})) tabs.push({ key: mp, label: mpL(mp), count: (d as any).total || 0, color: mpC(mp) });
+
+                  let attrs: any[] = [];
+                  if (catSchemaTab === 'common') {
+                    attrs = (catSchemaData.common_attributes || []).map((ca: any) => ({
+                      id: ca.normalized, name: ca.name,
+                      type: (Object.values(ca.marketplaces || {}) as any[])[0]?.type || '',
+                      is_required: ca.is_required_any, _common: true, _variants: ca.marketplaces,
+                    }));
+                  } else {
+                    const mp = catSchemaData.marketplaces?.[catSchemaTab];
+                    attrs = mp ? (mp.attributes || []) : [];
+                  }
+                  const q = catSchemaSearch.trim().toLowerCase();
+                  const filtered = q ? attrs.filter((a: any) => (a.name || '').toLowerCase().includes(q) || String(a.id || '').toLowerCase().includes(q)) : attrs;
+
+                  return (
+                    <>
+                      {/* Stats */}
+                      <div style={{ display: "flex", gap: 8, padding: "12px 16px", flexWrap: "wrap", borderBottom: "1px solid rgba(255,255,255,0.06)" }}>
+                        {Object.entries(catSchemaData.marketplaces || {}).map(([mp, d]: [string, any]) => (
+                          <div key={mp} style={{ background: `${mpC(mp)}10`, border: `1px solid ${mpC(mp)}30`, borderRadius: 8, padding: "6px 12px", fontSize: 11 }}>
+                            <span style={{ color: mpC(mp), fontWeight: 700 }}>{d.total}</span>
+                            <span style={{ color: "rgba(255,255,255,0.35)", marginLeft: 4 }}>{mpL(mp)}</span>
+                          </div>
+                        ))}
+                        {(catSchemaData.common_count || 0) > 0 && (
+                          <div style={{ background: "rgba(99,102,241,0.1)", border: "1px solid rgba(99,102,241,0.3)", borderRadius: 8, padding: "6px 12px", fontSize: 11 }}>
+                            <span style={{ color: "#6366f1", fontWeight: 700 }}>{catSchemaData.common_count}</span>
+                            <span style={{ color: "rgba(255,255,255,0.35)", marginLeft: 4 }}>общих</span>
+                          </div>
+                        )}
+                        {/* Autofill button */}
+                        <button
+                          disabled={Object.values(autofillLoading).some(Boolean)}
+                          onClick={async () => {
+                            const sourceAttrs: Record<string, any> = {};
+                            attributes.forEach((a: any) => { if (a.value) sourceAttrs[a.key] = a.value; });
+                            if (Object.keys(sourceAttrs).length === 0) { alert('Нет заполненных атрибутов для маппинга'); return; }
+                            const mps = Object.entries(catSchemaData.marketplaces || {});
+                            for (const [mp, d] of mps) {
+                              setAutofillLoading(prev => ({ ...prev, [mp]: true }));
+                              try {
+                                const res = await api.post(`/products/${product?.id || 'unknown'}/autofill-mp-attributes`, {
+                                  target_platform: mp,
+                                  target_category_id: (d as any).category_id,
+                                  source_attributes: sourceAttrs,
+                                });
+                                setAutofillResults(prev => ({ ...prev, [mp]: res.data }));
+                              } catch (e) { console.error(e); }
+                              setAutofillLoading(prev => ({ ...prev, [mp]: false }));
+                            }
+                          }}
+                          style={{
+                            background: "rgba(16,185,129,0.15)", border: "1px solid rgba(16,185,129,0.3)",
+                            borderRadius: 8, padding: "6px 14px", fontSize: 11, fontWeight: 600,
+                            color: "#10b981", cursor: "pointer", whiteSpace: "nowrap",
+                            opacity: Object.values(autofillLoading).some(Boolean) ? 0.5 : 1,
+                          }}
+                        >
+                          {Object.values(autofillLoading).some(Boolean) ? 'ИИ заполняет...' : 'ИИ автозаполнение'}
+                        </button>
+                      </div>
+                      {/* Autofill results */}
+                      {Object.keys(autofillResults).length > 0 && catSchemaTab !== 'common' && autofillResults[catSchemaTab] && (
+                        <div style={{ padding: "12px 16px", borderBottom: "1px solid rgba(255,255,255,0.06)", background: "rgba(16,185,129,0.04)" }}>
+                          <div style={{ fontSize: 12, fontWeight: 600, color: "#10b981", marginBottom: 8, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+                            <span>ИИ заполнил {autofillResults[catSchemaTab]?.filled_count || 0} атрибутов для {mpL(catSchemaTab)}</span>
+                            <button onClick={() => {
+                              const filled = autofillResults[catSchemaTab]?.filled || {};
+                              const newAttrs = [...attributes];
+                              for (const [name, value] of Object.entries(filled)) {
+                                const idx = newAttrs.findIndex((a: any) => a.key.toLowerCase() === (name as string).toLowerCase());
+                                if (idx >= 0) {
+                                  newAttrs[idx] = { ...newAttrs[idx], value: value as string };
+                                } else {
+                                  newAttrs.push({ key: name as string, value: value as string, type: 'string' });
+                                }
+                              }
+                              setAttributes(newAttrs);
+                              setAttrSubTab('current');
+                            }} style={{
+                              background: "rgba(16,185,129,0.2)", border: "1px solid rgba(16,185,129,0.4)",
+                              borderRadius: 6, padding: "4px 12px", fontSize: 11, fontWeight: 600,
+                              color: "#10b981", cursor: "pointer",
+                            }}>
+                              Применить к товару
+                            </button>
+                          </div>
+                          <div style={{ display: "flex", flexDirection: "column", gap: 4, maxHeight: 200, overflowY: "auto" }}>
+                            {Object.entries(autofillResults[catSchemaTab]?.filled || {}).map(([k, v]: [string, any]) => (
+                              <div key={k} style={{ display: "flex", gap: 8, fontSize: 11 }}>
+                                <span style={{ color: "rgba(255,255,255,0.5)", minWidth: 180 }}>{k}</span>
+                                <span style={{ color: "rgba(255,255,255,0.85)", fontWeight: 500 }}>{String(v)}</span>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+                      {/* Errors */}
+                      {Object.keys(catSchemaData.errors || {}).length > 0 && (
+                        <div style={{ padding: "8px 16px", borderBottom: "1px solid rgba(255,255,255,0.06)", fontSize: 11, color: "rgba(255,255,255,0.4)" }}>
+                          {Object.entries(catSchemaData.errors).map(([mp, e]: [string, any]) => <div key={mp}><span style={{ color: "#f87171" }}>{mpL(mp)}:</span> {e}</div>)}
+                        </div>
+                      )}
+                      {/* Tabs */}
+                      <div style={{ display: "flex", borderBottom: "1px solid rgba(255,255,255,0.06)", overflowX: "auto" }}>
+                        {tabs.map(t => (
+                          <button key={t.key} onClick={() => { setCatSchemaTab(t.key); setCatSchemaSearch(''); }} style={{
+                            background: "none", border: "none", padding: "10px 16px", cursor: "pointer",
+                            borderBottom: catSchemaTab === t.key ? `2px solid ${t.color}` : "2px solid transparent",
+                            color: catSchemaTab === t.key ? "rgba(255,255,255,0.9)" : "rgba(255,255,255,0.3)",
+                            fontSize: 12, fontWeight: catSchemaTab === t.key ? 600 : 400, whiteSpace: "nowrap",
+                          }}>
+                            <span style={{ display: "inline-block", width: 6, height: 6, borderRadius: "50%", background: t.color, marginRight: 6, opacity: catSchemaTab === t.key ? 1 : 0.4 }} />
+                            {t.label}
+                            <span style={{ marginLeft: 6, background: catSchemaTab === t.key ? `${t.color}22` : "rgba(255,255,255,0.05)", color: catSchemaTab === t.key ? t.color : "rgba(255,255,255,0.25)", padding: "1px 6px", borderRadius: 12, fontSize: 10, fontWeight: 600 }}>{t.count}</span>
+                          </button>
+                        ))}
+                      </div>
+                      {/* Search */}
+                      <div style={{ display: "flex", gap: 8, padding: "8px 16px", borderBottom: "1px solid rgba(255,255,255,0.06)", alignItems: "center" }}>
+                        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="rgba(255,255,255,0.25)" strokeWidth="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+                        <input value={catSchemaSearch} onChange={e => setCatSchemaSearch(e.target.value)} placeholder="Поиск..." style={{ background: "transparent", border: "none", outline: "none", color: "rgba(255,255,255,0.85)", fontSize: 12, flex: 1 }} />
+                        <span style={{ fontSize: 10, color: "rgba(255,255,255,0.2)" }}>{filtered.length} / {attrs.length}</span>
+                      </div>
+                      {/* Table */}
+                      {filtered.length === 0 ? (
+                        <div style={{ textAlign: "center", padding: "32px 0", fontSize: 12, color: "rgba(255,255,255,0.2)" }}>Нет атрибутов</div>
+                      ) : (
+                        <div style={{ maxHeight: 500, overflowY: "auto" }}>
+                          <table className="table-premium" style={{ minWidth: 500, fontSize: 12 }}>
+                            <thead><tr><th style={{ width: 40 }}>#</th><th>ID</th><th>Название</th><th>Тип</th><th>Обяз.</th>{catSchemaTab === 'common' && <th>МП</th>}{catSchemaTab !== 'common' && <th>Словарь</th>}</tr></thead>
+                            <tbody>
+                              {filtered.map((a: any, i: number) => (
+                                <tr key={a.id || i}>
+                                  <td style={{ color: "rgba(255,255,255,0.15)", fontSize: 10 }}>{i+1}</td>
+                                  <td><span style={{ fontFamily: "monospace", fontSize: 10, color: mpC(catSchemaTab === 'common' ? '' : catSchemaTab) }}>{a.id}</span></td>
+                                  <td style={{ color: "rgba(255,255,255,0.85)", fontWeight: 500 }}>{a.name}</td>
+                                  <td><span className="badge badge-neutral" style={{ fontSize: 10 }}>{a.type || '—'}</span></td>
+                                  <td>{a.is_required ? <span className="badge badge-error" style={{ fontSize: 10 }}>Да</span> : <span style={{ color: "rgba(255,255,255,0.15)", fontSize: 10 }}>Нет</span>}</td>
+                                  {catSchemaTab === 'common' && <td><div style={{ display: "flex", gap: 3, flexWrap: "wrap" }}>{Object.keys(a._variants || {}).map((mp: string) => <span key={mp} style={{ background: `${mpC(mp)}18`, color: mpC(mp), padding: "1px 6px", borderRadius: 4, fontSize: 9, fontWeight: 600 }}>{mpL(mp)}</span>)}</div></td>}
+                                  {catSchemaTab !== 'common' && <td>{a.dictionary_options?.length > 0 ? <span style={{ fontSize: 10, color: "rgba(255,255,255,0.35)" }}>{a.dictionary_options.length} знач.</span> : <span style={{ color: "rgba(255,255,255,0.12)", fontSize: 10 }}>—</span>}</td>}
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      )}
+                    </>
+                  );
+                })()}
+              </div>
+            )}
+
+            {/* ── Current attrs sub-tab ── */}
+            {attrSubTab === 'current' && (<>
             <div
               style={{
                 display: "flex",
@@ -1077,6 +1352,29 @@ export default function ProductDetailsPage() {
                 })}
               </div>
             )}
+            {/* Attribute filter */}
+            {attributes.length > 5 && (
+              <div style={{ display: "flex", gap: 10, padding: "10px 24px", borderBottom: "1px solid rgba(255,255,255,0.06)", alignItems: "center" }}>
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="rgba(255,255,255,0.25)" strokeWidth="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+                <input
+                  value={attrFilter}
+                  onChange={e => setAttrFilter(e.target.value)}
+                  placeholder="Фильтр атрибутов..."
+                  style={{ background: "transparent", border: "none", outline: "none", color: "rgba(255,255,255,0.85)", fontSize: 13, flex: 1 }}
+                />
+                {attrFilter && (
+                  <button onClick={() => setAttrFilter('')} style={{ background: "none", border: "none", color: "rgba(255,255,255,0.3)", cursor: "pointer", fontSize: 14, padding: "0 4px" }}>&times;</button>
+                )}
+                <span style={{ fontSize: 11, color: "rgba(255,255,255,0.2)" }}>
+                  {attributes.filter(a => {
+                    if (!attrFilter.trim()) return true;
+                    const q = attrFilter.trim().toLowerCase();
+                    return a.key.toLowerCase().includes(q) || String(a.value || '').toLowerCase().includes(q);
+                  }).length} / {attributes.length}
+                </span>
+              </div>
+            )}
+
             {/* Header row */}
             {!isMpProduct && <div
               style={{
@@ -1124,7 +1422,11 @@ export default function ProductDetailsPage() {
                   // ── MP attrs with errors highlighted + dropdowns ──
                   // key=activePlatform forces remount on platform switch (needed for defaultValue inputs)
                   <React.Fragment key={activePlatform || 'mp'}>
-                  {attributes.map((attr, idx) => {
+                  {attributes.filter(attr => {
+                    if (!attrFilter.trim()) return true;
+                    const q = attrFilter.trim().toLowerCase();
+                    return attr.key.toLowerCase().includes(q) || String(attr.value || '').toLowerCase().includes(q);
+                  }).map((attr, idx) => {
                     const hasError = !!(attr as any).error;
                     const opts: any[] = Array.isArray((attr as any).dictionary_options) ? (attr as any).dictionary_options : [];
                     const isSuggest = (attr as any).isSuggest;
@@ -1282,6 +1584,7 @@ export default function ProductDetailsPage() {
                 </div>
               </>
             )}
+            </>)}
           </div>
         )}
 

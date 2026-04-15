@@ -14,6 +14,8 @@ import {
   Square,
   Loader2,
   RefreshCw,
+  SlidersHorizontal,
+  Filter,
 } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import { api } from '../lib/api';
@@ -32,6 +34,100 @@ interface Product {
   status: string;
   image_url?: string;
 }
+
+// ─── Searchable Select Component ──────────────────────────────────────────────
+function SearchableSelect({ options, value, onChange, placeholder }: {
+  options: { id: string; name: string }[];
+  value: string;
+  onChange: (v: string) => void;
+  placeholder?: string;
+}) {
+  const [open, setOpen] = React.useState(false);
+  const [query, setQuery] = React.useState('');
+  const ref = React.useRef<HTMLDivElement>(null);
+  const inputRef = React.useRef<HTMLInputElement>(null);
+
+  React.useEffect(() => {
+    const handler = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+    };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, []);
+
+  React.useEffect(() => {
+    if (open && inputRef.current) inputRef.current.focus();
+  }, [open]);
+
+  const filtered = options.filter(o =>
+    o.name.toLowerCase().includes(query.toLowerCase())
+  );
+  const selected = options.find(o => o.id === value);
+
+  return (
+    <div ref={ref} style={{ position: 'relative' }}>
+      <div
+        onClick={() => setOpen(!open)}
+        style={{
+          padding: '10px 14px', borderRadius: 10, cursor: 'pointer', fontSize: 13,
+          background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.08)',
+          color: value ? 'rgba(255,255,255,0.85)' : 'rgba(255,255,255,0.35)',
+          display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+        }}
+      >
+        <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+          {selected?.name || placeholder || 'Выберите…'}
+        </span>
+        <span style={{ color: 'rgba(255,255,255,0.3)', fontSize: 10, marginLeft: 8 }}>▼</span>
+      </div>
+      {open && (
+        <div style={{
+          position: 'absolute', top: '100%', left: 0, right: 0, zIndex: 100, marginTop: 4,
+          background: '#12121f', border: '1px solid rgba(99,102,241,0.2)', borderRadius: 12,
+          boxShadow: '0 16px 48px rgba(0,0,0,0.5)', overflow: 'hidden', maxHeight: 320,
+          display: 'flex', flexDirection: 'column',
+        }}>
+          <div style={{ padding: '8px 10px', borderBottom: '1px solid rgba(255,255,255,0.06)' }}>
+            <input
+              ref={inputRef}
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder={placeholder || 'Поиск…'}
+              style={{
+                width: '100%', padding: '8px 10px', boxSizing: 'border-box', fontSize: 13,
+                background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.08)',
+                borderRadius: 8, color: 'rgba(255,255,255,0.85)', outline: 'none',
+              }}
+            />
+          </div>
+          <div style={{ overflowY: 'auto', maxHeight: 260 }}>
+            {filtered.length === 0 ? (
+              <div style={{ padding: '16px 14px', fontSize: 12, color: 'rgba(255,255,255,0.25)', textAlign: 'center' }}>
+                Ничего не найдено
+              </div>
+            ) : filtered.map(o => (
+              <div
+                key={o.id}
+                onClick={() => { onChange(o.id); setOpen(false); setQuery(''); }}
+                style={{
+                  padding: '9px 14px', cursor: 'pointer', fontSize: 13,
+                  color: o.id === value ? '#818cf8' : 'rgba(255,255,255,0.7)',
+                  background: o.id === value ? 'rgba(99,102,241,0.1)' : 'transparent',
+                  borderLeft: o.id === value ? '3px solid #6366f1' : '3px solid transparent',
+                }}
+                onMouseEnter={(e) => (e.currentTarget.style.background = 'rgba(255,255,255,0.05)')}
+                onMouseLeave={(e) => (e.currentTarget.style.background = o.id === value ? 'rgba(99,102,241,0.1)' : 'transparent')}
+              >
+                {o.name}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function getCatName(cat: CategoryVal): string {
   if (!cat) return '';
   if (typeof cat === 'object') return (cat as any).name ?? '';
@@ -470,6 +566,9 @@ export default function ProductsPage() {
   const [pages, setPages] = useState(1);
   const [page, setPage] = useState(1);
   const [search, setSearch] = useState('');
+  const [filterOpen, setFilterOpen] = useState(false);
+  const [filterBrand, setFilterBrand] = useState('');
+  const [filterStatus, setFilterStatus] = useState('');
   const [category, setCategory] = useState('');
   const [loading, setLoading] = useState(true);
   const [selected, setSelected] = useState<Set<string>>(new Set());
@@ -479,6 +578,8 @@ export default function ProductsPage() {
   const [aiLoading, setAiLoading] = useState(false);
   const [bulkDeleteLoading, setBulkDeleteLoading] = useState(false);
   const [source, setSource] = useState<string>('pim');
+  const [storeFilter, setStoreFilter] = useState<string>('');
+  const [availableStores, setAvailableStores] = useState<{id: string; name: string}[]>([]);
   const [syncing, setSyncing] = useState(false);
   const [syncLog, setSyncLog] = useState<string[]>([]);
   const [syncDone, setSyncDone] = useState(0);
@@ -497,7 +598,9 @@ export default function ProductsPage() {
         setTotal(Array.isArray(rawData) ? rawData.length : (rawData.total ?? items.length));
         setPages(Array.isArray(rawData) ? 1 : (rawData.pages ?? 1));
       } else {
-        const res = await api.get(`/mp/products?platform=${src}&page=${p}&limit=50`);
+        const storeParam = storeFilter ? `&store_id=${encodeURIComponent(storeFilter)}` : '';
+        const res = await api.get(`/mp/products?platform=${src}&page=${p}&limit=50${storeParam}`);
+        if (res.data.available_stores) setAvailableStores(res.data.available_stores);
         const items = (res.data.items ?? []).map((it: any) => {
           const attrs = Array.isArray(it.attributes) ? it.attributes : (it.attributes ? Object.keys(it.attributes) : []);
           const filledAttrs = attrs.filter((a: any) => {
@@ -528,7 +631,7 @@ export default function ProductsPage() {
     }
   }, [page, search, category, source, toast]);
 
-  useEffect(() => { fetchProducts(page, search, category, source); }, [page, category, source]);
+  useEffect(() => { fetchProducts(page, search, category, source); }, [page, category, source, storeFilter]);
 
   const handleSyncShadows = async () => {
     setSyncing(true);
@@ -741,7 +844,7 @@ export default function ProductsPage() {
             return (
               <button
                 key={src}
-                onClick={() => { setSource(src); setPage(1); setSelected(new Set()); }}
+                onClick={() => { setSource(src); setStoreFilter(''); setPage(1); setSelected(new Set()); }}
                 style={{
                   padding: '6px 16px', borderRadius: 20, fontSize: 12, fontWeight: 600,
                   cursor: 'pointer', border: `1px solid ${active ? color : 'rgba(255,255,255,0.1)'}`,
@@ -756,6 +859,26 @@ export default function ProductsPage() {
           })}
         </div>
 
+        {/* Store filter for multi-store platforms */}
+        {source !== 'pim' && availableStores.length > 1 && (
+          <div style={{ display: 'flex', gap: 8, marginBottom: 12, alignItems: 'center' }}>
+            <span style={{ fontSize: 11, color: 'rgba(255,255,255,0.3)' }}>Магазин:</span>
+            <select
+              value={storeFilter}
+              onChange={e => { setStoreFilter(e.target.value); setPage(1); }}
+              style={{
+                background: '#0f0f1a', border: '1px solid rgba(255,255,255,0.08)', borderRadius: 8,
+                padding: '5px 10px', color: 'rgba(255,255,255,0.8)', fontSize: 12, cursor: 'pointer', outline: 'none',
+              }}
+            >
+              <option value="">Все магазины</option>
+              {availableStores.map((s: any) => (
+                <option key={s.id} value={s.id}>{s.name}</option>
+              ))}
+            </select>
+          </div>
+        )}
+
 
         {/* Sync progress log */}
         {(syncing || syncLog.length > 0) && (
@@ -763,39 +886,130 @@ export default function ProductsPage() {
             {syncLog.slice(-5).map((l: string, i: number) => <div key={i}>{l}</div>)}
           </div>
         )}
-        {/* Filter bar */}
-        <div style={{ display: 'flex', gap: 12, marginBottom: 20 }}>
-          <div style={{ flex: 1, maxWidth: 360, position: 'relative' }}>
-            <Search
-              size={15}
-              style={{
-                position: 'absolute',
-                left: 12,
-                top: '50%',
-                transform: 'translateY(-50%)',
-                color: 'rgba(255,255,255,0.25)',
-              }}
-            />
+        {/* Search & Filter bar */}
+        <div style={{ display: 'flex', gap: 12, marginBottom: 20, alignItems: 'center' }}>
+          <div style={{ flex: 1, position: 'relative' }}>
+            <Search size={15} style={{ position: 'absolute', left: 14, top: '50%', transform: 'translateY(-50%)', color: 'rgba(255,255,255,0.25)' }} />
             <input
               className="input-premium"
-              style={{ width: '100%', paddingLeft: 36, paddingRight: 12, paddingTop: 10, paddingBottom: 10, boxSizing: 'border-box' }}
-              placeholder="Поиск по названию, SKU…"
+              style={{ width: '100%', paddingLeft: 40, paddingRight: 16, paddingTop: 12, paddingBottom: 12, boxSizing: 'border-box', fontSize: 14, borderRadius: 12 }}
+              placeholder="Поиск по названию, артикулу, бренду, СП-коду…"
               value={search}
               onChange={(e) => setSearch(e.target.value)}
             />
           </div>
-          <select
-            className="input-premium"
-            style={{ padding: '10px 14px', minWidth: 180 }}
-            value={category}
-            onChange={(e) => { setCategory(e.target.value); setPage(1); }}
+          <button
+            onClick={() => setFilterOpen(true)}
+            style={{
+              display: 'flex', alignItems: 'center', gap: 8, padding: '12px 20px', borderRadius: 12,
+              background: (category || filterBrand || filterStatus) ? 'rgba(99,102,241,0.15)' : 'rgba(255,255,255,0.04)',
+              border: `1px solid ${(category || filterBrand || filterStatus) ? 'rgba(99,102,241,0.4)' : 'rgba(255,255,255,0.08)'}`,
+              color: (category || filterBrand || filterStatus) ? '#818cf8' : 'rgba(255,255,255,0.5)',
+              cursor: 'pointer', fontSize: 13, fontWeight: 600, whiteSpace: 'nowrap',
+            }}
           >
-            <option value="">Все категории</option>
-            {categories.map((c) => (
-              <option key={c.id} value={c.id}>{c.name}</option>
-            ))}
-          </select>
+            <SlidersHorizontal size={15} />
+            Фильтры
+            {(category || filterBrand || filterStatus) && (
+              <span style={{ background: '#6366f1', color: '#fff', borderRadius: 99, width: 18, height: 18, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 10, fontWeight: 700 }}>
+                {[category, filterBrand, filterStatus].filter(Boolean).length}
+              </span>
+            )}
+          </button>
         </div>
+
+        {/* Slide-out filter panel */}
+        {filterOpen && (
+          <div style={{ position: 'fixed', inset: 0, zIndex: 9999 }}>
+            <div onClick={() => setFilterOpen(false)} style={{ position: 'absolute', inset: 0, background: 'rgba(0,0,0,0.5)', backdropFilter: 'blur(4px)' }} />
+            <div style={{
+              position: 'absolute', top: 0, right: 0, bottom: 0, width: 380, maxWidth: '90vw',
+              background: '#0a0a14', borderLeft: '1px solid rgba(99,102,241,0.15)',
+              boxShadow: '-20px 0 60px rgba(0,0,0,0.5)', padding: '28px 24px', overflowY: 'auto',
+              animation: 'slideInRight 0.25s ease',
+            }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 28 }}>
+                <h3 style={{ margin: 0, fontSize: 18, fontWeight: 700, color: '#fff', display: 'flex', alignItems: 'center', gap: 10 }}>
+                  <Filter size={18} color="#818cf8" /> Фильтры
+                </h3>
+                <button onClick={() => setFilterOpen(false)} style={{ background: 'none', border: 'none', color: 'rgba(255,255,255,0.4)', cursor: 'pointer', padding: 4 }}>
+                  <X size={20} />
+                </button>
+              </div>
+
+              {/* Search */}
+              <div style={{ marginBottom: 20 }}>
+                <label style={{ fontSize: 11, fontWeight: 700, color: 'rgba(255,255,255,0.35)', textTransform: 'uppercase', letterSpacing: '0.08em', display: 'block', marginBottom: 8 }}>Поиск</label>
+                <div style={{ position: 'relative' }}>
+                  <Search size={14} style={{ position: 'absolute', left: 12, top: '50%', transform: 'translateY(-50%)', color: 'rgba(255,255,255,0.2)' }} />
+                  <input
+                    className="input-premium"
+                    style={{ width: '100%', paddingLeft: 36, padding: '10px 12px 10px 36px', boxSizing: 'border-box', fontSize: 13, borderRadius: 10 }}
+                    placeholder="Название, артикул, бренд, СП-код…"
+                    value={search}
+                    onChange={(e) => setSearch(e.target.value)}
+                    autoFocus
+                  />
+                </div>
+              </div>
+
+              {/* Category — searchable */}
+              <div style={{ marginBottom: 20 }}>
+                <label style={{ fontSize: 11, fontWeight: 700, color: 'rgba(255,255,255,0.35)', textTransform: 'uppercase', letterSpacing: '0.08em', display: 'block', marginBottom: 8 }}>Категория</label>
+                <SearchableSelect
+                  options={[{ id: '', name: 'Все категории' }, ...categories]}
+                  value={category}
+                  onChange={(v) => { setCategory(v); setPage(1); }}
+                  placeholder="Поиск категории…"
+                />
+              </div>
+
+              {/* Brand filter */}
+              <div style={{ marginBottom: 20 }}>
+                <label style={{ fontSize: 11, fontWeight: 700, color: 'rgba(255,255,255,0.35)', textTransform: 'uppercase', letterSpacing: '0.08em', display: 'block', marginBottom: 8 }}>Бренд</label>
+                <input
+                  className="input-premium"
+                  style={{ width: '100%', padding: '10px 14px', boxSizing: 'border-box', fontSize: 13, borderRadius: 10 }}
+                  placeholder="Введите бренд…"
+                  value={filterBrand}
+                  onChange={(e) => setFilterBrand(e.target.value)}
+                />
+              </div>
+
+              {/* Status filter */}
+              <div style={{ marginBottom: 28 }}>
+                <label style={{ fontSize: 11, fontWeight: 700, color: 'rgba(255,255,255,0.35)', textTransform: 'uppercase', letterSpacing: '0.08em', display: 'block', marginBottom: 8 }}>Статус</label>
+                <select
+                  className="input-premium"
+                  style={{ width: '100%', padding: '10px 14px', boxSizing: 'border-box', fontSize: 13, borderRadius: 10 }}
+                  value={filterStatus}
+                  onChange={(e) => setFilterStatus(e.target.value)}
+                >
+                  <option value="">Все статусы</option>
+                  <option value="active">Активные</option>
+                  <option value="draft">Черновики</option>
+                  <option value="archived">Архив</option>
+                </select>
+              </div>
+
+              {/* Action buttons */}
+              <div style={{ display: 'flex', gap: 10 }}>
+                <button
+                  onClick={() => { setSearch(''); setCategory(''); setFilterBrand(''); setFilterStatus(''); setPage(1); }}
+                  style={{ flex: 1, padding: '11px 16px', borderRadius: 10, border: '1px solid rgba(255,255,255,0.1)', background: 'transparent', color: 'rgba(255,255,255,0.5)', cursor: 'pointer', fontSize: 13, fontWeight: 600 }}
+                >
+                  Сбросить
+                </button>
+                <button
+                  onClick={() => { setFilterOpen(false); setPage(1); fetchProducts(1, search, category, source); }}
+                  style={{ flex: 1, padding: '11px 16px', borderRadius: 10, border: 'none', background: 'linear-gradient(135deg, #6366f1, #7c3aed)', color: '#fff', cursor: 'pointer', fontSize: 13, fontWeight: 700 }}
+                >
+                  Применить
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
 
         {/* Bulk actions bar */}
         {selected.size > 0 && (
