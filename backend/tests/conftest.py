@@ -28,8 +28,20 @@ def _server_available() -> bool:
 
 SERVER_AVAILABLE = _server_available()
 
+# Integration test files — not collected when server is unavailable
+# (prevents ImportError from missing deps like 'requests' that only integration tests use)
+_INTEGRATION_FILES = {"test_api.py", "test_api_full.py", "test_smoke_backend.py", "test_agent_ai.py"}
+
 # Fixtures that require a live server — tests using any of these are integration tests
 _INTEGRATION_FIXTURES = {"auth_token", "headers", "client"}
+
+
+def pytest_ignore_collect(collection_path, config):
+    """Skip collection of integration test files when server is not running.
+    This prevents ImportError from deps used only in integration tests (e.g. 'requests').
+    """
+    if not SERVER_AVAILABLE and collection_path.name in _INTEGRATION_FILES:
+        return True
 
 
 def pytest_runtest_setup(item):
