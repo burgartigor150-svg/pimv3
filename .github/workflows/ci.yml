@@ -26,10 +26,10 @@ jobs:
       - name: Lint (ruff)
         run: pip install ruff && ruff check backend/ --ignore E501,E402 || true
 
-      - name: Test
+      - name: Test (unit only — integration tests auto-skipped without live server)
         env:
           PYTHONPATH: ${{ github.workspace }}
-        run: python -m pytest backend/tests/ -q
+        run: python -m pytest backend/tests/ -q --tb=short -v
 
   frontend:
     name: Frontend — build

@@ -1,7 +1,11 @@
 """
 Shared fixtures for PIMv3 API tests.
 All tests run against the live server at localhost:4877.
+Integration tests (those using client/headers/auth_token fixtures) are
+automatically skipped when the server is not reachable — this allows
+the CI pipeline to run unit tests without a live server.
 """
+import socket
 import pytest
 import httpx
 
@@ -12,6 +16,26 @@ ADMIN_PASSWORD = "admin"
 
 # Module-level token cache to avoid repeated logins
 _cached_token = None
+
+# Check server availability once at collection time
+def _server_available() -> bool:
+    try:
+        s = socket.create_connection(("localhost", 4877), timeout=2)
+        s.close()
+        return True
+    except (ConnectionRefusedError, OSError):
+        return False
+
+SERVER_AVAILABLE = _server_available()
+
+# Fixtures that require a live server — tests using any of these are integration tests
+_INTEGRATION_FIXTURES = {"auth_token", "headers", "client"}
+
+
+def pytest_runtest_setup(item):
+    """Skip integration tests automatically when server is not running."""
+    if not SERVER_AVAILABLE and _INTEGRATION_FIXTURES & set(item.fixturenames):
+        pytest.skip("PimV3 server not reachable at localhost:4877 — skipping integration test")
 
 
 async def _get_token():
