@@ -26,3 +26,5 @@ backend/data/vector_memory/
 frontend/*.tsbuildinfo
 backend/data/attribute_star_map/
 backend/runtime/
+frontend/test-results/
+backend/services/media_cache/
